@@ -176,7 +176,9 @@ Exactly as the brief, plus one addition: session options `@agentctl_managed=1`, 
 `@agentctl_roles`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
 Stamping order is **fixed and asserted**, because the fake `Runner` records calls in sequence and a reordering would
-otherwise pass silently:
+otherwise pass silently. It orders the **option-setting calls**, not creation: `new-session` creates the session *and*
+its first window together, so the first window necessarily exists before any option can be set. "Session options first"
+means before any *window option*, never before any window.
 
 1. session `@agentctl_managed`
 2. session `@agentctl_version`
