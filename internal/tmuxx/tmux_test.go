@@ -72,36 +72,36 @@ func TestListSessionsPropagatesRunnerError(t *testing.T) {
 func TestNewSessionUsesCanonicalArgvAndParsesCreatedIDs(t *testing.T) {
 	t.Parallel()
 
-	runner := NewFakeRunner(Response{Stdout: []byte("$4\t@7\t%9\n")})
+	runner := NewFakeRunner(Response{Stdout: []byte("$4\t@7\t%9\t4321\n")})
 	got, err := New(runner).NewSession(context.Background(), "epic123", "planner", "/repo path", "exec amq coop exec")
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
-	want := CreatedSession{SessionID: "$4", WindowID: "@7", PaneID: "%9"}
+	want := CreatedSession{SessionID: "$4", WindowID: "@7", PaneID: "%9", PanePID: 4321}
 	if got != want {
 		t.Fatalf("NewSession() = %#v, want %#v", got, want)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"new-session", "-d", "-s", "epic123", "-n", "planner", "-c", "/repo path",
-		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}", "--", "exec amq coop exec",
+		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec amq coop exec",
 	}})
 }
 
 func TestNewWindowUsesResolvedSessionIDAndParsesCreatedIDs(t *testing.T) {
 	t.Parallel()
 
-	runner := NewFakeRunner(Response{Stdout: []byte("@8\t%10\n")})
+	runner := NewFakeRunner(Response{Stdout: []byte("@8\t%10\t5432\n")})
 	got, err := New(runner).NewWindow(context.Background(), "$4", "codex1", "/repo", "exec amq coop exec --session epic123")
 	if err != nil {
 		t.Fatalf("NewWindow() error = %v", err)
 	}
-	want := CreatedWindow{WindowID: "@8", PaneID: "%10"}
+	want := CreatedWindow{WindowID: "@8", PaneID: "%10", PanePID: 5432}
 	if got != want {
 		t.Fatalf("NewWindow() = %#v, want %#v", got, want)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"new-window", "-d", "-t", "$4", "-n", "codex1", "-c", "/repo",
-		"-P", "-F", "#{window_id}\t#{pane_id}", "--", "exec amq coop exec --session epic123",
+		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec amq coop exec --session epic123",
 	}})
 }
 
@@ -114,18 +114,24 @@ func TestCreationRejectsMalformedOutput(t *testing.T) {
 		stdout     string
 	}{
 		{name: "session empty", newSession: true},
-		{name: "session two records", newSession: true, stdout: "$1\t@2\t%3\n$4\t@5\t%6\n"},
-		{name: "session too few fields", newSession: true, stdout: "$1\t@2\n"},
-		{name: "session too many fields", newSession: true, stdout: "$1\t@2\t%3\textra\n"},
-		{name: "session wrong session prefix", newSession: true, stdout: "@1\t@2\t%3\n"},
-		{name: "session wrong window prefix", newSession: true, stdout: "$1\t$2\t%3\n"},
-		{name: "session wrong pane prefix", newSession: true, stdout: "$1\t@2\t@3\n"},
+		{name: "session two records", newSession: true, stdout: "$1\t@2\t%3\t10\n$4\t@5\t%6\t11\n"},
+		{name: "session missing pane pid", newSession: true, stdout: "$1\t@2\t%3\n"},
+		{name: "session too many fields", newSession: true, stdout: "$1\t@2\t%3\t10\textra\n"},
+		{name: "session wrong session prefix", newSession: true, stdout: "@1\t@2\t%3\t10\n"},
+		{name: "session wrong window prefix", newSession: true, stdout: "$1\t$2\t%3\t10\n"},
+		{name: "session wrong pane prefix", newSession: true, stdout: "$1\t@2\t@3\t10\n"},
+		{name: "session nonnumeric pane pid", newSession: true, stdout: "$1\t@2\t%3\tpid\n"},
+		{name: "session signed pane pid", newSession: true, stdout: "$1\t@2\t%3\t+10\n"},
+		{name: "session zero pane pid", newSession: true, stdout: "$1\t@2\t%3\t0\n"},
 		{name: "window empty"},
-		{name: "window two records", stdout: "@2\t%3\n@5\t%6\n"},
-		{name: "window too few fields", stdout: "@2\n"},
-		{name: "window too many fields", stdout: "@2\t%3\textra\n"},
-		{name: "window empty id", stdout: "\t%3\n"},
-		{name: "window wrong pane prefix", stdout: "@2\t@3\n"},
+		{name: "window two records", stdout: "@2\t%3\t10\n@5\t%6\t11\n"},
+		{name: "window missing pane pid", stdout: "@2\t%3\n"},
+		{name: "window too many fields", stdout: "@2\t%3\t10\textra\n"},
+		{name: "window empty id", stdout: "\t%3\t10\n"},
+		{name: "window wrong pane prefix", stdout: "@2\t@3\t10\n"},
+		{name: "window nonnumeric pane pid", stdout: "@2\t%3\tpid\n"},
+		{name: "window signed pane pid", stdout: "@2\t%3\t+10\n"},
+		{name: "window zero pane pid", stdout: "@2\t%3\t0\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
