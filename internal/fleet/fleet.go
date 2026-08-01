@@ -3,11 +3,13 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/harness"
@@ -38,11 +40,44 @@ func (e *SessionExistsError) Error() string {
 	return fmt.Sprintf("session %q already exists", e.Name)
 }
 
+// CreationError reports malformed successful new-session output. It is a
+// pre-ownership error because no typed session ID was obtained.
+type CreationError struct {
+	Session string
+	Cause   error
+}
+
+func (e *CreationError) Error() string {
+	return fmt.Sprintf("%v; a session named %s may exist; inspect with tmux ls", e.Cause, e.Session)
+}
+
+func (e *CreationError) Unwrap() error { return e.Cause }
+
+// LaunchError reports a post-ownership launch failure and its one cleanup
+// attempt. Its cause is the failure that stopped the launch.
+type LaunchError struct {
+	Role       string
+	Session    string
+	Cause      error
+	CleanupErr error
+}
+
+func (e *LaunchError) Error() string {
+	if e.CleanupErr != nil {
+		return fmt.Sprintf("failed to launch %s; failed to remove incomplete session %s: %v", e.Role, e.Session, e.CleanupErr)
+	}
+	return fmt.Sprintf("failed to launch %s; removed incomplete session %s", e.Role, e.Session)
+}
+
+func (e *LaunchError) Unwrap() error { return e.Cause }
+
 // Dependencies supplies launch seams. Nil functions use production defaults.
 type Dependencies struct {
 	LookPath preflight.LookPathFunc
 	Getwd    func() (string, error)
 	Stat     func(string) (fs.FileInfo, error)
+	Now      func() time.Time
+	Sleep    func(time.Duration)
 }
 
 // Launcher coordinates preflight and tmux fleet creation.
@@ -51,7 +86,14 @@ type Launcher struct {
 	lookPath preflight.LookPathFunc
 	getwd    func() (string, error)
 	stat     func(string) (fs.FileInfo, error)
+	now      func() time.Time
+	sleep    func(time.Duration)
 }
+
+const (
+	processPollTimeout  = 5 * time.Second
+	processPollInterval = 100 * time.Millisecond
+)
 
 // New constructs a launcher with production defaults for omitted dependencies.
 func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
@@ -64,11 +106,19 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 	if dependencies.Stat == nil {
 		dependencies.Stat = os.Stat
 	}
+	if dependencies.Now == nil {
+		dependencies.Now = time.Now
+	}
+	if dependencies.Sleep == nil {
+		dependencies.Sleep = time.Sleep
+	}
 	return Launcher{
 		tmux:     tmuxx.New(runner),
 		lookPath: dependencies.LookPath,
 		getwd:    dependencies.Getwd,
 		stat:     dependencies.Stat,
+		now:      dependencies.Now,
+		sleep:    dependencies.Sleep,
 	}
 }
 
@@ -97,22 +147,25 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	first := fleet.Roles[0]
 	createdSession, err := l.newSession(ctx, session, first, directory)
 	if err != nil {
+		if errors.Is(err, tmuxx.ErrCreationOutput) {
+			return &CreationError{Session: session, Cause: err}
+		}
 		return err
 	}
 	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles); err != nil {
-		return err
+		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
-		return err
+		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 
 	for _, role := range fleet.Roles[1:] {
 		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directory)
 		if err != nil {
-			return err
+			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 		if err := l.stampWindow(ctx, createdWindow.WindowID, createdWindow.PanePID, role); err != nil {
-			return err
+			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 	}
 	return nil
@@ -167,11 +220,37 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 			return err
 		}
 	}
-	process, err := l.tmux.ProcessName(ctx, panePID)
+	process, err := l.processBaseline(ctx, panePID)
 	if err != nil {
 		return err
 	}
 	return l.tmux.SetWindowOption(ctx, windowID, "@agentctl_process", process)
+}
+
+func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, error) {
+	deadline := l.now().Add(processPollTimeout)
+	for {
+		process, err := l.tmux.ProcessName(ctx, panePID)
+		if err == nil && process != "amq" {
+			return process, nil
+		}
+		if err != nil && !errors.Is(err, tmuxx.ErrProcessUnavailable) {
+			return "", err
+		}
+		if !l.now().Before(deadline) {
+			return "", fmt.Errorf("process identity did not become available within %s", processPollTimeout)
+		}
+		l.sleep(processPollInterval)
+	}
+}
+
+func (l Launcher) rollback(ctx context.Context, sessionID tmuxx.SessionID, session, role string, cause error) error {
+	return &LaunchError{
+		Role:       role,
+		Session:    session,
+		Cause:      cause,
+		CleanupErr: l.tmux.KillSession(ctx, sessionID),
+	}
 }
 
 func (l Launcher) resolveDirectory(directory string) (string, error) {
