@@ -18,7 +18,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "== tmux version =="
-tmux -V
+tmux_cmd -V
 
 echo
 echo "== 1. new-session with -- before shell-command =="
