@@ -82,7 +82,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/config` | `--roles`/`--models` parsing and all validation rules (§7) |
 | `internal/harness` | Harness registry (claude, codex): model-argument rendering, input-clear sequence. (Process identity is *not* harness data — it is the launch-time observed baseline, §8.) |
 | `internal/shellq` | POSIX single-quote escaping; tiny, table- and fuzz-tested |
-| `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers: `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListPanes`, `SendKeys`, `KillSession`, `DisplayMessage` |
+| `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers, one per §13.2 operation: `ListSessions`, `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListWindows`, `ListPanes`, `SendKeys`, `KillSession`, `DisplayMessage`, `AttachSession` |
 | `internal/fleet` | Launcher, rollback handler, metadata writer |
 | `internal/session` | Session resolver (precedence chain; explicit failure when unresolvable) |
 | `internal/target` | Managed-metadata reader; 8-step target validation chain |
@@ -100,7 +100,7 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 2. Preflight: `tmux`, `amq`, and each *requested* harness resolve on `PATH` → else exit 7.
 3. Fail if target session already exists (exact match) → exit 3.
 4. Resolve cwd: `--dir` if given (must exist), else invocation cwd; pass via `-c` on every window.
-5. First role: `tmux new-session -d -s S -n ROLE -c DIR CMD`; remaining roles: `tmux new-window -d -t S -n ROLE -c DIR CMD`, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled by `shellq`.
+5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata (§6.5), then capture the process baseline — poll `ps -o comm= -p <pane_pid>` (bounded, ~5s) until the value is no longer `amq` (the `exec` chain has completed), and store it as `@agentctl_process`. Timeout means the role failed to launch.
 7. Any failure after session creation — including baseline-capture timeout: stop, `kill-session` **only if this invocation created it**, report the failed role on stderr, exit 8.
 
@@ -110,16 +110,16 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 2. Resolve window by exact name = ROLE; confirm window-managed, stored role matches, exactly one pane, pane alive.
 3. Process-identity check against the recorded baseline (§8); fail closed → exit 5.
 4. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5 (`refusing to clear own pane`).
-5. Deliver to the resolved pane ID: `send-keys C-u`, `send-keys -l -- '/PAYLOAD'`, brief fixed delay, `send-keys Enter`.
+5. Deliver to the resolved pane ID (§13.2 row 10): `send-keys C-u`, `send-keys -l -- '/PAYLOAD'`, brief fixed delay, `send-keys Enter`.
 6. Success means tmux accepted the keystrokes — reported as delivery, never as execution.
 
 ### 6.3 status
 
-Collector uses only `show-options`, `list-windows -F`, `list-panes -F`. States: `running`, `dead`, `missing`, `unexpected-process`, `unmanaged`. Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`, not `dead` — documented in `--help` and README. JSON output uses the versioned schema from the brief (`"schema": 1`). Human output is the brief's table.
+Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 rows 6–9). States: `running`, `dead`, `missing`, `unexpected-process`, `unmanaged`. Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`, not `dead` — documented in `--help` and README. JSON output uses the versioned schema from the brief (`"schema": 1`). Human output is the brief's table.
 
 ### 6.4 attach / kill
 
-`attach`: refuse when the session is missing or unmanaged; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `tmux -CC attach-session -t '=SESSION'`; never create sessions. `kill`: same managed-session gate, then `tmux kill-session -t '=SESSION'`.
+`attach`: refuse when the session is missing or unmanaged; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `attach-session` in control mode (§13.2 row 13); never create sessions. `kill`: same managed-session gate, then `kill-session` (§13.2 row 11). Both address the resolved session ID.
 
 ### 6.5 Metadata
 
@@ -171,14 +171,115 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
 
 1. **Window-command assembly site.** Exactly one place assembles the window command: `internal/fleet`, as the string `"exec " + shellq.Join(harness.AgentArgv(...))`. `harness` returns argv (starting at `amq`); `shellq` quotes and joins; `fleet` prepends the unquoted `exec` shell keyword and passes the string to `tmuxx`. No other package may compose shell-interpreted strings.
 2. **`shellq.Quote` is total.** Safe for arbitrary bytes with no validated-input precondition (defense in depth, independent of `internal/config`). Sole documented exclusion: NUL, which cannot exist in an argv element; the fuzz round-trip property skips inputs containing `\x00`.
-3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation; the table will be added to this spec before Wave 2 GO (drafted by reviewer, ratified by planner) and any change to it is a spec change.
-4. **Exact targeting everywhere.** Session targets always use the `=` exact-match prefix. Windows and panes are never resolved by passing names to `-t` matching: resolve via `list-windows`/`list-panes` output with exact string comparison in Go, then address by window ID / pane ID. This is a security invariant; reviews fail PRs on it.
+3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
+4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
 5. **Exit code for bad ROLE argument.** A ROLE failing `^[a-z0-9][a-z0-9_-]*$` is a usage error → exit 2. A well-formed ROLE with no matching managed window → exit 4.
 6. **Version gate.** The managed-session gate for control/status/kill requires `@agentctl_managed=1` **and** `@agentctl_version=1`. Any other version fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to control.
 7. **Defaulted model rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`.
 8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
 9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
 
-## 13. Out of scope
+## 13. Canonical tmux argv table
+
+`internal/tmuxx` owns exactly the argv shapes below and exposes nothing else. Every element listed is a separate argv
+element passed to `os/exec`; agentctl never invokes a shell (§5). Unit tests assert these element by element against the
+fake `Runner`. Any change here is a spec change.
+
+Verified against **tmux 3.7b** on 2026-08-01 on this machine, using throwaway servers (`tmux -L agentctl-rev-*`) and
+stub commands — never the user's server, never real agents.
+
+### 13.1 Targeting model
+
+Observed tmux 3.7b behaviour:
+
+| Probe | Result |
+|---|---|
+| `has-session -t betab`, only session `betabeta` present | exit 0 — **prefix matched** |
+| `has-session -t '=betab'` | exit 1 — `=` is exact |
+| `list-panes -t 'alpha:rev'`, only window `reviewer` present | resolved to `reviewer` — **prefix matched** |
+| `list-panes -t 'alpha:=rev'` | `can't find window: rev` |
+| `set-option -t '=alpha' @k v` | **`no such session: =alpha`** — the `=` prefix is *not* honoured |
+| `set-option -t alph @k v`, only session `alpha` present | **exit 0 — prefix matched** |
+| `set-option -t '$0' …` / `show-options -qv -t '$0' …` | exact; a decoy `alphabet` session was unaffected |
+| two windows both named `dup` | permitted by tmux; `-t alpha:dup` then fails to resolve |
+
+`set-option` and `show-options` — the two operations that write and read the managed-metadata gate — therefore cannot
+express exact matching by session name at all: `=` is an error and a bare name prefix-matches. The `=`-prefix rule of
+§12.4 is unimplementable on precisely the security-critical path it was written to protect.
+
+**Rule.** All targeting is by tmux ID:
+
+1. **Resolve once, by listing.** Compare names byte-for-byte in Go against `list-sessions` / `list-windows` output.
+   IDs are `$N` (session), `@N` (window), `%N` (pane).
+2. **Address by ID thereafter.** No session, window, or role name is ever passed to `-t` after resolution.
+3. **Exactly one match is required.** Zero → not found. **More than one → fail closed**; tmux permits duplicate window
+   names, so a role matching two windows is an error, never "take the first".
+4. The `=` prefix is not used anywhere. ID targeting is strictly stronger and — unlike `=` — is uniformly accepted by
+   every operation in §13.2, including `set-option`/`show-options` and `attach-session` (all verified).
+
+### 13.2 Operations
+
+`⟨sid⟩`, `⟨wid⟩`, `⟨pid⟩` are resolved IDs; `⟨TAB⟩` is a literal 0x09 byte. Each row is the complete argv after `tmux`.
+
+| # | Operation | argv |
+|---|---|---|
+| 1 | Resolve session | `list-sessions -F #{session_id}⟨TAB⟩#{session_name}` |
+| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id} -- CMD` |
+| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id} -- CMD` |
+| 4 | Set session option | `set-option -t ⟨sid⟩ NAME VALUE` |
+| 5 | Set window option | `set-option -w -t ⟨wid⟩ NAME VALUE` |
+| 6 | Read session option | `show-options -qv -t ⟨sid⟩ NAME` |
+| 7 | Read window option | `show-options -wqv -t ⟨wid⟩ NAME` |
+| 8 | List windows + metadata | `list-windows -t ⟨sid⟩ -F <§13.3 format>` |
+| 9 | List panes | `list-panes -t ⟨wid⟩ -F #{pane_id}⟨TAB⟩#{pane_pid}⟨TAB⟩#{pane_dead}⟨TAB⟩#{window_panes}` |
+| 10 | Deliver payload (three calls) | `send-keys -t ⟨pid⟩ C-u` · `send-keys -t ⟨pid⟩ -l -- /PAYLOAD` · `send-keys -t ⟨pid⟩ Enter` |
+| 11 | Kill session | `kill-session -t ⟨sid⟩` |
+| 12 | Current session name | `display-message -p -t $TMUX_PANE #{session_name}` |
+| 13 | Attach | `-CC attach-session -t ⟨sid⟩` |
+
+Notes:
+
+- **Rows 2–3, `--`.** Verified that tmux accepts `--` before the shell-command on both. `CMD` is the §12.1 string and
+  always begins with `exec `, so it can never be read as a flag; `--` is belt-and-braces and costs nothing.
+- **Rows 2–3, `-P -F`.** `-P` prints the requested IDs on stdout at creation. This removes a resolve round-trip and the
+  race between creating a window and looking it up by name — the launcher never has to name-match its own windows.
+- **Row 10.** Payload and `Enter` stay separate events, with the §3.3 fixed delay between them; `-l` is literal mode and
+  `--` guards the leading `/`. Verified end to end: a pane running `cat` received exactly `/clear`.
+- **Row 12.** Only used by the session resolver's inside-tmux fallback, and only to obtain a *name*, which is then fed
+  through row 1. `-t $TMUX_PANE` is required: `display-message -p` with no target returned empty against a detached
+  server, and "the current client" is ambiguous when several clients are attached.
+- **Row 13.** `-CC` is a tmux **global** option and precedes the command. The brief's `-t '=epic123'` is its informal
+  equivalent; the resolved session ID is exact and verified to work here too.
+- `has-session` is deliberately absent. Existence is decided by row 1 plus an exact compare, so no second, weaker
+  existence path exists.
+
+### 13.3 Format-string and option-read rules
+
+- **Window collection format** (row 8), fields in this order:
+  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_managed}⟨TAB⟩#{@agentctl_version}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_process}`
+  Parse with `strings.SplitN(line, "\t", 8)`.
+- **Unconstrained values go last.** Every field except `@agentctl_process` is charset-validated. `@agentctl_process`
+  comes from `ps -o comm=` and may contain spaces (a value `weird name` was verified to round-trip intact), so it is
+  placed last and absorbs any residue — a delimiter inside it cannot shift another field.
+- **Reads always use `-v`.** Verified: `show-options -w` *without* `-v` quotes values containing spaces
+  (`@agentctl_spacey "two words"`), which would require an unquoting routine and create a second quoting site,
+  violating §5. With `-v` the raw value is printed verbatim.
+- **`-q` is required on reads.** Without it, an unset option is `invalid option: NAME` on stderr with exit 1; with it,
+  the result is empty output and exit 0.
+- **Unset and set-to-empty are indistinguishable** (both empty, exit 0). This is acceptable and deliberate: the gate
+  options `@agentctl_managed`, `@agentctl_version` and `@agentctl_process` are never legitimately empty, so empty means
+  fail closed. `@agentctl_model` is legitimately empty (§12.7) and gates nothing.
+- `#{@name}` user-option interpolation in `-F` is verified working on tmux 3.7b; unset options render empty without error.
+
+### 13.4 Consequences for tests
+
+- **Never assert `pane_current_path` against `-c DIR`.** `-c /tmp` produced `pane_current_path=/private/tmp` (symlink
+  resolution). Tests assert the `-c` **argv element**; the integration suite may assert the resolved path only after
+  applying the same resolution.
+- **No `remain-on-exit`, verified.** A window whose command exited disappeared entirely from `list-windows`, confirming
+  §6.3: an exited agent normally reports `missing`, not `dead`.
+- Ambiguity is a first-class test case: two windows sharing a role name must fail closed, not resolve.
+
+## 14. Out of scope
 
 Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
