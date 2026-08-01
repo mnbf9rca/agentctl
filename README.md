@@ -112,6 +112,18 @@ agentctl kill --session epic123
 
 ## Command reference
 
+### `version`
+
+```text
+agentctl version
+agentctl --version
+```
+
+Prints one line in the form `agentctl IDENTITY` and exits without contacting tmux. Project builds made with `make
+build` use the exact `git describe --tags --always --dirty` identity stamped by the Makefile. A binary built directly
+with Go instead reports its recorded VCS revision, followed by `+dirty` when Go recorded a modified checkout, or
+`development` when the binary carries no build identity. The `--version` alias is accepted only as the sole argument.
+
 ### `launch`
 
 ```text
