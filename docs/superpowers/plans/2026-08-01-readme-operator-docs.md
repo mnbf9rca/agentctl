@@ -71,18 +71,18 @@ git commit -m "docs: add agentctl operator README"
 - Consumes: merged issue #14 implementation and its exact root/subcommand help
 - Produces: verified iTerm2 setup and attachment instructions completing issue #15
 
-- [ ] **Step 1: Rebase on the merged issue #14 result**
+- [x] **Step 1: Rebase on the merged issue #14 result**
 
 Update the branch only after issue #14 is merged.
 
-- [ ] **Step 2: Observe the shipped attachment interface**
+- [x] **Step 2: Observe the shipped attachment interface**
 
 Run the merged binary's root and attachment help and inspect its operator-visible errors and tests.
 
-- [ ] **Step 3: Add the attachment section**
+- [x] **Step 3: Add the attachment section**
 
 Document only the observed CLI behavior and the exact iTerm2 setting required by issue #15.
 
-- [ ] **Step 4: Re-run README and repository verification**
+- [x] **Step 4: Re-run README and repository verification**
 
 Run the complete test suite, build, all documented help commands, and copy-paste checks before opening the PR.

@@ -25,6 +25,7 @@ To build agentctl, install Go and Make. To operate a fleet, install tmux, AMQ, a
 - `amq`
 - Claude Code for `claude` roles
 - Codex CLI for `codex` roles
+- iTerm2 when using `agentctl attach`
 
 Harness and tmux behavior can change between releases. The dated versions actually exercised by the project are kept
 in the [release verification checklist](docs/release-checklist.md); they are evidence, not compatibility pins.
@@ -71,6 +72,25 @@ agentctl status --session epic123
 agentctl status --session epic123 --json
 ```
 
+To open the eight role windows as native tabs, first enable this exact setting:
+
+```text
+iTerm2 Settings
+→ General
+→ tmux
+→ When attaching, restore windows as tabs in the attaching window
+```
+
+Then run the operator command from iTerm2, outside tmux:
+
+```bash
+agentctl attach --session epic123
+```
+
+The attaching window opens the `planner`, `codex1`–`codex4`, `reviewer-opus`, `reviewer-codex`, and `designer` tmux
+windows as native iTerm2 tabs. Detaching or closing iTerm2 does not terminate the agents; run the same command again to
+reopen them.
+
 > **Before sending a control:** do not run `clear` or `compact` while the fleet is saturating the host. Delivery is
 > keystroke-based and is not transactional: success means tmux accepted the keys, not that the agent TUI executed the
 > command. The retained one-second settle delay has the best evidence behind it, but it is not a proven floor under
@@ -101,6 +121,28 @@ agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,
 Creates a new managed tmux session. `--session` and `--roles` are required. Supported harnesses are `claude` and
 `codex`. `--models` is optional and may name only roles present in `--roles`. `--dir` overrides the invocation working
 directory and must name an existing directory. Launch fails rather than adopting an existing session.
+
+### `attach`
+
+```text
+agentctl attach [--session SESSION]
+```
+
+Starts tmux control-mode attachment for the resolved managed session. Run it from iTerm2 (`TERM_PROGRAM=iTerm.app`)
+and outside tmux. It validates the current agentctl management and version markers, attaches by the resolved session
+ID, and never creates a session. This is a human operator command, not a planner operation.
+
+An ownership-gate refusal gives the direct-tmux escape hatch. For session `epic123`, the exact forms are:
+
+```text
+agentctl: refusing to attach; session "epic123" is not managed by agentctl; to attach anyway, run: tmux -CC attach-session -t '=epic123'
+agentctl: refusing to attach; managed session carries no @agentctl_version marker; to attach anyway, run: tmux -CC attach-session -t '=epic123'
+agentctl: refusing to attach; session "epic123" has @agentctl_version="2"; expected "1"; to attach anyway, run: tmux -CC attach-session -t '=epic123'
+```
+
+The escape hatch deliberately bypasses agentctl's ownership gate; using it is the operator's decision. A missing or
+ambiguous session, a non-iTerm2 environment, an invocation already inside tmux, or failure to establish control mode
+is reported instead and does not create a new session.
 
 ### `status`
 
@@ -139,14 +181,15 @@ unmanaged sessions.
 
 ### Session selection
 
-`launch` always requires `--session`. Other commands resolve the session in this order:
+`launch` always requires `--session`. `status`, `clear`, `compact`, and `kill` resolve the session in this order:
 
 1. an explicit `--session SESSION`;
 2. a nonempty `AGENTCTL_SESSION` environment variable;
 3. the current tmux session, when `TMUX_PANE` identifies the caller.
 
-An explicitly empty or invalid higher-priority source is rejected rather than silently falling through to another
-session.
+An explicit empty `--session=` is rejected, as is any invalid nonempty explicit or environment value; those sources do
+not silently fall through. An empty `AGENTCTL_SESSION` is instead treated as absent. `attach` accepts the explicit and
+environment sources, but it must run outside tmux, so the current-tmux fallback is not available to that command.
 
 ## Understanding status
 
