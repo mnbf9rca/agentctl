@@ -178,7 +178,8 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 1. Parse and validate the complete configuration (§7). Any error → exit 2, nothing created.
 2. Preflight: `tmux`, `amq`, and each *requested* harness resolve on `PATH` → else exit 7.
-3. Fail if target session already exists (exact match) → exit 3.
+3. Existence check, **best-effort and advisory** (§6.7): attempt `list-sessions`; on an exact match → exit 3. On **any**
+   failure, fall through to creation rather than reporting an error — `new-session` is the authoritative arbiter.
 4. Resolve cwd: `--dir` if given, else invocation cwd; pass via `-c` on every window. `--dir` must name an existing
    **directory**; a path that does not exist and a path that exists as a regular file are both usage errors → exit 2,
    checked before anything is created (§7).
@@ -345,6 +346,48 @@ nothing. But tmux may have created a session regardless, so the operator must be
 
 The asymmetry is deliberate. Leaking a session the operator can see and remove is strictly better than destroying one
 agentctl cannot prove it created: fail-safe beats leak-free.
+
+### 6.7 Creation is the arbiter of session existence
+
+`launch`'s existence check cannot be authoritative, because on a machine with no tmux server there is nothing to ask.
+`list-sessions` exits 1 when no server is running, so a first-ever launch on a fresh machine failed at the check and the
+fleet could never be created at all. The check is therefore **advisory**: it catches the common case early and cheaply,
+and any failure falls through to `new-session`, which decides.
+
+| `list-sessions` | Session present | Outcome |
+|---|---|---|
+| succeeds | no | create → success |
+| succeeds | yes | **exit 3**, caught by the advisory check |
+| fails (no server) | no — there cannot be one | create → success; `new-session` starts server and session atomically |
+| fails (any reason) | yes | `new-session` refuses → **exit 6** carrying tmux's own `duplicate session: NAME` |
+| — | — | any other creation failure → exit 6 (§6.6 pre-ownership: nothing killed) |
+
+**The same condition can produce exit 3 or exit 6**, depending on whether the advisory check ran. That is deliberate,
+not a defect: exit 3 is agentctl reporting a session-state fact it observed, and exit 6 is agentctl relaying a tmux
+command that failed, carrying tmux's own message. Both are true statements about what happened (§1.1); they differ
+because what happened differs.
+
+Verified on tmux 3.7b (2026-08-01):
+
+- `new-session -d … -P -F …` against **no server** exits 0 and returns its IDs intact — server and session are created
+  atomically, so there is no window in which a server exists without the session.
+- A duplicate name is refused with exit 1 and `duplicate session: NAME`, and **nothing is created or destroyed**:
+  session and window lists are byte-identical before and after.
+
+**Why `start-server` was rejected.** The obvious fix — start a server, then check — does not work. `start-server`
+returns 0, but `exit-empty` defaults on, so a server with no sessions exits immediately and the very next
+`list-sessions` still fails. Keeping it alive requires `set-option -g exit-empty off`, which mutates a global server
+option that outlives the command and leaves an empty server running indefinitely. Neither is acceptable for an
+existence check.
+
+**Why no stderr matching.** The two no-server states emit *different* messages — `error connecting to <path> (No such
+file or directory)` when the socket is absent, and `no server running on <path>` once a server has exited. A string
+match would have to know both, and neither is a documented contract. Falling through on *any* failure requires
+knowledge of neither.
+
+**Scope.** This applies to `launch` alone. `status`, `kill` and `attach` operate on a fleet that must already exist, so
+"no server" genuinely means "nothing to act on", and §4.1's exit 6 carrying tmux's message remains correct for them.
+Only a command that is about to create a server has standing to proceed without one.
 
 ## 7. Validation rules (consolidated)
 
