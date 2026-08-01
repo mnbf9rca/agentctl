@@ -24,7 +24,7 @@ import (
 
 const (
 	exitOK                = 0
-	exitNotImplemented    = 1
+	exitUnclassified      = 1
 	exitUsage             = 2
 	exitSession           = 3
 	exitRole              = 4
@@ -183,7 +183,7 @@ func runWithAllDependencies(
 			return usageError(stderr, err.Error(), usage)
 		}
 	}
-	if command == "attach" && attacher != nil {
+	if command == "attach" {
 		if err := attacher.CheckEnvironment(); err != nil {
 			return attachError(stderr, err)
 		}
@@ -196,7 +196,7 @@ func runWithAllDependencies(
 	if err != nil {
 		return resolverError(stderr, usage, err)
 	}
-	if command == "status" && collector != nil {
+	if command == "status" {
 		report, err := collector.Collect(ctx, resolved.Name, resolved.ID)
 		if err != nil {
 			return statusError(stderr, err)
@@ -212,23 +212,19 @@ func runWithAllDependencies(
 		return exitOK
 	}
 	if command == "kill" {
-		if killer == nil {
-			fmt.Fprintln(stderr, "agentctl: kill: not implemented")
-			return exitNotImplemented
-		}
 		if err := killer.Execute(ctx, resolved); err != nil {
 			return killError(stderr, err)
 		}
 		return exitOK
 	}
-	if command == "attach" && attacher != nil {
+	if command == "attach" {
 		if err := attacher.Execute(ctx, resolved); err != nil {
 			return attachError(stderr, err)
 		}
 		fmt.Fprintf(stdout, "agentctl: attempted iTerm2 control-mode attachment to session %q\n", resolved.Name)
 		return exitOK
 	}
-	if (command == "clear" || command == "compact") && controller != nil {
+	if command == "clear" || command == "compact" {
 		if err := controller.Execute(ctx, command, resolved, options.role); err != nil {
 			return controlError(stderr, command, usage, err)
 		}
@@ -237,15 +233,14 @@ func runWithAllDependencies(
 		return exitOK
 	}
 
-	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
-	return exitNotImplemented
+	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
 }
 
 func attachError(stderr io.Writer, err error) int {
 	var environment *attach.EnvironmentError
 	if errors.As(err, &environment) {
 		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitNotImplemented
+		return exitUnclassified
 	}
 	var refusal *attach.RefusalError
 	if errors.As(err, &refusal) {
@@ -258,7 +253,7 @@ func attachError(stderr io.Writer, err error) int {
 		return exitTmux
 	}
 	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	return exitNotImplemented
+	return exitUnclassified
 }
 
 type launchOptions struct {
@@ -333,7 +328,7 @@ func killError(stderr io.Writer, err error) int {
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}
-	return exitNotImplemented
+	return exitUnclassified
 }
 
 type commandOptions struct {
@@ -465,7 +460,7 @@ func controlError(stderr io.Writer, operation, usage string, err error) int {
 		return exitTmux
 	}
 	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	return exitNotImplemented
+	return exitUnclassified
 }
 
 func controlRefusal(stderr io.Writer, operation, format string, arguments ...any) {
@@ -488,7 +483,7 @@ func resolverError(stderr io.Writer, usage string, err error) int {
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}
-	return exitNotImplemented
+	return exitUnclassified
 }
 
 func statusError(stderr io.Writer, err error) int {
@@ -505,7 +500,7 @@ func statusError(stderr io.Writer, err error) int {
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}
-	return exitNotImplemented
+	return exitUnclassified
 }
 
 func usageError(stderr io.Writer, message, usage string) int {

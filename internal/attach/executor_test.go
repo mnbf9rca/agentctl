@@ -133,13 +133,13 @@ func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
 			name:        "managed option missing",
 			responses:   []tmuxx.Response{{Stdout: nil}},
 			wantCalls:   []tmuxx.Call{{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}}},
-			wantMessage: "not managed",
+			wantMessage: `session "fleet" is not managed by agentctl`,
 		},
 		{
 			name:        "managed option wrong",
 			responses:   []tmuxx.Response{{Stdout: []byte("0\n")}},
 			wantCalls:   []tmuxx.Call{{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}}},
-			wantMessage: "not managed",
+			wantMessage: `session "fleet" is not managed by agentctl`,
 		},
 		{
 			name:      "version option missing",
@@ -148,7 +148,7 @@ func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 			},
-			wantMessage: "different agentctl version",
+			wantMessage: "managed session carries no @agentctl_version marker",
 		},
 		{
 			name:      "version option wrong",
@@ -157,7 +157,7 @@ func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 			},
-			wantMessage: "different agentctl version",
+			wantMessage: `session "fleet" has @agentctl_version="2"; expected "1"`,
 		},
 	}
 	for _, tt := range tests {
@@ -171,8 +171,11 @@ func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
 			if !errors.As(err, &refusal) {
 				t.Fatalf("Execute() error = %T %v, want *RefusalError", err, err)
 			}
-			if refusal.Session.Name != "fleet" || !strings.Contains(err.Error(), tt.wantMessage) {
-				t.Fatalf("Execute() error = %q, want fleet and %q", err, tt.wantMessage)
+			if refusal.Session.Name != "fleet" {
+				t.Fatalf("RefusalError.Session.Name = %q, want fleet", refusal.Session.Name)
+			}
+			if err.Error() != tt.wantMessage {
+				t.Fatalf("Execute() error = %q, want %q", err, tt.wantMessage)
 			}
 			assertCalls(t, runner, tt.wantCalls...)
 		})

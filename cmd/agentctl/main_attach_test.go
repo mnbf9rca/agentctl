@@ -31,8 +31,8 @@ func TestRunAttachRefusesInvalidEnvironmentBeforeSessionResolution(t *testing.T)
 
 			code := runWithRunner(context.Background(), []string{"attach", "--session", "fleet"}, &stdout, &stderr, runner, lookupValues(tt.lookup))
 
-			if code != exitNotImplemented {
-				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitNotImplemented, stderr.String())
+			if code != exitUnclassified {
+				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitUnclassified, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.wantText) {
 				t.Fatalf("stderr = %q, want substring %q", stderr.String(), tt.wantText)
@@ -136,7 +136,21 @@ func TestRunAttachRefusesEveryFailedOwnershipGateWithEscapeHatch(t *testing.T) {
 			wantMessage: "agentctl: refusing to attach; session \"fleet\" is not managed by agentctl; to attach anyway, run: tmux -CC attach-session -t '=fleet'\n",
 		},
 		{
-			name: "different version",
+			name: "version marker absent",
+			responses: []tmuxx.Response{
+				{Stdout: []byte("$4\tfleet\n")},
+				{Stdout: []byte("1\n")},
+				{Stdout: nil},
+			},
+			wantCalls: []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+			},
+			wantMessage: "agentctl: refusing to attach; managed session carries no @agentctl_version marker; to attach anyway, run: tmux -CC attach-session -t '=fleet'\n",
+		},
+		{
+			name: "version marker observed wrong",
 			responses: []tmuxx.Response{
 				{Stdout: []byte("$4\tfleet\n")},
 				{Stdout: []byte("1\n")},
@@ -147,7 +161,7 @@ func TestRunAttachRefusesEveryFailedOwnershipGateWithEscapeHatch(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 			},
-			wantMessage: "agentctl: refusing to attach; session \"fleet\" was created by a different agentctl version; to attach anyway, run: tmux -CC attach-session -t '=fleet'\n",
+			wantMessage: "agentctl: refusing to attach; session \"fleet\" has @agentctl_version=\"2\"; expected \"1\"; to attach anyway, run: tmux -CC attach-session -t '=fleet'\n",
 		},
 	}
 	for _, tt := range tests {

@@ -105,32 +105,6 @@ func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsUnimplementedDependencyShapesBeforeReachingStub(t *testing.T) {
-	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-		return tmuxx.Session{ID: "$1", Name: "fleet"}, nil
-	})
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{name: "clear", args: []string{"clear", "--session", "fleet", "planner"}},
-		{name: "compact", args: []string{"compact", "--session", "fleet", "planner"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runWithResolver(context.Background(), tt.args, &stdout, &stderr, resolver)
-			if code != exitNotImplemented {
-				t.Fatalf("run(%q) = %d, want %d; stderr = %q", tt.args, code, exitNotImplemented, stderr.String())
-			}
-			if !strings.Contains(stderr.String(), tt.name+": not implemented") {
-				t.Fatalf("stderr = %q, want command stub message", stderr.String())
-			}
-		})
-	}
-}
-
 func TestRunMapsSessionResolverErrorsToOwnedExitCodes(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -196,21 +170,6 @@ func TestRunMapsSessionResolverErrorsToOwnedExitCodes(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
 			}
 		})
-	}
-}
-
-func TestRunValidNonLaunchResolutionReachesCommandStub(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$4\tfleet\n")})
-	resolver := session.New(tmuxx.New(runner), lookupValues(nil))
-	var stdout, stderr bytes.Buffer
-
-	code := runWithResolver(context.Background(), []string{"status", "--session", "fleet"}, &stdout, &stderr, resolver)
-
-	if code != exitNotImplemented {
-		t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, exitNotImplemented, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "status: not implemented") {
-		t.Fatalf("stderr = %q, want status stub", stderr.String())
 	}
 }
 
