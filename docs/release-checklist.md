@@ -163,6 +163,9 @@ A diagnostic rerun of Codex at 1000 ms used the same 10 trials and 18 workers
 with guaranteed pre-Enter pane captures. Artifact:
 `/tmp/agentctl-injection.0JfDWc`.
 
+All three `/tmp` artifact paths are run-local and not preserved; the tables and
+summaries in this document are the authoritative durable record.
+
 | Trial | Pre-Enter typed text | Highlight at Enter | Reset evidence |
 | --- | --- | --- | --- |
 | 1 | `/clear` | exact `/clear` | completed (sole full pass) |
