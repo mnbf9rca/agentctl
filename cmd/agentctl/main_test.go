@@ -105,7 +105,7 @@ func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsEachNonLaunchCommandShapeBeforeReachingStub(t *testing.T) {
+func TestRunAcceptsUnimplementedDependencyShapesBeforeReachingStub(t *testing.T) {
 	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
 		return tmuxx.Session{ID: "$1", Name: "fleet"}, nil
 	})
@@ -113,7 +113,6 @@ func TestRunAcceptsEachNonLaunchCommandShapeBeforeReachingStub(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "attach", args: []string{"attach", "--session", "fleet"}},
 		{name: "clear", args: []string{"clear", "--session", "fleet", "planner"}},
 		{name: "compact", args: []string{"compact", "--session", "fleet", "planner"}},
 	}
@@ -391,7 +390,7 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(launchOneRoleResponses("")...)
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, launchTestDependencies(runner), resolver, nil, nil, nil)
+			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, launchTestDependencies(runner), resolver, nil, nil, nil, nil)
 			if code != tt.wantCode {
 				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
 			}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mnbf9rca/agentctl/internal/attach"
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/control"
@@ -83,6 +84,11 @@ type controlExecutor interface {
 	Execute(context.Context, string, tmuxx.Session, string) error
 }
 
+type sessionAttacher interface {
+	CheckEnvironment() error
+	Execute(context.Context, tmuxx.Session) error
+}
+
 func runWithRunner(
 	ctx context.Context,
 	arguments []string,
@@ -95,23 +101,28 @@ func runWithRunner(
 	collector := statuspkg.NewCollector(client)
 	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
 	controller := control.New(targetResolver, client)
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client), controller)
+	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client), controller, attacher)
 }
 
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, nil)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, nil, nil)
 }
 
 func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, killer, nil)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, killer, nil, nil)
 }
 
 func runWithControlDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, controller controlExecutor) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, controller)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, controller, nil)
+}
+
+func runWithAttachDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, attacher sessionAttacher) int {
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, nil, attacher)
 }
 
 func runWith(arguments []string, stdout, stderr io.Writer, dependencies launchDependencies) int {
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil, nil)
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil, nil, nil)
 }
 
 func runWithAllDependencies(
@@ -123,6 +134,7 @@ func runWithAllDependencies(
 	collector statusCollector,
 	killer sessionKiller,
 	controller controlExecutor,
+	attacher sessionAttacher,
 ) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
@@ -171,6 +183,11 @@ func runWithAllDependencies(
 			return usageError(stderr, err.Error(), usage)
 		}
 	}
+	if command == "attach" && attacher != nil {
+		if err := attacher.CheckEnvironment(); err != nil {
+			return attachError(stderr, err)
+		}
+	}
 	var explicit *string
 	if options.sessionSet {
 		explicit = &options.session
@@ -204,6 +221,13 @@ func runWithAllDependencies(
 		}
 		return exitOK
 	}
+	if command == "attach" && attacher != nil {
+		if err := attacher.Execute(ctx, resolved); err != nil {
+			return attachError(stderr, err)
+		}
+		fmt.Fprintf(stdout, "agentctl: attempted iTerm2 control-mode attachment to session %q\n", resolved.Name)
+		return exitOK
+	}
 	if (command == "clear" || command == "compact") && controller != nil {
 		if err := controller.Execute(ctx, command, resolved, options.role); err != nil {
 			return controlError(stderr, command, usage, err)
@@ -214,6 +238,26 @@ func runWithAllDependencies(
 	}
 
 	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
+	return exitNotImplemented
+}
+
+func attachError(stderr io.Writer, err error) int {
+	var environment *attach.EnvironmentError
+	if errors.As(err, &environment) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitNotImplemented
+	}
+	var refusal *attach.RefusalError
+	if errors.As(err, &refusal) {
+		fmt.Fprintf(stderr, "agentctl: refusing to attach; %v; to attach anyway, run: tmux -CC attach-session -t '=%s'\n", refusal, refusal.Session.Name)
+		return exitSession
+	}
+	var tmuxFailure *tmuxx.TmuxError
+	if errors.As(err, &tmuxFailure) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitTmux
+	}
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
 	return exitNotImplemented
 }
 
