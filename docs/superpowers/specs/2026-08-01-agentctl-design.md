@@ -615,7 +615,7 @@ of the call signature, so no caller — and no future subcommand — can influen
 **`payloadDelay` is 1s and stays 1s until measured.** Unit tests drive a fake `Runner` and therefore cannot validate a
 TUI timing constant *at all* — the thing being timed is the harness's autocomplete popup settling on the exact match,
 which no fake observes. A shortened delay fails by letting `Enter` select whatever entry is highlighted at that instant
-(SECURITY.md residual #2): the wrong command executed inside a live agent, silently, only under load, and never
+(SECURITY.md residual 1): the wrong command executed inside a live agent, silently, only under load, and never
 reproducibly in CI. Issue #13 owns measuring the popup-settle floor on both harnesses under load and licensing any
 reduction by name; until it reports, 1s stands. 900ms on an operator-initiated command is not a cost worth trading for
 that failure mode.

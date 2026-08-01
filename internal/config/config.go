@@ -48,8 +48,8 @@ type ValidationError struct {
 }
 
 func (e *ValidationError) Error() string {
-	if e.Option == "session" {
-		return fmt.Sprintf("invalid session %q: %s", e.Value, e.Reason)
+	if e.Option == "session" || e.Option == "role" {
+		return fmt.Sprintf("invalid %s %q: %s", e.Option, e.Value, e.Reason)
 	}
 	if e.EntryIndex >= 1 && e.Entry == "" {
 		return fmt.Sprintf("invalid --%s value %q: entry %d is empty", e.Option, e.Value, e.EntryIndex)
@@ -66,6 +66,19 @@ func ValidateSessionName(name string) error {
 		return &ValidationError{
 			Option:     "session",
 			Value:      name,
+			EntryIndex: -1,
+			Reason:     "must match " + namePattern,
+		}
+	}
+	return nil
+}
+
+// ValidateRoleName validates one role name accepted by agentctl control commands.
+func ValidateRoleName(role string) error {
+	if !nameExpression.MatchString(role) {
+		return &ValidationError{
+			Option:     "role",
+			Value:      role,
 			EntryIndex: -1,
 			Reason:     "must match " + namePattern,
 		}
