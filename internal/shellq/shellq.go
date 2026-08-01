@@ -1,5 +1,7 @@
 // Package shellq quotes tokens for POSIX shell command strings.
-// POSIX shell words cannot contain NUL bytes, so callers must not pass them.
+// Quote is total: it accepts arbitrary bytes and imposes no precondition on callers.
+// NUL is the one documented exception — it cannot exist in a POSIX shell word or an
+// argv element, so the round-trip property is undefined for inputs containing it.
 package shellq
 
 import "strings"
