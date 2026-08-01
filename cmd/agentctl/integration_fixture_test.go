@@ -70,8 +70,23 @@ type integrationFixture struct {
 type socketRunner struct {
 	tmuxPath      string
 	socket        string
+	tmuxTmpDir    string
 	failureMu     sync.Mutex
 	failOperation string
+}
+
+func TestIntegrationFixtureRemovesSocketDirectory(t *testing.T) {
+	var socketDirectory string
+	t.Run("fixture lifetime", func(t *testing.T) {
+		fixture := newIntegrationFixture(t)
+		socketDirectory = fixture.runner.tmuxTmpDir
+		if _, err := os.Stat(socketDirectory); err != nil {
+			t.Fatalf("private tmux socket directory during test: %v", err)
+		}
+	})
+	if _, err := os.Stat(socketDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private tmux socket directory after cleanup: %v", err)
+	}
 }
 
 func (r *socketRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
@@ -85,10 +100,26 @@ func (r *socketRunner) Output(ctx context.Context, executable string, args ...st
 		if shouldFail {
 			return nil, errors.New("injected tmux operation failure")
 		}
-		args = append([]string{"-L", r.socket}, args...)
-		executable = r.tmuxPath
+		return r.tmuxCommand(ctx, args...).Output()
 	}
 	return exec.CommandContext(ctx, executable, args...).Output()
+}
+
+func (r *socketRunner) tmuxCommand(ctx context.Context, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, r.tmuxPath, append([]string{"-L", r.socket}, args...)...)
+	command.Env = environmentWith(os.Environ(), "TMUX_TMPDIR", r.tmuxTmpDir)
+	return command
+}
+
+func environmentWith(environment []string, name, value string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 func (r *socketRunner) failNextTmuxOperation(operation string) {
@@ -224,7 +255,7 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 	}
 
 	socket := "agentctl-test-" + randomHex(t, 8)
-	runner := &socketRunner{tmuxPath: tmuxPath, socket: socket}
+	runner := &socketRunner{tmuxPath: tmuxPath, socket: socket, tmuxTmpDir: shortTmuxTempDir(t)}
 	fixture := &integrationFixture{
 		t:           t,
 		runner:      runner,
@@ -233,10 +264,12 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 		captureDir:  t.TempDir(),
 	}
 
+	fixture.installStubs()
+	t.Setenv("TMUX_PANE", "")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		output, cleanupErr := exec.CommandContext(ctx, tmuxPath, "-L", socket, "kill-server").CombinedOutput()
+		output, cleanupErr := runner.tmuxCommand(ctx, "kill-server").CombinedOutput()
 		if cleanupErr == nil {
 			return
 		}
@@ -250,9 +283,6 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 		}
 		t.Errorf("clean tmux socket %q: %v: %s", socket, cleanupErr, message)
 	})
-
-	fixture.installStubs()
-	t.Setenv("TMUX_PANE", "")
 	fixture.bootstrapEmptyServer()
 	return fixture
 }
@@ -266,9 +296,27 @@ func randomHex(t *testing.T, byteCount int) string {
 	return hex.EncodeToString(buffer)
 }
 
+func shortTmuxTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "agentctl-tmux-")
+	if err != nil {
+		t.Fatalf("create private tmux temp directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Errorf("remove private tmux temp directory %q: %v", directory, err)
+		}
+	})
+	return directory
+}
+
 func (f *integrationFixture) bootstrapEmptyServer() {
 	f.t.Helper()
 	if _, err := f.runner.Output(context.Background(), "tmux", "start-server", ";", "set-option", "-g", "exit-empty", "off"); err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			f.t.Fatalf("start empty tmux server: %v: %s", err, exitError.Stderr)
+		}
 		f.t.Fatalf("start empty tmux server: %v", err)
 	}
 }

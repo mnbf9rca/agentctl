@@ -38,6 +38,8 @@ added.
 Every test creates an independent fixture with:
 
 - a cryptographically random socket name carrying the `agentctl-test-` prefix;
+- a test-owned `TMUX_TMPDIR` whose entire socket tree is removed after the
+  scoped server has stopped;
 - a temporary `bin` directory prepended to `PATH`;
 - stub `amq`, `claude`, and `codex` executables;
 - role-specific invocation and input-capture files;
@@ -71,8 +73,9 @@ Immediately after choosing the socket, the fixture registers `t.Cleanup` that
 uses the absolute real tmux binary and the same `-L` name to issue
 `kill-server` under a bounded context. Cleanup tolerates only the expected
 already-absent server case and runs after failures, panics, and `t.Fatal`.
-Temporary directories are left to `t.TempDir` cleanup after the server has
-been stopped.
+The short, test-owned socket directory and other temporary directories are
+removed by registered test cleanup after the server has been stopped, so tmux
+cannot leave stale socket nodes in the user's global temporary tmux directory.
 
 The suite never inspects, creates a sentinel in, or otherwise contacts the
 default tmux server. Containment is proven by the absence of any integration
