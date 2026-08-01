@@ -54,7 +54,7 @@ Method: throwaway tmux server (`tmux -L agentctl-spike`), real harness binaries,
 
 Consequences:
 
-- The delivery sequence in the brief (`C-u`; `send-keys -l -- '/PAYLOAD'`; `Enter`) is adopted unchanged for both harnesses, with a short fixed delay between payload and Enter (the spike used 1s; implementation may tune down with testing).
+- The delivery sequence in the brief (`C-u`; `send-keys -l -- '/PAYLOAD'`; `Enter`) is adopted unchanged for both harnesses, with a fixed delay between payload and Enter. That delay is **1s** — the value the spike established and the only one with evidence behind it. It is not tuned down until issue #13 measures the popup-settle floor under load on both harnesses; see §13.6.
 - Typing a slash command opens an autocomplete popup in both TUIs; Enter selects the highlighted entry. With the full command typed, the exact match was highlighted in both. Residual risk (user-defined commands outranking an exact match) is documented in SECURITY.md.
 - Process names cannot be pattern-matched against harness names (Claude Code reports `2.1.220`), and `#{pane_current_command}` tracks the *foreground job*, so it flaps to child commands (`bash`, `python`, …) whenever an agent runs a tool. Both problems are solved by the launch-time baseline policy in §8.
 
@@ -462,8 +462,21 @@ which is decided before any process check, so a duplicate row is never reported 
 canonical truth and are asserted as such against the fake `Runner`, but no individual `SendKeys` wrapper is exported:
 there is no partial delivery, and no caller can send one key event without the other two.
 
-The delay between the payload and `Enter` (§3.3) is a **package constant**, not a parameter. Timing is not part of the
-call signature, so no caller — and no future subcommand — can influence it.
+The delay between the payload and `Enter` is the package constant `payloadDelay`, not a parameter. Timing is not part
+of the call signature, so no caller — and no future subcommand — can influence it.
+
+**`payloadDelay` is 1s and stays 1s until measured.** Unit tests drive a fake `Runner` and therefore cannot validate a
+TUI timing constant *at all* — the thing being timed is the harness's autocomplete popup settling on the exact match,
+which no fake observes. A shortened delay fails by letting `Enter` select whatever entry is highlighted at that instant
+(SECURITY.md residual #2): the wrong command executed inside a live agent, silently, only under load, and never
+reproducibly in CI. Issue #13 owns measuring the popup-settle floor on both harnesses under load and licensing any
+reduction by name; until it reports, 1s stands. 900ms on an operator-initiated command is not a cost worth trading for
+that failure mode.
+
+**Cancellation between the payload and `Enter`** returns the context error with the payload already typed into the pane
+but not submitted. This is deliberate: sending `Enter` regardless would execute a command the caller just cancelled. The
+residue is bounded — the next delivery begins with `C-u`, which clears it — but a cancelled control command does leave
+visible text in the agent's input buffer, and that is reported as a failure, never as a delivery.
 
 This is the same containment argument as the hardcoded payload registry (§2): the narrower the exposed surface, the
 fewer places a reviewer must check that caller-supplied text cannot reach `send-keys`. A general-purpose exported
