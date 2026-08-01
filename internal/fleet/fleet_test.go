@@ -582,8 +582,8 @@ func TestLaunchErrorReportsCleanupResultAndUnwrapsFailureCause(t *testing.T) {
 		wantMessage string
 		wantCleanup bool
 	}{
-		{name: "removed", cleanup: tmuxx.Response{}, wantMessage: "failed to launch planner; removed incomplete session epic123"},
-		{name: "cleanup failure", cleanup: tmuxx.Response{Err: cleanupCause}, wantMessage: "failed to launch planner; failed to remove incomplete session epic123: tmux kill session: kill failed", wantCleanup: true},
+		{name: "removed", cleanup: tmuxx.Response{}, wantMessage: "failed to launch planner; removed incomplete session epic123: tmux set session option: set metadata failed"},
+		{name: "cleanup failure", cleanup: tmuxx.Response{Err: cleanupCause}, wantMessage: "failed to launch planner; failed to remove incomplete session epic123: tmux kill session: kill failed (launch failure: tmux set session option: set metadata failed)", wantCleanup: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			responses := append(launchPrefixResponses(2), tmuxx.Response{Err: cause}, tt.cleanup)
@@ -646,6 +646,20 @@ func TestLaunchCreationFailuresDoNotClaimOwnership(t *testing.T) {
 	}
 }
 
+func TestLaunchRejectsEmptyFleetBeforeTmux(t *testing.T) {
+	runner := tmuxx.NewFakeRunner()
+	launcher := New(runner, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
+
+	err := launcher.Launch(context.Background(), "epic123", config.FleetConfig{}, nil)
+
+	if err == nil {
+		t.Fatal("Launch() error = nil, want empty-fleet error")
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("Runner calls = %#v, want none for complete-validation failure", runner.Calls)
+	}
+}
+
 func TestLaunchOtherPreOwnershipFailuresDoNotKill(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -658,13 +672,6 @@ func TestLaunchOtherPreOwnershipFailuresDoNotKill(t *testing.T) {
 				return New(r, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
 			},
 			fleet: oneRoleFleet(),
-		},
-		{
-			name: "empty fleet",
-			launcher: func(r *tmuxx.FakeRunner) Launcher {
-				return New(r, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
-			},
-			fleet: config.FleetConfig{},
 		},
 		{
 			name: "first role command",

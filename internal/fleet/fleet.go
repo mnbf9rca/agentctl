@@ -64,9 +64,9 @@ type LaunchError struct {
 
 func (e *LaunchError) Error() string {
 	if e.CleanupErr != nil {
-		return fmt.Sprintf("failed to launch %s; failed to remove incomplete session %s: %v", e.Role, e.Session, e.CleanupErr)
+		return fmt.Sprintf("failed to launch %s; failed to remove incomplete session %s: %v (launch failure: %v)", e.Role, e.Session, e.CleanupErr, e.Cause)
 	}
-	return fmt.Sprintf("failed to launch %s; removed incomplete session %s", e.Role, e.Session)
+	return fmt.Sprintf("failed to launch %s; removed incomplete session %s: %v", e.Role, e.Session, e.Cause)
 }
 
 func (e *LaunchError) Unwrap() error { return e.Cause }
@@ -125,6 +125,9 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 // Launch performs preflight before taking any tmux action. A nil directory
 // uses the invocation working directory; a non-nil value must name a directory.
 func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) error {
+	if len(fleet.Roles) == 0 {
+		return fmt.Errorf("fleet must contain at least one role")
+	}
 	if err := preflight.CheckExecutables(fleet, l.lookPath); err != nil {
 		return err
 	}
@@ -141,10 +144,6 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 			return &SessionExistsError{Name: session}
 		}
 	}
-	if len(fleet.Roles) == 0 {
-		return fmt.Errorf("fleet must contain at least one role")
-	}
-
 	first := fleet.Roles[0]
 	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {

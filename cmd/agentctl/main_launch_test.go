@@ -196,12 +196,12 @@ func TestRunLaunchReportsCleanupOutcomeVerbatim(t *testing.T) {
 		{
 			name:      "cleanup succeeds",
 			responses: []tmuxx.Response{{}, {Stdout: []byte("$17\t@23\t%42\t4242\n")}, {Err: cause}, {}},
-			want:      "agentctl: failed to launch planner; removed incomplete session fleet\n",
+			want:      "agentctl: failed to launch planner; removed incomplete session fleet: tmux set session option: metadata failed\n",
 		},
 		{
 			name:      "cleanup fails",
 			responses: []tmuxx.Response{{}, {Stdout: []byte("$17\t@23\t%42\t4242\n")}, {Err: cause}, {Err: cleanupCause}},
-			want:      "agentctl: failed to launch planner; failed to remove incomplete session fleet: tmux kill session: cleanup failed\n",
+			want:      "agentctl: failed to launch planner; failed to remove incomplete session fleet: tmux kill session: cleanup failed (launch failure: tmux set session option: metadata failed)\n",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
