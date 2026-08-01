@@ -95,10 +95,6 @@ case "$LOAD_WORKERS" in
   ''|*[!0-9]*|0) die '--load-workers must be a positive decimal integer' ;;
 esac
 
-if [ "$MODE" = measure ]; then
-  die 'measure mode is not implemented'
-fi
-
 tmux_cmd() {
   tmux -L "$SOCKET" "$@"
 }
@@ -242,6 +238,110 @@ verify_harness() {
   esac
 }
 
+wait_for_harness() {
+  harness=$1
+  pane=$2
+  printf '\nWaiting for %s in pane %s.\n' "$harness" "$pane"
+  printf 'Press Enter only after its TUI is fully ready: '
+  IFS= read -r _ready
+}
+
+start_load() {
+  printf '\nWARNING: measure mode will saturate %s logical CPUs with /usr/bin/yes.\n' "$LOAD_WORKERS"
+  printf 'This may make the machine temporarily sluggish. Start the load? [y/N] '
+  IFS= read -r answer
+  case "$answer" in
+    y|Y) ;;
+    *) die 'CPU load was declined' ;;
+  esac
+
+  printf 'uptime_pre_load=%s\n' "$(uptime)" >>"$OUTPUT/metadata.txt"
+  worker=1
+  while [ "$worker" -le "$LOAD_WORKERS" ]; do
+    /usr/bin/yes >/dev/null &
+    pid=$!
+    LOAD_PIDS="$LOAD_PIDS $pid"
+    worker=$((worker + 1))
+  done
+  printf 'load_pids=%s\n' "$LOAD_PIDS" >>"$OUTPUT/metadata.txt"
+  printf 'Stabilizing CPU load for 10 seconds...\n'
+  sleep 10
+  printf 'uptime_post_stabilization=%s\n' "$(uptime)" >>"$OUTPUT/metadata.txt"
+}
+
+measure_candidate() {
+  harness=$1
+  pane=$2
+  delay=$3
+  trial=1
+
+  printf '\n%s: running %s trial(s) at %sms under %s workers.\n' \
+    "$harness" "$TRIALS" "$delay" "$LOAD_WORKERS"
+  while [ "$trial" -le "$TRIALS" ]; do
+    tmux_cmd send-keys -t "$pane" C-u
+    tmux_cmd send-keys -t "$pane" -l -- '/clear'
+    sleep_ms "$delay"
+    capture_snapshot "$harness" "measure-${delay}ms-trial-${trial}-popup" "$pane"
+    tmux_cmd send-keys -t "$pane" C-u
+
+    tmux_cmd send-keys -t "$pane" -l -- '/clear'
+    sleep_ms "$delay"
+    tmux_cmd send-keys -t "$pane" Enter
+    sleep_ms 2000
+    capture_snapshot "$harness" "measure-${delay}ms-trial-${trial}-reset" "$pane"
+
+    printf '  completed trial %s/%s\n' "$trial" "$TRIALS"
+    trial=$((trial + 1))
+  done
+
+  printf 'Review %s/%s-measure-%sms-trial-*-{popup,reset}.txt\n' "$OUTPUT" "$harness" "$delay"
+  printf 'Did every trial show exact /clear selection and a completed reset? [y/N] '
+  IFS= read -r answer
+  case "$answer" in
+    y|Y)
+      printf 'measure\t%s\t%s\t%s\t%s\tPASS\tall paired trials operator-attested\n' \
+        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" >>"$OUTPUT/results.tsv"
+      return 0
+      ;;
+    *)
+      printf 'measure\t%s\t%s\t%s\t%s\tFAIL\tbatch rejected; descending search stopped\n' \
+        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" >>"$OUTPUT/results.tsv"
+      return 1
+      ;;
+  esac
+}
+
+measure_harness() {
+  harness=$1
+  pane=$2
+  last_pass=''
+
+  for delay in 1000 750 500 250 100 50 0; do
+    if measure_candidate "$harness" "$pane" "$delay"; then
+      last_pass=$delay
+    else
+      break
+    fi
+  done
+
+  if [ -z "$last_pass" ]; then
+    printf 'measure\t%s\tNONE\t%s\t%s\tFLOOR\tno floor established; 1000ms failed\n' \
+      "$harness" "$TRIALS" "$LOAD_WORKERS" >>"$OUTPUT/results.tsv"
+    printf '%s: FLOOR NONE (1000ms failed).\n' "$harness"
+    return 1
+  fi
+
+  if [ "$last_pass" -eq 0 ]; then
+    floor='0ms-at-script-resolution'
+  else
+    floor="${last_pass}ms"
+  fi
+  printf 'measure\t%s\t%s\t%s\t%s\tFLOOR\tobserved_floor=%s\n' \
+    "$harness" "$last_pass" "$TRIALS" "$LOAD_WORKERS" "$floor" >>"$OUTPUT/results.tsv"
+  printf '%s: FLOOR %s.\n' "$harness" "$floor"
+  return 0
+}
+
 for command_name in tmux sleep date uptime mktemp getconf sed; do
   require_command "$command_name"
 done
@@ -250,6 +350,9 @@ if [ "$HARNESS" = both ] || [ "$HARNESS" = claude ]; then
 fi
 if [ "$HARNESS" = both ] || [ "$HARNESS" = codex ]; then
   require_command codex
+fi
+if [ "$MODE" = measure ]; then
+  require_command /usr/bin/yes
 fi
 
 if [ "$OUTPUT_EXPLICIT" -eq 1 ]; then
@@ -263,17 +366,46 @@ write_metadata
 start_harnesses
 
 overall_status=0
-case "$HARNESS" in
-  claude)
-    verify_harness claude "$CLAUDE_PANE" || overall_status=1
-    ;;
-  codex)
-    verify_harness codex "$CODEX_PANE" || overall_status=1
-    ;;
-  both)
-    verify_harness claude "$CLAUDE_PANE" || overall_status=1
-    verify_harness codex "$CODEX_PANE" || overall_status=1
-    ;;
-esac
+if [ "$MODE" = verify ]; then
+  case "$HARNESS" in
+    claude)
+      verify_harness claude "$CLAUDE_PANE" || overall_status=1
+      ;;
+    codex)
+      verify_harness codex "$CODEX_PANE" || overall_status=1
+      ;;
+    both)
+      verify_harness claude "$CLAUDE_PANE" || overall_status=1
+      verify_harness codex "$CODEX_PANE" || overall_status=1
+      ;;
+  esac
+else
+  case "$HARNESS" in
+    claude)
+      wait_for_harness claude "$CLAUDE_PANE"
+      ;;
+    codex)
+      wait_for_harness codex "$CODEX_PANE"
+      ;;
+    both)
+      wait_for_harness claude "$CLAUDE_PANE"
+      wait_for_harness codex "$CODEX_PANE"
+      ;;
+  esac
+  start_load
+  case "$HARNESS" in
+    claude)
+      measure_harness claude "$CLAUDE_PANE" || overall_status=1
+      ;;
+    codex)
+      measure_harness codex "$CODEX_PANE" || overall_status=1
+      ;;
+    both)
+      measure_harness claude "$CLAUDE_PANE" || overall_status=1
+      measure_harness codex "$CODEX_PANE" || overall_status=1
+      ;;
+  esac
+  printf '\nEvidence only: a future payloadDelay change requires a separately justified safety margin.\n'
+fi
 
 exit "$overall_status"
