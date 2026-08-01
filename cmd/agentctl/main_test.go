@@ -228,6 +228,29 @@ func TestRunValidNonLaunchResolutionReachesCommandStub(t *testing.T) {
 	}
 }
 
+func TestRunMalformedTMUXPaneMapsToSessionErrorWithoutTmuxCall(t *testing.T) {
+	for _, pane := range []string{"", "%", "7", "$1", "%abc", "not-a-pane"} {
+		pane := pane
+		t.Run(pane, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner()
+			resolver := session.New(tmuxx.New(runner), lookupValues(map[string]string{"TMUX_PANE": pane}))
+			var stdout, stderr bytes.Buffer
+
+			code := runWithResolver(context.Background(), []string{"status"}, &stdout, &stderr, resolver)
+
+			if code != exitSession {
+				t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "current tmux session") {
+				t.Fatalf("stderr = %q, want current-source error", stderr.String())
+			}
+			if len(runner.Calls) != 0 {
+				t.Fatalf("Calls = %#v, want no tmux calls", runner.Calls)
+			}
+		})
+	}
+}
+
 func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing.T) {
 	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
 		t.Fatal("launch called session resolver")

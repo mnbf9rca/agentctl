@@ -194,9 +194,9 @@ func TestResolveClassifiesRowFailuresAsTmuxErrors(t *testing.T) {
 	}{
 		{name: "list runner", explicit: stringPointer("epic123"), responses: []tmuxx.Response{{Err: errors.New("no server running")}}},
 		{name: "list parse", explicit: stringPointer("epic123"), responses: []tmuxx.Response{{Stdout: []byte("$1\n")}}},
+		{name: "list invalid returned id", explicit: stringPointer("epic123"), responses: []tmuxx.Response{{Stdout: []byte("$bad\tepic123\n")}}},
 		{name: "display runner", env: map[string]string{"TMUX_PANE": "%9"}, responses: []tmuxx.Response{{Err: errors.New("lost server")}}},
 		{name: "display parse", env: map[string]string{"TMUX_PANE": "%9"}, responses: []tmuxx.Response{{Stdout: []byte("one\ntwo\n")}}},
-		{name: "invalid pane target", env: map[string]string{"TMUX_PANE": "pane"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,6 +206,29 @@ func TestResolveClassifiesRowFailuresAsTmuxErrors(t *testing.T) {
 			var tmuxError *TmuxError
 			if !errors.As(err, &tmuxError) {
 				t.Fatalf("Resolve() error = %T %v, want *TmuxError", err, err)
+			}
+		})
+	}
+}
+
+func TestResolveMalformedTMUXPaneIsInvalidSourceWithoutTmuxCall(t *testing.T) {
+	t.Parallel()
+
+	for _, pane := range []string{"", "%", "7", "$1", "%abc", "not-a-pane"} {
+		pane := pane
+		t.Run(pane, func(t *testing.T) {
+			t.Parallel()
+			runner := tmuxx.NewFakeRunner()
+			_, err := New(tmuxx.New(runner), mapLookup(map[string]string{"TMUX_PANE": pane})).Resolve(context.Background(), nil)
+			var resolution *ResolutionError
+			if !errors.As(err, &resolution) {
+				t.Fatalf("Resolve() error = %T %v, want *ResolutionError", err, err)
+			}
+			if resolution.Source != SourceCurrent {
+				t.Fatalf("ResolutionError.Source = %q, want %q", resolution.Source, SourceCurrent)
+			}
+			if len(runner.Calls) != 0 {
+				t.Fatalf("Calls = %#v, want no tmux calls", runner.Calls)
 			}
 		})
 	}

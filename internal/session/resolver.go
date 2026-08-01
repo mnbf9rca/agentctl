@@ -133,6 +133,10 @@ func (r Resolver) Resolve(ctx context.Context, explicit *string) (tmuxx.Session,
 	}
 	name, err := r.client.DisplayMessage(ctx, tmuxx.PaneID(paneValue))
 	if err != nil {
+		var invalidID *tmuxx.InvalidIDError
+		if errors.As(err, &invalidID) {
+			return tmuxx.Session{}, &ResolutionError{Source: SourceCurrent, Err: err}
+		}
 		return tmuxx.Session{}, classifyTmuxError(err)
 	}
 	if err := config.ValidateSessionName(name); err != nil {
