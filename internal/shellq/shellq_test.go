@@ -17,7 +17,9 @@ func TestQuote(t *testing.T) {
 	}{
 		{name: "empty", input: "", want: `''`},
 		{name: "plain", input: "agent123", want: `'agent123'`},
+		{name: "lone single quote", input: "'", want: `''"'"''`},
 		{name: "single quote", input: "don't", want: `'don'"'"'t'`},
+		{name: "backslash", input: `\`, want: `'\'`},
 		{name: "double quote", input: `say "hi"`, want: `'say "hi"'`},
 		{name: "dollar", input: "$HOME", want: `'$HOME'`},
 		{name: "backticks", input: "`whoami`", want: "'`whoami`'"},
@@ -33,6 +35,31 @@ func TestQuote(t *testing.T) {
 			if got := Quote(tt.input); got != tt.want {
 				t.Fatalf("Quote(%q) = %q, want %q", tt.input, got, tt.want)
 			}
+		})
+	}
+}
+
+func TestQuoteRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "empty", input: ""},
+		{name: "plain", input: "agent123"},
+		{name: "lone single quote", input: "'"},
+		{name: "single quote", input: "don't"},
+		{name: "backslash", input: `\`},
+		{name: "spaces", input: "two words"},
+		{name: "newline", input: "line1\nline2"},
+		{name: "shell operators", input: ";|&<>()"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assertQuoteRoundTrip(t, tt.input)
 		})
 	}
 }
@@ -69,7 +96,9 @@ func FuzzQuoteRoundTrip(f *testing.F) {
 	for _, seed := range []string{
 		"",
 		"plain",
+		"'",
 		"don't",
+		`\`,
 		`"double"`,
 		"$HOME",
 		"`whoami`",
@@ -82,17 +111,23 @@ func FuzzQuoteRoundTrip(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, input string) {
-		if strings.IndexByte(input, 0) >= 0 {
-			t.Skip("POSIX command arguments cannot contain NUL")
-		}
-
-		cmd := exec.Command("sh", "-c", "printf %s "+Quote(input))
-		got, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("round-trip command failed for %q: %v", input, err)
-		}
-		if !bytes.Equal(got, []byte(input)) {
-			t.Fatalf("round trip = %q, want %q", got, []byte(input))
-		}
+		assertQuoteRoundTrip(t, input)
 	})
+}
+
+func assertQuoteRoundTrip(t testing.TB, input string) {
+	t.Helper()
+	if strings.IndexByte(input, 0) >= 0 {
+		t.Skip("POSIX shell words cannot contain NUL")
+	}
+
+	script := "set -- " + Quote(input) + `; printf '%s:' "$#"; printf %s "$1"`
+	got, err := exec.Command("sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("round-trip command failed for %q: %v", input, err)
+	}
+	want := append([]byte("1:"), []byte(input)...)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("round trip = %q, want %q", got, want)
+	}
 }
