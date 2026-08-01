@@ -123,9 +123,9 @@ func TestExecuteClassifiesTmuxFailuresAndStopsAtTheFailedOperation(t *testing.T)
 			t.Parallel()
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 			err := New(tmuxx.New(runner)).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
-			var tmuxFailure *TmuxError
+			var tmuxFailure *tmuxx.TmuxError
 			if !errors.As(err, &tmuxFailure) {
-				t.Fatalf("Execute() error = %T %v, want *TmuxError", err, err)
+				t.Fatalf("Execute() error = %T %v, want *tmuxx.TmuxError", err, err)
 			}
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("Execute() error = %v, want wrapped runner error", err)

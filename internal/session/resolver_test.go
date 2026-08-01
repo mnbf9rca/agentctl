@@ -203,9 +203,9 @@ func TestResolveClassifiesRowFailuresAsTmuxErrors(t *testing.T) {
 			t.Parallel()
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 			_, err := New(tmuxx.New(runner), mapLookup(tt.env)).Resolve(context.Background(), tt.explicit)
-			var tmuxError *TmuxError
+			var tmuxError *tmuxx.TmuxError
 			if !errors.As(err, &tmuxError) {
-				t.Fatalf("Resolve() error = %T %v, want *TmuxError", err, err)
+				t.Fatalf("Resolve() error = %T %v, want *tmuxx.TmuxError", err, err)
 			}
 		})
 	}
