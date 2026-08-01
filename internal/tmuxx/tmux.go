@@ -20,6 +20,16 @@ const (
 // output could not be parsed or validated.
 var ErrCreationOutput = errors.New("invalid tmux creation output")
 
+// InvalidIDError reports a value that is not a typed tmux ID.
+type InvalidIDError struct {
+	Value  string
+	Prefix byte
+}
+
+func (e *InvalidIDError) Error() string {
+	return fmt.Sprintf("invalid tmux id %q: expected %c followed by digits", e.Value, e.Prefix)
+}
+
 // SessionID is an exact tmux session ID such as $4.
 type SessionID string
 
@@ -370,11 +380,11 @@ func parseCreationRecord(output []byte, fieldCount int) ([]string, error) {
 
 func validateID(value string, prefix byte) error {
 	if len(value) < 2 || value[0] != prefix {
-		return fmt.Errorf("invalid tmux id %q: expected %c followed by digits", value, prefix)
+		return &InvalidIDError{Value: value, Prefix: prefix}
 	}
 	for _, character := range value[1:] {
 		if character < '0' || character > '9' {
-			return fmt.Errorf("invalid tmux id %q: expected %c followed by digits", value, prefix)
+			return &InvalidIDError{Value: value, Prefix: prefix}
 		}
 	}
 	return nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -8,6 +9,9 @@ import (
 	"os"
 
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
+	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/session"
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 const (
@@ -47,6 +51,15 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
+	resolver := session.New(tmuxx.New(tmuxx.RealRunner{}), os.LookupEnv)
+	return runWithResolver(context.Background(), arguments, stdout, stderr, resolver)
+}
+
+type sessionResolver interface {
+	Resolve(context.Context, *string) (tmuxx.Session, error)
+}
+
+func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
 	}
@@ -61,7 +74,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, fmt.Sprintf("unknown command %q", command), globalUsage)
 	}
 
-	err := parseCommand(command, arguments[1:])
+	options, err := parseCommand(command, arguments[1:])
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, usage)
 		return exitOK
@@ -69,14 +82,28 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return usageError(stderr, err.Error(), usage)
 	}
+	if command != "launch" {
+		var explicit *string
+		if options.sessionSet {
+			explicit = &options.session
+		}
+		if _, err := resolver.Resolve(ctx, explicit); err != nil {
+			return resolverError(stderr, usage, err)
+		}
+	}
 
 	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
 	return exitNotImplemented
 }
 
-func parseCommand(command string, arguments []string) error {
+type commandOptions struct {
+	session    string
+	sessionSet bool
+}
+
+func parseCommand(command string, arguments []string) (commandOptions, error) {
 	flags := cliflags.New(command)
-	session := flags.String("session", "", "session name")
+	sessionValue := flags.String("session", "", "session name")
 
 	var roles, models *string
 	switch command {
@@ -89,35 +116,56 @@ func parseCommand(command string, arguments []string) error {
 	}
 
 	if err := flags.Parse(arguments); err != nil {
-		return err
+		return commandOptions{}, err
 	}
+	options := commandOptions{session: *sessionValue, sessionSet: flags.WasSet("session")}
 
 	positional := flags.Args()
 	switch command {
 	case "launch":
-		if *session == "" {
-			return errors.New("--session is required")
+		if !options.sessionSet {
+			return commandOptions{}, errors.New("--session is required")
+		}
+		if err := config.ValidateSessionName(options.session); err != nil {
+			return commandOptions{}, err
 		}
 		if *roles == "" {
-			return errors.New("--roles is required")
+			return commandOptions{}, errors.New("--roles is required")
 		}
 		if flags.WasSet("models") && *models == "" {
-			return errors.New("--models must not be empty")
+			return commandOptions{}, errors.New("--models must not be empty")
 		}
 		if len(positional) != 0 {
-			return errors.New("launch accepts no positional arguments")
+			return commandOptions{}, errors.New("launch accepts no positional arguments")
 		}
 	case "clear", "compact":
 		if len(positional) != 1 {
-			return fmt.Errorf("%s requires exactly one ROLE", command)
+			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
 		}
 	default:
 		if len(positional) != 0 {
-			return fmt.Errorf("%s accepts no positional arguments", command)
+			return commandOptions{}, fmt.Errorf("%s accepts no positional arguments", command)
 		}
 	}
 
-	return nil
+	return options, nil
+}
+
+func resolverError(stderr io.Writer, usage string, err error) int {
+	var usageFailure *session.UsageError
+	if errors.As(err, &usageFailure) {
+		return usageError(stderr, err.Error(), usage)
+	}
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	var resolutionFailure *session.ResolutionError
+	if errors.As(err, &resolutionFailure) {
+		return exitSession
+	}
+	var tmuxFailure *session.TmuxError
+	if errors.As(err, &tmuxFailure) {
+		return exitTmux
+	}
+	return exitNotImplemented
 }
 
 func usageError(stderr io.Writer, message, usage string) int {
