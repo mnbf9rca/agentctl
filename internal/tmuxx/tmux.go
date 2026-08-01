@@ -2,6 +2,7 @@ package tmuxx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,11 +10,15 @@ import (
 
 const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
-	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}"
-	createdWindowFormat  = "#{window_id}\t#{pane_id}"
+	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"
+	createdWindowFormat  = "#{window_id}\t#{pane_id}\t#{pane_pid}"
 	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
+
+// ErrCreationOutput reports that a tmux creation command succeeded but its
+// output could not be parsed or validated.
+var ErrCreationOutput = errors.New("invalid tmux creation output")
 
 // SessionID is an exact tmux session ID such as $4.
 type SessionID string
@@ -35,12 +40,14 @@ type CreatedSession struct {
 	SessionID SessionID
 	WindowID  WindowID
 	PaneID    PaneID
+	PanePID   int
 }
 
 // CreatedWindow contains the IDs tmux prints while creating a window.
 type CreatedWindow struct {
 	WindowID WindowID
 	PaneID   PaneID
+	PanePID  int
 }
 
 // Window is one parsed window and its agentctl metadata.
@@ -107,23 +114,28 @@ func (c Client) NewSession(ctx context.Context, name, role, dir, command string)
 	if err != nil {
 		return CreatedSession{}, err
 	}
-	fields, err := parseCreationRecord(output, 3)
+	fields, err := parseCreationRecord(output, 4)
 	if err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created session: %w", err)
+		return CreatedSession{}, creationOutputError("parse created session", err)
 	}
 	if err := validateID(fields[0], '$'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created session id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created session id", err)
 	}
 	if err := validateID(fields[1], '@'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created window id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created window id", err)
 	}
 	if err := validateID(fields[2], '%'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created pane id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created pane id", err)
+	}
+	panePID, err := parsePositiveDecimal(fields[3], "pane pid")
+	if err != nil {
+		return CreatedSession{}, creationOutputError("parse created pane pid", err)
 	}
 	return CreatedSession{
 		SessionID: SessionID(fields[0]),
 		WindowID:  WindowID(fields[1]),
 		PaneID:    PaneID(fields[2]),
+		PanePID:   panePID,
 	}, nil
 }
 
@@ -139,17 +151,25 @@ func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command
 	if err != nil {
 		return CreatedWindow{}, err
 	}
-	fields, err := parseCreationRecord(output, 2)
+	fields, err := parseCreationRecord(output, 3)
 	if err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created window: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created window", err)
 	}
 	if err := validateID(fields[0], '@'); err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created window id: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created window id", err)
 	}
 	if err := validateID(fields[1], '%'); err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created pane id: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created pane id", err)
 	}
-	return CreatedWindow{WindowID: WindowID(fields[0]), PaneID: PaneID(fields[1])}, nil
+	panePID, err := parsePositiveDecimal(fields[2], "pane pid")
+	if err != nil {
+		return CreatedWindow{}, creationOutputError("parse created pane pid", err)
+	}
+	return CreatedWindow{WindowID: WindowID(fields[0]), PaneID: PaneID(fields[1]), PanePID: panePID}, nil
+}
+
+func creationOutputError(operation string, err error) error {
+	return fmt.Errorf("%w: %s: %w", ErrCreationOutput, operation, err)
 }
 
 // SetSessionOption sets one option on an exact session ID.
@@ -368,6 +388,11 @@ func trimOneTrailingNewline(output []byte) []byte {
 }
 
 func parsePositiveDecimal(value, field string) (int, error) {
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, fmt.Errorf("invalid %s %q: expected a positive decimal", field, value)
+		}
+	}
 	number, err := strconv.Atoi(value)
 	if err != nil || number <= 0 {
 		return 0, fmt.Errorf("invalid %s %q: expected a positive decimal", field, value)
