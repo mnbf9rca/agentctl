@@ -80,7 +80,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `cmd/agentctl` | Subcommand dispatch, exit-code mapping |
 | `internal/cliflags` | Per-subcommand flag parsing, duplicate-option rejection |
 | `internal/config` | `--roles`/`--models` parsing and all validation rules (§7) |
-| `internal/harness` | Harness registry (claude, codex): model-argument rendering, expected-process policy, input-clear sequence |
+| `internal/harness` | Harness registry (claude, codex): model-argument rendering, input-clear sequence. (Process identity is *not* harness data — it is the launch-time observed baseline, §8.) |
 | `internal/shellq` | POSIX single-quote escaping; tiny, table- and fuzz-tested |
 | `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers: `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListPanes`, `SendKeys`, `KillSession`, `DisplayMessage` |
 | `internal/fleet` | Launcher, rollback handler, metadata writer |
