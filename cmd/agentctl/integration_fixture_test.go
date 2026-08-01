@@ -1,0 +1,347 @@
+//go:build integration
+
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+)
+
+const (
+	integrationMarkerEnv  = "AGENTCTL_INTEGRATION_MARKER"
+	integrationCaptureEnv = "AGENTCTL_INTEGRATION_CAPTURE"
+)
+
+type integrationResult struct {
+	exitCode int
+	stdout   string
+	stderr   string
+}
+
+type integrationSession struct {
+	ID      tmuxx.SessionID
+	Name    string
+	Managed string
+	Version string
+	Roles   string
+}
+
+type integrationWindow struct {
+	tmuxx.Window
+	Directory string
+}
+
+type stubInvocation struct {
+	Session string
+	Role    string
+	Harness string
+	Model   string
+}
+
+type integrationFixture struct {
+	t           *testing.T
+	runner      *socketRunner
+	client      tmuxx.Client
+	invocations string
+	captureDir  string
+}
+
+type socketRunner struct {
+	tmuxPath string
+	socket   string
+}
+
+func (r *socketRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	if executable == "tmux" {
+		args = append([]string{"-L", r.socket}, args...)
+		executable = r.tmuxPath
+	}
+	return exec.CommandContext(ctx, executable, args...).Output()
+}
+
+func TestMain(m *testing.M) {
+	if os.Getenv(integrationMarkerEnv) == "1" {
+		integrationMarkerMain()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func integrationMarkerMain() {
+	capture := os.Getenv(integrationCaptureEnv)
+	file, err := os.OpenFile(capture, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(91)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		if _, err := fmt.Fprintln(file, scanner.Text()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(92)
+		}
+		if err := file.Sync(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(93)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(94)
+	}
+}
+
+func newIntegrationFixture(t *testing.T) *integrationFixture {
+	t.Helper()
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skipf("integration test requires tmux: %v", err)
+	}
+	tmuxPath, err = filepath.Abs(tmuxPath)
+	if err != nil {
+		t.Fatalf("resolve tmux path: %v", err)
+	}
+
+	socket := "agentctl-test-" + randomHex(t, 8)
+	runner := &socketRunner{tmuxPath: tmuxPath, socket: socket}
+	fixture := &integrationFixture{
+		t:           t,
+		runner:      runner,
+		client:      tmuxx.New(runner),
+		invocations: filepath.Join(t.TempDir(), "amq-invocations.tsv"),
+		captureDir:  t.TempDir(),
+	}
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		output, cleanupErr := exec.CommandContext(ctx, tmuxPath, "-L", socket, "kill-server").CombinedOutput()
+		if cleanupErr == nil {
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Errorf("timed out cleaning tmux socket %q", socket)
+			return
+		}
+		message := string(output)
+		if strings.Contains(message, "no server running") || strings.Contains(message, "error connecting to") {
+			return
+		}
+		t.Errorf("clean tmux socket %q: %v: %s", socket, cleanupErr, message)
+	})
+
+	fixture.installStubs()
+	t.Setenv("TMUX_PANE", "")
+	fixture.bootstrapEmptyServer()
+	return fixture
+}
+
+func randomHex(t *testing.T, byteCount int) string {
+	t.Helper()
+	buffer := make([]byte, byteCount)
+	if _, err := rand.Read(buffer); err != nil {
+		t.Fatalf("create random tmux socket name: %v", err)
+	}
+	return hex.EncodeToString(buffer)
+}
+
+func (f *integrationFixture) bootstrapEmptyServer() {
+	f.t.Helper()
+	if _, err := f.runner.Output(context.Background(), "tmux", "start-server", ";", "set-option", "-g", "exit-empty", "off"); err != nil {
+		f.t.Fatalf("start empty tmux server: %v", err)
+	}
+}
+
+func (f *integrationFixture) installStubs() {
+	f.t.Helper()
+	binDir := f.t.TempDir()
+	testBinary, err := os.Executable()
+	if err != nil {
+		f.t.Fatalf("resolve test binary: %v", err)
+	}
+
+	amqScript := `#!/bin/sh
+set -eu
+[ "$1" = "coop" ]
+[ "$2" = "exec" ]
+shift 2
+session=""
+role=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session) session="$2"; shift 2 ;;
+    --me) role="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+harness="$1"
+shift
+if [ "${1-}" = "--" ]; then shift; fi
+model=""
+if [ "${1-}" = "--model" ]; then model="$2"; fi
+printf '%s\t%s\t%s\t%s\n' "$session" "$role" "$harness" "$model" >> "$AGENTCTL_STUB_INVOCATIONS"
+export AGENTCTL_STUB_ROLE="$role"
+exec "$harness" "$@"
+`
+	harnessScript := `#!/bin/sh
+set -eu
+export AGENTCTL_INTEGRATION_MARKER=1
+export AGENTCTL_INTEGRATION_CAPTURE="$AGENTCTL_STUB_CAPTURE_DIR/$AGENTCTL_STUB_ROLE.input"
+exec "$AGENTCTL_INTEGRATION_TEST_BINARY" "$@"
+`
+	writeExecutable(f.t, filepath.Join(binDir, "amq"), amqScript)
+	writeExecutable(f.t, filepath.Join(binDir, "claude"), harnessScript)
+	writeExecutable(f.t, filepath.Join(binDir, "codex"), harnessScript)
+
+	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
+	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
+	f.t.Setenv("AGENTCTL_INTEGRATION_TEST_BINARY", testBinary)
+}
+
+func writeExecutable(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+		t.Fatalf("write executable %q: %v", path, err)
+	}
+}
+
+func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult {
+	f.t.Helper()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithRunner(context.Background(), arguments, &stdout, &stderr, f.runner, os.LookupEnv)
+	return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func (f *integrationFixture) sessions() []integrationSession {
+	f.t.Helper()
+	const format = "#{session_id}\t#{session_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_roles}"
+	output := f.tmuxOutput("list-sessions", "-F", format)
+	lines := nonemptyLines(output)
+	sessions := make([]integrationSession, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 5)
+		if len(fields) != 5 {
+			f.t.Fatalf("parse integration session %q: got %d fields", line, len(fields))
+		}
+		sessions = append(sessions, integrationSession{
+			ID: tmuxx.SessionID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3], Roles: fields[4],
+		})
+	}
+	return sessions
+}
+
+func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
+	f.t.Helper()
+	const format = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}\t#{pane_current_path}"
+	output := f.tmuxOutput("list-windows", "-t", string(sessionID), "-F", format)
+	lines := nonemptyLines(output)
+	windows := make([]integrationWindow, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 9)
+		if len(fields) != 9 {
+			f.t.Fatalf("parse integration window %q: got %d fields", line, len(fields))
+		}
+		windows = append(windows, integrationWindow{
+			Window: tmuxx.Window{
+				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3],
+				Role: fields[4], Harness: fields[5], Model: fields[6], Process: fields[7],
+			},
+			Directory: fields[8],
+		})
+	}
+	return windows
+}
+
+func (f *integrationFixture) panes(windowID tmuxx.WindowID) []tmuxx.Pane {
+	f.t.Helper()
+	panes, err := f.client.ListPanes(context.Background(), windowID)
+	if err != nil {
+		f.t.Fatalf("list panes for %s: %v", windowID, err)
+	}
+	return panes
+}
+
+func (f *integrationFixture) processName(pid int) string {
+	f.t.Helper()
+	process, err := f.client.ProcessName(context.Background(), pid)
+	if err != nil {
+		f.t.Fatalf("inspect process %d: %v", pid, err)
+	}
+	return process
+}
+
+func (f *integrationFixture) stubInvocations() []stubInvocation {
+	f.t.Helper()
+	invocations, err := f.readStubInvocations()
+	if err != nil {
+		f.t.Fatalf("read stub invocations: %v", err)
+	}
+	return invocations
+}
+
+func (f *integrationFixture) waitStubInvocations(count int) []stubInvocation {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last []stubInvocation
+	var lastErr error
+	for time.Now().Before(deadline) {
+		last, lastErr = f.readStubInvocations()
+		if lastErr == nil && len(last) >= count {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.t.Fatalf("wait for %d stub invocations: last = %#v, error = %v", count, last, lastErr)
+	return nil
+}
+
+func (f *integrationFixture) readStubInvocations() ([]stubInvocation, error) {
+	data, err := os.ReadFile(f.invocations)
+	if err != nil {
+		return nil, err
+	}
+	lines := nonemptyLines(data)
+	invocations := make([]stubInvocation, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("parse stub invocation %q: got %d fields", line, len(fields))
+		}
+		invocations = append(invocations, stubInvocation{Session: fields[0], Role: fields[1], Harness: fields[2], Model: fields[3]})
+	}
+	return invocations, nil
+}
+
+func (f *integrationFixture) tmuxOutput(arguments ...string) []byte {
+	f.t.Helper()
+	output, err := f.runner.Output(context.Background(), "tmux", arguments...)
+	if err != nil {
+		f.t.Fatalf("tmux %s: %v", strings.Join(arguments, " "), err)
+	}
+	return output
+}
+
+func nonemptyLines(data []byte) []string {
+	trimmed := strings.TrimSuffix(string(data), "\n")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}

@@ -1,0 +1,85 @@
+//go:build integration
+
+package main
+
+import (
+	"os"
+	"testing"
+)
+
+func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launchDir := t.TempDir()
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-launch",
+		"--roles", "planner:claude,coder:codex",
+		"--models", "planner:opus,coder:gpt-5",
+		"--dir", launchDir,
+	)
+	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want silent success", result)
+	}
+
+	sessions := fixture.sessions()
+	if len(sessions) != 1 || sessions[0].Name != "integration-launch" {
+		t.Fatalf("sessions = %#v, want sole integration-launch session", sessions)
+	}
+	if sessions[0].Managed != "1" || sessions[0].Version != "1" || sessions[0].Roles != "planner,coder" {
+		t.Fatalf("session metadata = %#v, want managed version-1 planner,coder roster", sessions[0])
+	}
+
+	windows := fixture.windows(sessions[0].ID)
+	if len(windows) != 2 {
+		t.Fatalf("windows = %#v, want two roles", windows)
+	}
+	expected := map[string]struct {
+		harness string
+		model   string
+	}{
+		"planner": {harness: "claude", model: "opus"},
+		"coder":   {harness: "codex", model: "gpt-5"},
+	}
+	for _, window := range windows {
+		want, ok := expected[window.Name]
+		if !ok {
+			t.Fatalf("unexpected window %#v", window)
+		}
+		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model {
+			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
+		}
+		gotDirectory, err := os.Stat(window.Directory)
+		if err != nil {
+			t.Fatalf("stat window %q directory %q: %v", window.Name, window.Directory, err)
+		}
+		wantDirectory, err := os.Stat(launchDir)
+		if err != nil {
+			t.Fatalf("stat launch directory %q: %v", launchDir, err)
+		}
+		if !os.SameFile(gotDirectory, wantDirectory) {
+			t.Errorf("window %q directory = %q, want same file as %q", window.Name, window.Directory, launchDir)
+		}
+		panes := fixture.panes(window.ID)
+		if len(panes) != 1 || panes[0].Dead || panes[0].WindowPanes != 1 {
+			t.Fatalf("window %q panes = %#v, want one live pane", window.Name, panes)
+		}
+		if got := fixture.processName(panes[0].PID); got != window.Process || got == "" || got == "amq" {
+			t.Errorf("window %q process = %q, metadata baseline = %q", window.Name, got, window.Process)
+		}
+	}
+
+	invocations := fixture.waitStubInvocations(2)
+	if len(invocations) != 2 {
+		t.Fatalf("stub invocations = %#v, want two", invocations)
+	}
+	for _, invocation := range invocations {
+		want, ok := expected[invocation.Role]
+		if !ok {
+			t.Fatalf("unexpected stub invocation %#v", invocation)
+		}
+		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model {
+			t.Errorf("stub invocation = %#v, want launch inputs preserved", invocation)
+		}
+	}
+}
