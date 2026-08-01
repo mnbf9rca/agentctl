@@ -178,8 +178,9 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 1. Parse and validate the complete configuration (§7). Any error → exit 2, nothing created.
 2. Preflight: `tmux`, `amq`, and each *requested* harness resolve on `PATH` → else exit 7.
-3. Existence check, **best-effort and advisory** (§6.7): attempt `list-sessions`; on an exact match → exit 3. On **any**
-   failure, fall through to creation rather than reporting an error — `new-session` is the authoritative arbiter.
+3. Existence check, **best-effort and advisory** (§6.7): attempt `list-sessions`; on an exact match → exit 3. On a
+   tmux or parse failure, fall through to creation — `new-session` is the authoritative arbiter. A cancelled context
+   propagates instead and creates nothing.
 4. Resolve cwd: `--dir` if given, else invocation cwd; pass via `-c` on every window. `--dir` must name an existing
    **directory**; a path that does not exist and a path that exists as a regular file are both usage errors → exit 2,
    checked before anything is created (§7).
@@ -354,12 +355,18 @@ agentctl cannot prove it created: fail-safe beats leak-free.
 fleet could never be created at all. The check is therefore **advisory**: it catches the common case early and cheaply,
 and any failure falls through to `new-session`, which decides.
 
+**Context cancellation is not a failure to fall through on.** "Any failure" here means a tmux or parse failure. A
+cancelled or expired context is control flow, not a verdict about the session: it propagates as the exact sentinel
+(§4.1) and issues **zero** creation calls. Falling through would have agentctl create a fleet after its caller asked it
+to stop — the one outcome a cancelled launch must never produce.
+
 | `list-sessions` | Session present | Outcome |
 |---|---|---|
 | succeeds | no | create → success |
 | succeeds | yes | **exit 3**, caught by the advisory check |
 | fails (no server) | no — there cannot be one | create → success; `new-session` starts server and session atomically |
-| fails (any reason) | yes | `new-session` refuses → **exit 6** carrying tmux's own `duplicate session: NAME` |
+| fails (tmux/parse) | yes | `new-session` refuses → **exit 6** carrying tmux's own `duplicate session: NAME` |
+| context cancelled | — | propagate the sentinel; **no creation call** |
 | — | — | any other creation failure → exit 6 (§6.6 pre-ownership: nothing killed) |
 
 **The same condition can produce exit 3 or exit 6**, depending on whether the advisory check ran. That is deliberate,
