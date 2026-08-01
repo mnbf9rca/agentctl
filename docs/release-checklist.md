@@ -155,8 +155,9 @@ again had no injected payload in the popup snapshot. Whenever an intact
 `/clear` was visible, its popup match was exact. This classifies the failure as
 payload delivery/readiness breakdown under starvation, not popup
 mis-selection or reset-detection error. Therefore the 2026-08-01 release
-baseline is **not ready for merge**: Codex established no loaded floor at the
-current delay.
+baseline does not license reducing the current delay: Codex established no
+loaded floor at 1000 ms. This finding does not block merging the manual
+verification tooling that surfaced and preserves the evidence.
 
 A diagnostic rerun of Codex at 1000 ms used the same 10 trials and 18 workers
 with guaranteed pre-Enter pane captures. Artifact:
