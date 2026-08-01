@@ -24,8 +24,11 @@ type VersionError struct {
 	Version string
 }
 
-// RosterError reports a managed session without role roster metadata.
-type RosterError struct{}
+// RosterError reports absent or structurally invalid role roster metadata on a
+// managed session.
+type RosterError struct {
+	Roster string
+}
 
 // TmuxError reports a tmux or process-runner failure during status collection.
 type TmuxError struct {
@@ -56,6 +59,9 @@ func (e *VersionError) Error() string {
 }
 
 func (e *RosterError) Error() string {
+	if e.Roster != "" {
+		return fmt.Sprintf("managed session has invalid @agentctl_roles roster %q", e.Roster)
+	}
 	return "managed session has no @agentctl_roles roster"
 }
 
@@ -98,6 +104,12 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 	if roster == "" {
 		return Report{}, &RosterError{}
 	}
+	roles := strings.Split(roster, ",")
+	for _, role := range roles {
+		if role == "" {
+			return Report{}, &RosterError{Roster: roster}
+		}
+	}
 	windows, err := c.client.ListWindows(ctx, sessionID)
 	if err != nil {
 		return Report{}, classifyTmuxError(err)
@@ -107,7 +119,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 	for _, window := range windows {
 		windowsByName[window.Name] = append(windowsByName[window.Name], window)
 	}
-	for _, role := range strings.Split(roster, ",") {
+	for _, role := range roles {
 		matches := windowsByName[role]
 		if len(matches) == 0 {
 			report.Agents = append(report.Agents, Agent{Role: role, State: StateMissing})

@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -143,6 +144,42 @@ func TestCollectorRejectsEmptyRosterBeforeListingWindows(t *testing.T) {
 	}
 	if len(runner.Calls) != 3 {
 		t.Fatalf("recorded %d calls, want three option reads and no window listing: %#v", len(runner.Calls), runner.Calls)
+	}
+}
+
+func TestCollectorRejectsEmptyRosterEntriesBeforeListingWindows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		roster string
+	}{
+		{name: "leading comma", roster: ",planner"},
+		{name: "trailing comma", roster: "planner,"},
+		{name: "double comma", roster: "planner,,codex1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runner := tmuxx.NewFakeRunner(
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte(tt.roster + "\n")},
+			)
+			_, err := NewCollector(tmuxx.New(runner)).Collect(context.Background(), "epic123", "$4")
+			var rosterError *RosterError
+			if !errors.As(err, &rosterError) {
+				t.Fatalf("Collect() error = %T %v, want *RosterError", err, err)
+			}
+			wantText := fmt.Sprintf("managed session has invalid @agentctl_roles roster %q", tt.roster)
+			if err.Error() != wantText {
+				t.Fatalf("Collect() error = %q, want %q", err, wantText)
+			}
+			if len(runner.Calls) != 3 {
+				t.Fatalf("recorded %d calls, want three option reads and no window listing: %#v", len(runner.Calls), runner.Calls)
+			}
+		})
 	}
 }
 

@@ -568,6 +568,18 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 			wantText: "agentctl: managed session has no @agentctl_roles roster\n",
 			exact:    true,
 		},
+		{
+			name: "roster with empty entry",
+			responses: []tmuxx.Response{
+				{Stdout: []byte("$4\tfleet\n")},
+				{Stdout: []byte("1\n")},
+				{Stdout: []byte("1\n")},
+				{Stdout: []byte("planner,,codex1\n")},
+			},
+			wantCode: exitSession,
+			wantText: "agentctl: managed session has invalid @agentctl_roles roster \"planner,,codex1\"\n",
+			exact:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
