@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -74,27 +73,6 @@ func (e *ResolutionError) Unwrap() error {
 	return e.Err
 }
 
-// TmuxError reports a tmux runner or output-parse failure during resolution.
-type TmuxError struct {
-	Err error
-}
-
-func (e *TmuxError) Error() string {
-	message := e.Err.Error()
-	var exitError *exec.ExitError
-	if errors.As(e.Err, &exitError) {
-		stderr := strings.TrimRight(string(exitError.Stderr), "\r\n")
-		if stderr != "" && !strings.Contains(message, stderr) {
-			return message + ": " + stderr
-		}
-	}
-	return message
-}
-
-func (e *TmuxError) Unwrap() error {
-	return e.Err
-}
-
 // Resolver applies agentctl's fixed session-source precedence.
 type Resolver struct {
 	client    Client
@@ -137,7 +115,7 @@ func (r Resolver) Resolve(ctx context.Context, explicit *string) (tmuxx.Session,
 		if errors.As(err, &invalidID) {
 			return tmuxx.Session{}, &ResolutionError{Source: SourceCurrent, Err: err}
 		}
-		return tmuxx.Session{}, classifyTmuxError(err)
+		return tmuxx.Session{}, tmuxx.ClassifyError(err)
 	}
 	if err := config.ValidateSessionName(name); err != nil {
 		return tmuxx.Session{}, &ResolutionError{Source: SourceCurrent, Name: name, Err: err}
@@ -148,7 +126,7 @@ func (r Resolver) Resolve(ctx context.Context, explicit *string) (tmuxx.Session,
 func (r Resolver) resolveName(ctx context.Context, name string) (tmuxx.Session, error) {
 	sessions, err := r.client.ListSessions(ctx)
 	if err != nil {
-		return tmuxx.Session{}, classifyTmuxError(err)
+		return tmuxx.Session{}, tmuxx.ClassifyError(err)
 	}
 	matches := make([]tmuxx.Session, 0, 1)
 	for _, candidate := range sessions {
@@ -160,14 +138,4 @@ func (r Resolver) resolveName(ctx context.Context, name string) (tmuxx.Session, 
 		return matches[0], nil
 	}
 	return tmuxx.Session{}, &ResolutionError{Name: name, Matches: matches}
-}
-
-func classifyTmuxError(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return context.Canceled
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
-	}
-	return &TmuxError{Err: err}
 }

@@ -104,10 +104,6 @@ func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr
 		}
 	}
 	if command == "kill" {
-		if killer == nil {
-			fmt.Fprintln(stderr, "agentctl: kill: not implemented")
-			return exitNotImplemented
-		}
 		if err := killer.Execute(ctx, resolved); err != nil {
 			return killError(stderr, err)
 		}
@@ -124,7 +120,7 @@ func killError(stderr io.Writer, err error) int {
 	if errors.As(err, &refusal) {
 		return exitSession
 	}
-	var tmuxFailure *kill.TmuxError
+	var tmuxFailure *tmuxx.TmuxError
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}
@@ -196,7 +192,7 @@ func resolverError(stderr io.Writer, usage string, err error) int {
 	if errors.As(err, &resolutionFailure) {
 		return exitSession
 	}
-	var tmuxFailure *session.TmuxError
+	var tmuxFailure *tmuxx.TmuxError
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}
