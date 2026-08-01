@@ -148,6 +148,20 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 4 additionally covers a role that resolves to more than one window (§13.5).
 
+**Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
+wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
+happened to the system, which is why an unimplemented command must not borrow one. Exit 8 in particular states that a
+fleet launch failed *and was rolled back*; returning it from a stub tells an operator or a planner script that a
+session was created and destroyed when nothing was touched.
+
+Consequently:
+
+- The temporary not-implemented stubs return **1**, uniformly, for every subcommand.
+- A valid invocation that reaches missing functionality is not a usage error, so it is not 2 either.
+- Tests from Wave 2 onward assert **behaviour** — argv recorded by the fake `Runner`, metadata written, output rendered
+  — and never a stub's exit code. A test that passes because a stub happened to return the expected number proves
+  nothing and will keep passing after the real implementation lands.
+
 ## 10. Testing
 
 - Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
