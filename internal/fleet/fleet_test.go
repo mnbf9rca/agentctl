@@ -120,6 +120,67 @@ func TestLaunchRejectsOnlyExactExistingSession(t *testing.T) {
 	}})
 }
 
+func TestLaunchChecksRequestedHarnessesInFirstSeenDeduplicatedOrder(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$9\tepic123\n")})
+	var lookedUp []string
+	launcher := New(runner, Dependencies{
+		LookPath: func(name string) (string, error) {
+			lookedUp = append(lookedUp, name)
+			return "/bin/" + name, nil
+		},
+		Getwd: func() (string, error) { return "/invocation", nil },
+	})
+	fleet := config.FleetConfig{Roles: []config.RoleConfig{
+		{Name: "first", Harness: config.HarnessCodex},
+		{Name: "second", Harness: config.HarnessClaude},
+		{Name: "third", Harness: config.HarnessCodex},
+		{Name: "fourth", Harness: config.HarnessClaude},
+	}}
+
+	err := launcher.Launch(context.Background(), "epic123", fleet, "")
+
+	var exists *SessionExistsError
+	if !errors.As(err, &exists) {
+		t.Fatalf("Launch() error = %v, want *SessionExistsError", err)
+	}
+	if want := []string{"tmux", "amq", "codex", "claude"}; !reflect.DeepEqual(lookedUp, want) {
+		t.Fatalf("LookPath calls = %#v, want %#v", lookedUp, want)
+	}
+	assertCalls(t, runner, tmuxx.Call{Executable: "tmux", Args: []string{
+		"list-sessions", "-F", "#{session_id}\t#{session_name}",
+	}})
+}
+
+func TestLaunchDoesNotTreatPrefixOrCaseCanariesAsExistingSession(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions string
+	}{
+		{name: "prefix", sessions: "$1\tepic1234\n"},
+		{name: "case", sessions: "$2\tEpic123\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(successfulOneRoleResponses(tt.sessions)...)
+			launcher := New(runner, Dependencies{
+				LookPath: presentExecutable,
+				Getwd:    func() (string, error) { return "/invocation", nil },
+			})
+
+			if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), ""); err != nil {
+				t.Fatalf("Launch() error = %v, want successful launch", err)
+			}
+			if len(runner.Calls) != 11 {
+				t.Fatalf("Runner call count = %d, want 11 (successful launch)", len(runner.Calls))
+			}
+			if got := runner.Calls[1]; got.Executable != "tmux" || got.Args[0] != "new-session" {
+				t.Fatalf("first post-list call = %#v, want new-session", got)
+			}
+		})
+	}
+}
+
 func TestLaunchOneRoleCreatesAndStampsReturnedIDs(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{},
@@ -230,6 +291,17 @@ func presentExecutable(name string) (string, error) { return "/bin/" + name, nil
 
 func oneRoleFleet() config.FleetConfig {
 	return config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}
+}
+
+func successfulOneRoleResponses(sessions string) []tmuxx.Response {
+	return []tmuxx.Response{
+		{Stdout: []byte(sessions)},
+		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
+		{}, {}, {},
+		{}, {}, {}, {},
+		{Stdout: []byte("claude\n")},
+		{},
+	}
 }
 
 func assertCalls(t *testing.T, runner *tmuxx.FakeRunner, want ...tmuxx.Call) {
