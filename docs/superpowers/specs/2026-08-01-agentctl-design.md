@@ -99,10 +99,15 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 1. Parse and validate the complete configuration (§7). Any error → exit 2, nothing created.
 2. Preflight: `tmux`, `amq`, and each *requested* harness resolve on `PATH` → else exit 7.
 3. Fail if target session already exists (exact match) → exit 3.
-4. Resolve cwd: `--dir` if given (must exist), else invocation cwd; pass via `-c` on every window.
+4. Resolve cwd: `--dir` if given, else invocation cwd; pass via `-c` on every window. `--dir` must name an existing
+   **directory**; a path that does not exist and a path that exists as a regular file are both usage errors → exit 2,
+   checked before anything is created (§7).
 5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
-6. After each window: stamp metadata (§6.5), then capture the process baseline — poll `ps -o comm= -p <pane_pid>` (bounded, ~5s) until the value is no longer `amq` (the `exec` chain has completed), and store it as `@agentctl_process`. Timeout means the role failed to launch.
-7. Any failure after session creation — including baseline-capture timeout: stop, `kill-session` **only if this invocation created it**, report the failed role on stderr, exit 8.
+6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
+   `ps -o comm= -p <pane_pid>` (§13.2 row 14) until the `amq coop exec → exec(harness)` chain has completed, and store
+   the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
+7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
+   report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
 
 ### 6.2 clear / compact
 
@@ -125,20 +130,71 @@ Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 r
 
 Exactly as the brief: session options `@agentctl_managed=1`, `@agentctl_version=1`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
+Stamping order is **fixed and asserted**, because the fake `Runner` records calls in sequence and a reordering would
+otherwise pass silently:
+
+1. session `@agentctl_managed`
+2. session `@agentctl_version`
+3. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
+   the baseline poll, and finally `@agentctl_process`.
+
+`@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
+
+### 6.6 Launch failure, ownership, and exact messages
+
+Rollback is gated on **ownership**, and ownership begins at exactly one instant: when `new-session` returns output that
+parses into a session ID. Before that, agentctl owns nothing and destroys nothing. After it, the typed ID is the only
+thing rollback ever targets — a session is never killed by name (§13.1).
+
+**Failure after ownership → exit 8.** Stop, kill the typed session ID, and report exactly one of:
+
+```text
+agentctl: failed to launch ROLE; removed incomplete session S
+agentctl: failed to launch ROLE; failed to remove incomplete session S: CAUSE
+```
+
+Both exit 8. A failed cleanup does not become a different class of failure; it becomes a more informative message. The
+launch is never retried, and cleanup is never attempted by name.
+
+**Failure before ownership → exit 6.** If `new-session` returns output that cannot be parsed into a session ID, that is
+a tmux failure, not a launch rollback: no typed ID means no ownership, and no ownership means no destruction. Kill
+nothing. But tmux may have created a session regardless, so the operator must be told, and the exit-6 message appends:
+
+```text
+… ; a session named S may exist; inspect with tmux ls
+```
+
+The asymmetry is deliberate. Leaking a session the operator can see and remove is strictly better than destroying one
+agentctl cannot prove it created: fail-safe beats leak-free.
+
 ## 7. Validation rules (consolidated)
 
 - Session and role names: `^[a-z0-9][a-z0-9_-]*$`.
 - Model identifiers: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (catalogue-free; charset-bound).
 - Harnesses: `claude` | `codex` only.
 - All rejection cases from the brief's Validation section: unknown harnesses, duplicate roles, duplicate model entries, models for undefined roles, missing values, empty `--roles`, trailing commas, whitespace in names, names beginning with `-`, duplicate command-line options.
-- `--dir`: must be an existing directory.
+- `--dir`: must be an existing **directory**. Non-existent path and existing-but-a-regular-file are both exit 2, evaluated before any tmux call (§6.1 step 4).
 
 ## 8. Process-identity policy
 
 No name pattern-matching. Identity is established by observation at launch and verified by equality afterwards:
 
 - **Check target.** The pane's *root* process, `#{pane_pid}` — stable across `exec` and unaffected by agent subprocesses. Never `#{pane_current_command}`, which tracks the foreground job and flaps to child commands (`bash`, `python`, …) while an agent runs tools.
-- **Baseline (launch).** Poll `ps -o comm= -p <pane_pid>` until the `amq coop exec → exec(harness)` chain completes (value no longer `amq`; bounded, ~5s), then store the observed value verbatim in `@agentctl_process`. Timeout → launch failure and rollback.
+- **Baseline (launch).** Poll `ps -o comm= -p <pane_pid>` until the `amq coop exec → exec(harness)` chain completes,
+  then store the observed value in `@agentctl_process` (trimmed exactly once per §13.7). Timeout → launch failure and
+  rollback (§6.6). Poll parameters are fixed, not tuned per call:
+
+  | Parameter | Value |
+  |---|---|
+  | Timeout | 5s |
+  | Cadence | 100ms |
+  | First attempt | immediately, at t=0 |
+  | Final attempt | guaranteed at the boundary before declaring timeout |
+
+  Two conditions share the retry path: the sentinel for "no identity available yet" (`ps` reporting nothing for a pid
+  that has not been replaced yet) and an observed value of literal `amq`. The `amq` comparison is against the exact
+  trimmed value — the bare name, not a path — which holds because the window command invokes `amq` by bare name
+  (§13.7). Neither condition is a tmux failure; both simply mean "not yet".
 - **Verification (control/status).** Re-run the same `ps` query and require **exact equality** with the stored baseline. Mismatch → `unexpected-process` in status; fail closed (exit 5) for control commands. Empty/missing baseline also fails closed.
 
 This handles Claude Code's versioned binary name (`2.1.220` at the time of the spike) without heuristics and is robust to future harness renames. It remains a safety guard against accidents, not an authentication mechanism or an idleness proof: a same-user process can forge metadata or match by renaming an executable.
@@ -146,7 +202,8 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 ## 9. Exit codes
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
-Exit 4 additionally covers a role that resolves to more than one window (§13.5).
+Exit 4 additionally covers a role that resolves to more than one window (§13.5). Exit 6 additionally covers a
+pre-ownership creation failure during `launch`, carrying the operator warning in §6.6.
 
 **Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
@@ -165,6 +222,11 @@ Consequently:
 ## 10. Testing
 
 - Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Launch failure paths (§6.6): both exit-8 messages asserted **verbatim**, including the cleanup-failure variant with a
+  cause; pre-ownership malformed creation output asserts exit 6, the `tmux ls` warning, and that the fake `Runner`
+  recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
+  timeout. Metadata stamping asserted as an exact ordered call sequence (§6.5). `--dir` pointing at a regular file
+  exits 2 with no tmux call recorded.
 - Ambiguous roles (§13.5): two windows with the same name — control commands exit 4 with both window IDs named and **no**
   `send-keys` recorded by the fake `Runner`; `status` emits one row per matching window, each with state `ambiguous`.
 - `shellq`: table tests + Go fuzz test asserting the **exactly-one-word** round-trip property: the rendered string,
