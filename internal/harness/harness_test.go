@@ -63,6 +63,48 @@ func TestAgentArgv(t *testing.T) {
 	}
 }
 
+func TestAgentArgvUsesHarnessModelRenderer(t *testing.T) {
+	registry["different-model-syntax"] = Spec{
+		Executable: "different-model-syntax",
+		modelArgs: func(model string) []string {
+			if model == "implicit-default" {
+				return nil
+			}
+			return []string{"-m=" + model}
+		},
+	}
+	t.Cleanup(func() { delete(registry, "different-model-syntax") })
+
+	tests := []struct {
+		name  string
+		model string
+		want  []string
+	}{
+		{
+			name:  "different syntax",
+			model: "fable",
+			want:  []string{"amq", "coop", "exec", "--session", "epic123", "--me", "worker", "different-model-syntax", "--", "-m=fable"},
+		},
+		{
+			name:  "renderer omits model arguments",
+			model: "implicit-default",
+			want:  []string{"amq", "coop", "exec", "--session", "epic123", "--me", "worker", "different-model-syntax"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := AgentArgv("epic123", "worker", "different-model-syntax", tt.model)
+			if err != nil {
+				t.Fatalf("AgentArgv() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("AgentArgv() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRegistry(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +135,22 @@ func TestRegistry(t *testing.T) {
 				t.Errorf("InputClearKeys = %#v, want %#v", spec.InputClearKeys, want)
 			}
 		})
+	}
+}
+
+func TestLookupReturnsIndependentInputClearKeys(t *testing.T) {
+	first, ok := Lookup("claude")
+	if !ok {
+		t.Fatal("Lookup(claude) did not find registered harness")
+	}
+	first.InputClearKeys[0] = "changed"
+
+	second, ok := Lookup("claude")
+	if !ok {
+		t.Fatal("Lookup(claude) did not find registered harness")
+	}
+	if want := []string{"C-u"}; !reflect.DeepEqual(second.InputClearKeys, want) {
+		t.Fatalf("InputClearKeys = %#v after caller mutation, want %#v", second.InputClearKeys, want)
 	}
 }
 

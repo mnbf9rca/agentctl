@@ -48,9 +48,9 @@ func AgentArgv(session, role, harnessName, model string) ([]string, error) {
 	}
 
 	argv := []string{"amq", "coop", "exec", "--session", session, "--me", role, spec.Executable}
-	if model != "" {
+	if args := spec.ModelArgs(model); len(args) > 0 {
 		argv = append(argv, "--")
-		argv = append(argv, spec.ModelArgs(model)...)
+		argv = append(argv, args...)
 	}
 	return argv, nil
 }
