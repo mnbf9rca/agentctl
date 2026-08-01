@@ -82,7 +82,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/config` | `--roles`/`--models` parsing and all validation rules (§7) |
 | `internal/harness` | Harness registry (claude, codex): model-argument rendering, input-clear sequence. (Process identity is *not* harness data — it is the launch-time observed baseline, §8.) |
 | `internal/shellq` | POSIX single-quote escaping; tiny, table- and fuzz-tested |
-| `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers, one per §13.2 operation: `ListSessions`, `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListWindows`, `ListPanes`, `SendKeys`, `KillSession`, `DisplayMessage`, `AttachSession` |
+| `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers, one per §13.2 operation: `ListSessions`, `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListWindows`, `ListPanes`, `DeliverPayload` (§13.6 — no bare `SendKeys` is exported), `KillSession`, `DisplayMessage`, `AttachSession`, `ProcessName` (§13.7) |
 | `internal/fleet` | Launcher, rollback handler, metadata writer |
 | `internal/session` | Session resolver (precedence chain; explicit failure when unresolvable) |
 | `internal/target` | Managed-metadata reader; 8-step target validation chain |
@@ -167,7 +167,12 @@ Consequently:
 - Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - Ambiguous roles (§13.5): two windows with the same name — control commands exit 4 with both window IDs named and **no**
   `send-keys` recorded by the fake `Runner`; `status` emits one row per matching window, each with state `ambiguous`.
-- `shellq`: table tests + Go fuzz test (round-trip property: rendered string, evaluated by `sh`, yields the original token).
+- `shellq`: table tests + Go fuzz test asserting the **exactly-one-word** round-trip property: the rendered string,
+  evaluated by `sh`, yields the original bytes *as a single shell word*. This supersedes issue #2's original
+  `sh -c "printf %s <quoted>"` criterion, which cannot detect word splitting — `printf` re-uses its format across
+  surplus arguments and concatenates them, so a `Quote` emitting `'planner' ':claude'` for `planner:claude` passes it.
+  Assert the word count as well as the bytes:
+  `set -- <quoted>; printf %s "$#"; printf ':'; printf %s "$1"` → `1:` + input.
 - Integration tests (build tag `integration`): real tmux on a throwaway socket (`tmux -L agentctl-test-$RANDOM`), windows running stub scripts standing in for harnesses; never the user's server, never real agents.
 - Manual verification checklist (tracked as a backlog issue): re-run the §3.3 spike against current harness versions before first release.
 - CI: `go test ./...`, `go vet ./...`.
@@ -237,7 +242,8 @@ express exact matching by session name at all: `=` is an error and a bare name p
 
 ### 13.2 Operations
 
-`⟨sid⟩`, `⟨wid⟩`, `⟨pid⟩` are resolved IDs; `⟨TAB⟩` is a literal 0x09 byte. Each row is the complete argv after `tmux`.
+`⟨sid⟩`, `⟨wid⟩`, `⟨pid⟩` are resolved IDs; `⟨TAB⟩` is a literal 0x09 byte. Rows 1–13 are the argv **after** `tmux`;
+row 14 is the one non-tmux command the `Runner` executes and is shown as a complete argv.
 
 | # | Operation | argv |
 |---|---|---|
@@ -250,10 +256,11 @@ express exact matching by session name at all: `=` is an error and a bare name p
 | 7 | Read window option | `show-options -wqv -t ⟨wid⟩ NAME` |
 | 8 | List windows + metadata | `list-windows -t ⟨sid⟩ -F <§13.3 format>` |
 | 9 | List panes | `list-panes -t ⟨wid⟩ -F #{pane_id}⟨TAB⟩#{pane_pid}⟨TAB⟩#{pane_dead}⟨TAB⟩#{window_panes}` |
-| 10 | Deliver payload (three calls) | `send-keys -t ⟨pid⟩ C-u` · `send-keys -t ⟨pid⟩ -l -- /PAYLOAD` · `send-keys -t ⟨pid⟩ Enter` |
+| 10 | Deliver payload (composite, §13.6) | `send-keys -t ⟨pid⟩ C-u` · `send-keys -t ⟨pid⟩ -l -- /PAYLOAD` · `send-keys -t ⟨pid⟩ Enter` |
 | 11 | Kill session | `kill-session -t ⟨sid⟩` |
 | 12 | Current session name | `display-message -p -t $TMUX_PANE #{session_name}` |
 | 13 | Attach | `-CC attach-session -t ⟨sid⟩` |
+| 14 | Process identity (§13.7) | `ps -o comm= -p PID` — complete argv, not prefixed by `tmux` |
 
 Notes:
 
@@ -323,6 +330,48 @@ not a shape. Consumers that switch on `state` must already tolerate unknown valu
 
 `ambiguous` takes precedence over the other states for an affected window: it describes the target's *resolvability*,
 which is decided before any process check, so a duplicate row is never reported as `running` or `unexpected-process`.
+
+### 13.6 Payload delivery is one exposed operation
+
+`tmuxx` exposes row 10 **only** as `DeliverPayload(paneID, payload)`. The three `send-keys` argv shapes remain the
+canonical truth and are asserted as such against the fake `Runner`, but no individual `SendKeys` wrapper is exported:
+there is no partial delivery, and no caller can send one key event without the other two.
+
+The delay between the payload and `Enter` (§3.3) is a **package constant**, not a parameter. Timing is not part of the
+call signature, so no caller — and no future subcommand — can influence it.
+
+This is the same containment argument as the hardcoded payload registry (§2): the narrower the exposed surface, the
+fewer places a reviewer must check that caller-supplied text cannot reach `send-keys`. A general-purpose exported
+`SendKeys` would reopen precisely the hole the registry closes.
+
+### 13.7 Process identity command
+
+Row 14 is the only non-tmux command agentctl runs. It executes through the same `Runner`, so the fake records its argv
+like any other call and no test needs a real process.
+
+Verified on this machine (darwin, 2026-08-01):
+
+| Probe | Result |
+|---|---|
+| live pid | exit 0, value on stdout |
+| dead pid | exit 1, **empty stdout and empty stderr** |
+| out-of-range pid (`999999`) | exit 1, `ps: process id too large` on stderr |
+| `sh -c 'exec sleep 5'` (PATH-resolved) | `sleep` — bare name |
+| pid 1 (invoked by absolute path) | `/sbin/launchd` — full path |
+| output bytes for `bash` | `b a s h \n` — **trailing newline** |
+
+Three consequences bind the implementation:
+
+- **`comm` reports the executable as invoked** — a bare name when the kernel resolved it through `PATH`, an absolute
+  path when it was invoked by path. The window command (§12.1) runs `exec amq …` by bare name, so the launch poll in
+  §6.1 step 6 compares correctly against the literal `amq`. That is *why* it works, not a coincidence; a window command
+  that ever invoked `amq` by absolute path would break the transition detection silently.
+- **Trim the trailing newline exactly once, in the wrapper.** §8 says the observed value is stored "verbatim"; taken
+  literally that stores `"2.1.220\n"`. Baseline capture and later verification must use the same helper so they cannot
+  disagree about the newline — a mismatch here fails closed on every control command against a healthy fleet.
+- **A dead pid is silent, not an error.** Exit 1 with empty stdout *and* empty stderr is the normal reading for a
+  process that has gone. Treat any non-zero exit or empty output as "no identity available" and fail closed (§8), not
+  as an unexpected condition to report as a tmux failure.
 
 ## 14. Out of scope
 
