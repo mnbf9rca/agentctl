@@ -69,7 +69,47 @@ agentctl compact [--session S] ROLE
 agentctl kill    [--session S]
 ```
 
-Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected. Session resolution for non-launch commands: `--session` > `AGENTCTL_SESSION` > current tmux session; `launch` requires explicit `--session`.
+Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected.
+
+### 4.1 Session resolution
+
+Precedence for non-launch commands: explicit `--session` > `AGENTCTL_SESSION` > the current tmux session. `launch`
+always requires an explicit `--session` and never invokes the resolver at all.
+
+**Empty is not the same as absent.** `--session=` (explicitly supplied, empty) is a usage error → exit 2, with **no**
+fallback: the user named the source, so falling through would substitute a session they did not ask for.
+`AGENTCTL_SESSION` set to empty counts as *absent* and falls through — an exported-but-empty variable is how shells
+represent "unset" in practice.
+
+**An invalid higher-priority source blocks the lower ones.** A source the user set is never silently skipped. Explicit
+invalid → exit 2; `AGENTCTL_SESSION` invalid → exit 3; an invalid displayed name → exit 3. Every candidate is validated
+by `config.ValidateSessionName` — one validator, so the rule cannot drift between sources.
+
+**Resolution is two-step and never targets a name.** Inside tmux, `display-message` (§13.2 row 12, targeted at
+`$TMUX_PANE`) yields a session *name*; that name is then exact-matched against `list-sessions` (row 1) to obtain the
+session ID. The displayed name never reaches `-t` (§13.1).
+
+**`TMUX_PANE` alone is the inside-tmux signal**, and its typed value is what `display-message` targets. `TMUX` being set
+proves nothing on its own, and a bare `display-message` with no `-t` is never issued — it returns empty against a
+detached server and is ambiguous with several clients attached (§13.2 row 12).
+
+**Error mapping** distinguishes a broken world from a broken command:
+
+| Condition | Exit |
+|---|---|
+| No permitted source resolved a candidate | 3 |
+| Candidate matched zero sessions | 3 |
+| Candidate matched **more than one** session (duplicate exact names) | 3, both session IDs named |
+| `Runner` or parse failure on row 1 or row 12 | 6, carrying tmux's own stderr |
+| Context cancellation | preserved as-is |
+
+Duplicate exact session names fail closed at exit 3 rather than 6: tmux returned well-formed output describing a broken
+world, so the *operation* did not fail. This parallels window ambiguity being a role/window error (exit 4, §13.5) —
+session ambiguity is a session-state error. A `tmux` failure such as "no server running" stays **exit 6 and keeps
+tmux's message**; it is never translated into "session not found", because that would be inference presented as fact.
+
+The resolver returns a typed `tmuxx.Session` and performs **zero** `@agentctl_*` reads. The §12.6 managed and version
+gates belong to the command packages that act on the session, not to resolution.
 
 ## 5. Architecture
 
@@ -266,7 +306,8 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 4 additionally covers a role that resolves to more than one window (§13.5). Exit 6 additionally covers a
-pre-ownership creation failure during `launch`, carrying the operator warning in §6.6.
+pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
+failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1).
 
 **Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
@@ -296,6 +337,12 @@ Consequently:
   recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
   timeout. Metadata stamping asserted as an exact ordered call sequence (§6.5). `--dir` pointing at a regular file
   exits 2 with no tmux call recorded.
+- Session resolution (§4.1): precedence with each higher source present; explicit-empty exits 2 without fallback while
+  empty `AGENTCTL_SESSION` falls through; an invalid higher source blocks the lower one; the inside-tmux path asserts
+  the **exact call order** row 12 then row 1, proving the displayed name is never a `-t` target; duplicate exact names
+  exit 3 naming both IDs; a no-server failure exits 6 with tmux's message intact. Forbidden-source canary: with
+  `AM_ROOT`, `AM_SESSION` and a suggestive cwd all set and no permitted source, resolution fails **and the fake
+  `Runner` recorded zero calls** — proving neither inference nor first-session selection.
 - Control chain (§6.2), one case per branch with its exit code: malformed ROLE exits 2 with the fake `Runner` recording
   **zero** calls; a session whose `@agentctl_version` is not `1` exits 3 for control and `kill`; a window whose stored
   role metadata mismatches exits 4; a multi-pane or dead pane exits 5; identity mismatch, empty baseline and
