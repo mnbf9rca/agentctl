@@ -8,6 +8,9 @@ var Stamp string
 
 // Current returns the most precise build identity recorded in the binary.
 func Current() string {
+	// In a linked worktree, Go may record the main checkout's clean VCS state;
+	// release identities must therefore come from make build. See
+	// docs/release-checklist.md.
 	info, ok := debug.ReadBuildInfo()
 	return resolve(Stamp, info, ok)
 }

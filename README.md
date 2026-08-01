@@ -38,6 +38,8 @@ make test
 make install
 ```
 
+Release identities must come from `make build`: plain `go build` inside a linked worktree records the main checkout's revision as clean, not the worktree's revision.
+
 By default, `make install` writes `agentctl` to `~/.local/bin/agentctl`. Ensure `~/.local/bin` is on `PATH`:
 
 ```bash
