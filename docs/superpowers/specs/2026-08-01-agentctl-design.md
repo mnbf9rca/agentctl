@@ -166,6 +166,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/session` | Session resolver (precedence chain; explicit failure when unresolvable) |
 | `internal/target` | Managed-metadata reader; 8-step target validation chain |
 | `internal/control` | Hardcoded registry of predefined, argument-free payloads (`clear → /clear`, `compact → /compact` in v1); dispatcher |
+| `internal/kill` | Managed-only teardown: reads `@agentctl_managed` then `@agentctl_version` by session ID and refuses unless both are `1` (§12.6), then kills by that ID. Read-and-kill only — its client exposes no other capability. |
 | `internal/status` | Collector (tmux format strings only) + table/JSON renderers |
 | `internal/attach` | iTerm2 detection, `tmux -CC attach-session -t '=SESSION'` |
 
