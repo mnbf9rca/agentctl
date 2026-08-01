@@ -348,6 +348,10 @@ func statusError(stderr io.Writer, err error) int {
 	if errors.As(err, &versionFailure) {
 		return exitSession
 	}
+	var rosterFailure *statuspkg.RosterError
+	if errors.As(err, &rosterFailure) {
+		return exitSession
+	}
 	var tmuxFailure *statuspkg.TmuxError
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux

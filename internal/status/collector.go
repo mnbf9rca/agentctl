@@ -17,12 +17,15 @@ type tmuxClient interface {
 	ProcessName(context.Context, int) (string, error)
 }
 
-// VersionError reports a managed session whose metadata belongs to another
-// agentctl version.
+// VersionError reports a managed session with an absent or unsupported
+// agentctl version marker.
 type VersionError struct {
 	Session string
 	Version string
 }
+
+// RosterError reports a managed session without role roster metadata.
+type RosterError struct{}
 
 // TmuxError reports a tmux or process-runner failure during status collection.
 type TmuxError struct {
@@ -46,7 +49,14 @@ func (e *TmuxError) Unwrap() error {
 }
 
 func (e *VersionError) Error() string {
+	if e.Version == "" {
+		return "managed session carries no @agentctl_version marker"
+	}
 	return fmt.Sprintf("session %q was created by a different agentctl version %q", e.Session, e.Version)
+}
+
+func (e *RosterError) Error() string {
+	return "managed session has no @agentctl_roles roster"
 }
 
 // Collector gathers one objective snapshot using the typed tmux boundary.
@@ -86,7 +96,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 		return Report{}, classifyTmuxError(err)
 	}
 	if roster == "" {
-		return Report{}, fmt.Errorf("session %q has empty @agentctl_roles metadata", sessionName)
+		return Report{}, &RosterError{}
 	}
 	windows, err := c.client.ListWindows(ctx, sessionID)
 	if err != nil {

@@ -524,6 +524,7 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 		responses []tmuxx.Response
 		wantCode  int
 		wantText  string
+		exact     bool
 	}{
 		{
 			name: "different version",
@@ -536,6 +537,17 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 			wantText: "created by a different agentctl version",
 		},
 		{
+			name: "absent version marker",
+			responses: []tmuxx.Response{
+				{Stdout: []byte("$4\tfleet\n")},
+				{Stdout: []byte("1\n")},
+				{},
+			},
+			wantCode: exitSession,
+			wantText: "agentctl: managed session carries no @agentctl_version marker\n",
+			exact:    true,
+		},
+		{
 			name: "tmux failure",
 			responses: []tmuxx.Response{
 				{Stdout: []byte("$4\tfleet\n")},
@@ -545,15 +557,16 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 			wantText: "server disappeared",
 		},
 		{
-			name: "metadata invariant",
+			name: "absent roles roster",
 			responses: []tmuxx.Response{
 				{Stdout: []byte("$4\tfleet\n")},
 				{Stdout: []byte("1\n")},
 				{Stdout: []byte("1\n")},
 				{},
 			},
-			wantCode: exitNotImplemented,
-			wantText: "empty @agentctl_roles metadata",
+			wantCode: exitSession,
+			wantText: "agentctl: managed session has no @agentctl_roles roster\n",
+			exact:    true,
 		},
 	}
 	for _, tt := range tests {
@@ -571,7 +584,10 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 			if code != tt.wantCode {
 				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), tt.wantText) {
+			if tt.exact && stderr.String() != tt.wantText {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantText)
+			}
+			if !tt.exact && !strings.Contains(stderr.String(), tt.wantText) {
 				t.Fatalf("stderr = %q, want substring %q", stderr.String(), tt.wantText)
 			}
 			if stdout.Len() != 0 {
