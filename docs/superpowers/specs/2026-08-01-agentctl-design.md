@@ -173,7 +173,8 @@ string field, so the states added here are not a schema change (§13.5). Human o
 
 ### 6.4 attach / kill
 
-`attach`: refuse when the session is missing or unmanaged; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `attach-session` in control mode (§13.2 row 13); never create sessions. `kill`: same managed-session gate, then `kill-session` (§13.2 row 11). Both address the resolved session ID.
+`attach`: refuse when the session is missing or unmanaged; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `attach-session` in control mode (§13.2 row 13); never create sessions. `kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
+`kill-session` (§13.2 row 11). Both address the resolved session ID, never a name (§13.1).
 
 ### 6.5 Metadata
 
@@ -295,6 +296,11 @@ Consequently:
   recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
   timeout. Metadata stamping asserted as an exact ordered call sequence (§6.5). `--dir` pointing at a regular file
   exits 2 with no tmux call recorded.
+- Control chain (§6.2), one case per branch with its exit code: malformed ROLE exits 2 with the fake `Runner` recording
+  **zero** calls; a session whose `@agentctl_version` is not `1` exits 3 for control and `kill`; a window whose stored
+  role metadata mismatches exits 4; a multi-pane or dead pane exits 5; identity mismatch, empty baseline and
+  unavailable identity each exit 5. Each negative branch asserts **no** `DeliverPayload` calls were recorded — the exit
+  code alone would pass an implementation that delivered first and reported second.
 - Ambiguous roles (§13.5): two windows with the same name — control commands exit 4 with both window IDs named and **no**
   `send-keys` recorded by the fake `Runner`; `status` emits one row per matching window, each with state `ambiguous`.
 - `shellq`: table tests + Go fuzz test asserting the **exactly-one-word** round-trip property: the rendered string,
