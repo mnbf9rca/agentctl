@@ -347,7 +347,7 @@ nothing. But tmux may have created a session regardless, so the operator must be
 The asymmetry is deliberate. Leaking a session the operator can see and remove is strictly better than destroying one
 agentctl cannot prove it created: fail-safe beats leak-free.
 
-### 6.7 Creation is the arbiter of session existence
+### 6.7 The existence check must work with no tmux server
 
 `launch`'s existence check cannot be authoritative, because on a machine with no tmux server there is nothing to ask.
 `list-sessions` exits 1 when no server is running, so a first-ever launch on a fresh machine failed at the check and the
@@ -379,6 +379,14 @@ returns 0, but `exit-empty` defaults on, so a server with no sessions exits imme
 `list-sessions` still fails. Keeping it alive requires `set-option -g exit-empty off`, which mutates a global server
 option that outlives the command and leaves an empty server running indefinitely. Neither is acceptable for an
 existence check.
+
+**Rejected: chaining `start-server` into the check.** `tmux start-server ; list-sessions -F …` as a single
+invocation, with `;` as its own argv element, is **verified working** on tmux 3.7b: exit 0 with empty output against no
+server, exit 0 with the session list when one exists, idempotent on repeat. It was rejected because it converges on the
+same design without simplifying it — a check-to-create race still needs the identical duplicate-at-`new-session`
+fall-through, so the chained form buys only rare corners while adding a novel chained-argv row and a server-lifetime
+subtlety to reason about. Recorded rather than omitted because it works, and the next person to reach for it deserves
+the evidence and the reason.
 
 **Why no stderr matching.** The two no-server states emit *different* messages — `error connecting to <path> (No such
 file or directory)` when the socket is absent, and `no server running on <path>` once a server has exited. A string
