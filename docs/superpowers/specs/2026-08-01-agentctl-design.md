@@ -115,7 +115,7 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 ### 6.3 status
 
-Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 rows 6–9). States: `running`, `dead`, `missing`, `unexpected-process`, `unmanaged`. Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`, not `dead` — documented in `--help` and README. JSON output uses the versioned schema from the brief (`"schema": 1`). Human output is the brief's table.
+Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 rows 6–9). States: `running`, `dead`, `missing`, `unexpected-process`, `unmanaged`, `ambiguous` (§13.5). Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`, not `dead` — documented in `--help` and README. JSON output uses the versioned schema from the brief (`"schema": 1`). Human output is the brief's table.
 
 ### 6.4 attach / kill
 
@@ -146,10 +146,13 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 ## 9. Exit codes
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
+Exit 4 additionally covers a role that resolves to more than one window (§13.5).
 
 ## 10. Testing
 
 - Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Ambiguous roles (§13.5): two windows with the same name — control commands exit 4 with both window IDs named and **no**
+  `send-keys` recorded by the fake `Runner`; `status` emits one row per matching window, each with state `ambiguous`.
 - `shellq`: table tests + Go fuzz test (round-trip property: rendered string, evaluated by `sh`, yields the original token).
 - Integration tests (build tag `integration`): real tmux on a throwaway socket (`tmux -L agentctl-test-$RANDOM`), windows running stub scripts standing in for harnesses; never the user's server, never real agents.
 - Manual verification checklist (tracked as a backlog issue): re-run the §3.3 spike against current harness versions before first release.
@@ -213,7 +216,8 @@ express exact matching by session name at all: `=` is an error and a bare name p
    IDs are `$N` (session), `@N` (window), `%N` (pane).
 2. **Address by ID thereafter.** No session, window, or role name is ever passed to `-t` after resolution.
 3. **Exactly one match is required.** Zero → not found. **More than one → fail closed**; tmux permits duplicate window
-   names, so a role matching two windows is an error, never "take the first".
+   names, so a role matching two windows is an error, never "take the first". Handling is asymmetric by command type
+   and is specified in §13.5.
 4. The `=` prefix is not used anywhere. ID targeting is strictly stronger and — unlike `=` — is uniformly accepted by
    every operation in §13.2, including `set-option`/`show-options` and `attach-session` (all verified).
 
@@ -278,7 +282,33 @@ Notes:
   applying the same resolution.
 - **No `remain-on-exit`, verified.** A window whose command exited disappeared entirely from `list-windows`, confirming
   §6.3: an exited agent normally reports `missing`, not `dead`.
-- Ambiguity is a first-class test case: two windows sharing a role name must fail closed, not resolve.
+- Ambiguity is a first-class test case: two windows sharing a role name must fail closed, not resolve (§13.5).
+
+### 13.5 Ambiguous roles
+
+tmux permits two windows in one session to carry the same name, and agentctl cannot prevent it: `--roles` rejects
+duplicate roles, but a user or another process can rename a window or create one by hand at any time after launch.
+Resolution by exact comparison (§13.1) therefore has three outcomes, not two, and the third is handled differently by
+control commands than by reporting commands.
+
+**Control commands** (`clear`, `compact`, `kill`) **fail closed with exit 4.** The error names the role and every
+matching window ID, so the operator can see what to fix:
+
+```text
+agentctl: refusing to clear codex2; role matches 2 windows in epic123 (@4, @7)
+```
+
+Exit 4 is the existing "invalid or missing role/window" code (§9): a role that resolves to two windows is not a usable
+target. No keystroke is delivered, and the ambiguity is never broken by picking the lowest ID, the first listed, or the
+most recently created.
+
+**`status` reports rather than refuses.** Every matching window is rendered as its own row, each carrying state
+`ambiguous`, so the duplicate is visible instead of being hidden behind an error. This adds `ambiguous` to the state
+enum in §6.3. The JSON schema is unchanged and stays at `"schema": 1` — `state` is a string field and gains a value,
+not a shape. Consumers that switch on `state` must already tolerate unknown values.
+
+`ambiguous` takes precedence over the other states for an affected window: it describes the target's *resolvability*,
+which is decided before any process check, so a duplicate row is never reported as `running` or `unexpected-process`.
 
 ## 14. Out of scope
 
