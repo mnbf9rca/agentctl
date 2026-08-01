@@ -1,3 +1,4 @@
 # Agent Message Queue
 .agent-mail/
 .amqrc
+.worktrees/
