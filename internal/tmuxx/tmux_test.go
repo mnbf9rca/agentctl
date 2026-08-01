@@ -141,6 +141,40 @@ func TestCreationRejectsMalformedOutput(t *testing.T) {
 			if err == nil {
 				t.Fatal("creation error = nil, want malformed-output error")
 			}
+			if !errors.Is(err, ErrCreationOutput) {
+				t.Fatalf("creation error = %v, want ErrCreationOutput", err)
+			}
+		})
+	}
+}
+
+func TestCreationRunnerErrorsAreNotCreationOutputErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		run  func(Client) error
+	}{
+		{name: "session", run: func(client Client) error {
+			_, err := client.NewSession(context.Background(), "epic123", "planner", "/repo", "exec agent")
+			return err
+		}},
+		{name: "window", run: func(client Client) error {
+			_, err := client.NewWindow(context.Background(), "$1", "worker", "/repo", "exec agent")
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			wantErr := errors.New("tmux unavailable")
+			err := tt.run(New(NewFakeRunner(Response{Err: wantErr})))
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("creation error = %v, want runner error %v", err, wantErr)
+			}
+			if errors.Is(err, ErrCreationOutput) {
+				t.Fatalf("creation error = %v, must not wrap ErrCreationOutput", err)
+			}
 		})
 	}
 }

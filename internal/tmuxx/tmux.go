@@ -2,6 +2,7 @@ package tmuxx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,6 +15,10 @@ const (
 	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
+
+// ErrCreationOutput reports that a tmux creation command succeeded but its
+// output could not be parsed or validated.
+var ErrCreationOutput = errors.New("invalid tmux creation output")
 
 // SessionID is an exact tmux session ID such as $4.
 type SessionID string
@@ -109,16 +114,16 @@ func (c Client) NewSession(ctx context.Context, name, role, dir, command string)
 	}
 	fields, err := parseCreationRecord(output, 3)
 	if err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created session: %w", err)
+		return CreatedSession{}, creationOutputError("parse created session", err)
 	}
 	if err := validateID(fields[0], '$'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created session id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created session id", err)
 	}
 	if err := validateID(fields[1], '@'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created window id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created window id", err)
 	}
 	if err := validateID(fields[2], '%'); err != nil {
-		return CreatedSession{}, fmt.Errorf("parse created pane id: %w", err)
+		return CreatedSession{}, creationOutputError("parse created pane id", err)
 	}
 	return CreatedSession{
 		SessionID: SessionID(fields[0]),
@@ -141,15 +146,19 @@ func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command
 	}
 	fields, err := parseCreationRecord(output, 2)
 	if err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created window: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created window", err)
 	}
 	if err := validateID(fields[0], '@'); err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created window id: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created window id", err)
 	}
 	if err := validateID(fields[1], '%'); err != nil {
-		return CreatedWindow{}, fmt.Errorf("parse created pane id: %w", err)
+		return CreatedWindow{}, creationOutputError("parse created pane id", err)
 	}
 	return CreatedWindow{WindowID: WindowID(fields[0]), PaneID: PaneID(fields[1])}, nil
+}
+
+func creationOutputError(operation string, err error) error {
+	return fmt.Errorf("%w: %s: %w", ErrCreationOutput, operation, err)
 }
 
 // SetSessionOption sets one option on an exact session ID.
