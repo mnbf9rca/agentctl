@@ -220,11 +220,19 @@ read loop is caught rather than merely discouraged.
 | any | present and ≠ `1` | any | exit 3 — created by a different agentctl version (§12.6) |
 | `1` | **absent** | any | exit 3 — *"managed session carries no `@agentctl_version` marker"* |
 | `1` | `1` | **absent** | exit 3 — *"managed session has no `@agentctl_roles` roster"* |
-| `1` | `1` | present | proceed to per-role enumeration |
+| `1` | `1` | present with an **empty entry** | exit 3 — naming the raw roster value |
+| `1` | `1` | present, all entries non-empty | proceed to per-role enumeration |
 
-The last two are session-state defects of the same family: the session claims management but lacks metadata that
-management implies. Both fail closed, and both messages state the fact that is true — an **absent** marker is not "a
-different version", and saying so would assert an event that did not happen (§1.1).
+The last three are session-state defects of the same family: the session claims management but its metadata is absent
+or malformed. All fail closed, and each message states the fact that is true — an **absent** marker is not "a different
+version", and saying so would assert an event that did not happen (§1.1).
+
+The roster is comma-split, so `planner,,codex1`, a leading comma, or a trailing comma each yield an empty entry.
+Rendering that as a `missing` role would have `status` assert a role that **never existed** — §1.1's first half again,
+and worse than refusing, because it invents a fleet member rather than declining to describe one. `launch` cannot
+produce this: role names are charset-validated to exclude commas and empty roles are rejected at parse (§7). It is
+therefore purely a corruption or hand-edit detection path, which is exactly why it must fail closed rather than be
+smoothed over — the only way to reach it is for something to have gone wrong already.
 
 **Roster drives enumeration.** Roles come from `@agentctl_roles` (§6.5), not from whatever windows happen to exist. A
 roster role with no exactly-matching window is `missing` — including the snapshot-then-gone race, where a window
