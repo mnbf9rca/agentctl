@@ -10,6 +10,7 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/session"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -51,15 +52,24 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
-	resolver := session.New(tmuxx.New(tmuxx.RealRunner{}), os.LookupEnv)
-	return runWithResolver(context.Background(), arguments, stdout, stderr, resolver)
+	client := tmuxx.New(tmuxx.RealRunner{})
+	resolver := session.New(client, os.LookupEnv)
+	return runWithDependencies(context.Background(), arguments, stdout, stderr, resolver, kill.New(client))
 }
 
 type sessionResolver interface {
 	Resolve(context.Context, *string) (tmuxx.Session, error)
 }
 
+type sessionKiller interface {
+	Execute(context.Context, tmuxx.Session) error
+}
+
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
+	return runWithDependencies(ctx, arguments, stdout, stderr, resolver, nil)
+}
+
+func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
 	}
@@ -82,17 +92,42 @@ func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.
 	if err != nil {
 		return usageError(stderr, err.Error(), usage)
 	}
+	var resolved tmuxx.Session
 	if command != "launch" {
 		var explicit *string
 		if options.sessionSet {
 			explicit = &options.session
 		}
-		if _, err := resolver.Resolve(ctx, explicit); err != nil {
+		resolved, err = resolver.Resolve(ctx, explicit)
+		if err != nil {
 			return resolverError(stderr, usage, err)
 		}
 	}
+	if command == "kill" {
+		if killer == nil {
+			fmt.Fprintln(stderr, "agentctl: kill: not implemented")
+			return exitNotImplemented
+		}
+		if err := killer.Execute(ctx, resolved); err != nil {
+			return killError(stderr, err)
+		}
+		return exitOK
+	}
 
 	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
+	return exitNotImplemented
+}
+
+func killError(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	var refusal *kill.RefusalError
+	if errors.As(err, &refusal) {
+		return exitSession
+	}
+	var tmuxFailure *kill.TmuxError
+	if errors.As(err, &tmuxFailure) {
+		return exitTmux
+	}
 	return exitNotImplemented
 }
 

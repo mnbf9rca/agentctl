@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/session"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -128,7 +130,6 @@ func TestRunAcceptsEachCommandShapeBeforeReachingStub(t *testing.T) {
 		{name: "status", args: []string{"status", "--session", "fleet", "--json"}},
 		{name: "clear", args: []string{"clear", "--session", "fleet", "planner"}},
 		{name: "compact", args: []string{"compact", "--session", "fleet", "planner"}},
-		{name: "kill", args: []string{"kill", "--session", "fleet"}},
 	}
 
 	for _, tt := range tests {
@@ -218,13 +219,147 @@ func TestRunValidNonLaunchResolutionReachesCommandStub(t *testing.T) {
 	resolver := session.New(tmuxx.New(runner), lookupValues(nil))
 	var stdout, stderr bytes.Buffer
 
-	code := runWithResolver(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver)
+	code := runWithResolver(context.Background(), []string{"status", "--session", "fleet"}, &stdout, &stderr, resolver)
 
 	if code != exitNotImplemented {
 		t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, exitNotImplemented, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "kill: not implemented") {
-		t.Fatalf("stderr = %q, want kill stub", stderr.String())
+	if !strings.Contains(stderr.String(), "status: not implemented") {
+		t.Fatalf("stderr = %q, want status stub", stderr.String())
+	}
+}
+
+func TestRunKillExecutesManagedSessionByResolvedID(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{},
+	)
+	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
+		return tmuxx.Session{ID: "$4", Name: "fleet"}, nil
+	})
+	var stdout, stderr bytes.Buffer
+
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+
+	if code != exitOK {
+		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		{Executable: "tmux", Args: []string{"kill-session", "-t", "$4"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q; want both empty", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunKillRefusalsMapToSessionExitWithoutKilling(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []tmuxx.Response
+		wantCalls []tmuxx.Call
+		wantText  string
+	}{
+		{
+			name:      "unmanaged",
+			responses: []tmuxx.Response{{Stdout: nil}},
+			wantCalls: []tmuxx.Call{{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}}},
+			wantText:  "not managed",
+		},
+		{
+			name:      "different version",
+			responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: []byte("2\n")}},
+			wantCalls: []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+			},
+			wantText: "different agentctl version",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(tt.responses...)
+			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
+				return tmuxx.Session{ID: "$4", Name: "fleet"}, nil
+			})
+			var stdout, stderr bytes.Buffer
+
+			code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+
+			if code != exitSession {
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "fleet") || !strings.Contains(stderr.String(), tt.wantText) {
+				t.Fatalf("stderr = %q, want session name and %q", stderr.String(), tt.wantText)
+			}
+			if !reflect.DeepEqual(runner.Calls, tt.wantCalls) {
+				t.Fatalf("Calls = %#v, want %#v", runner.Calls, tt.wantCalls)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunKillMissingSessionStopsBeforeOwnershipChecks(t *testing.T) {
+	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
+		return tmuxx.Session{}, &session.ResolutionError{Name: "fleet"}
+	})
+	killCalled := false
+	killer := sessionKillerFunc(func(context.Context, tmuxx.Session) error {
+		killCalled = true
+		return nil
+	})
+	var stdout, stderr bytes.Buffer
+
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, killer)
+
+	if code != exitSession {
+		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+	}
+	if killCalled {
+		t.Fatal("session killer was called for a missing session")
+	}
+	if !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("stderr = %q, want missing-session error", stderr.String())
+	}
+}
+
+func TestRunKillTmuxFailuresMapToTmuxExit(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []tmuxx.Response
+	}{
+		{name: "managed read", responses: []tmuxx.Response{{Err: errors.New("managed read failed")}}},
+		{name: "version read", responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Err: errors.New("version read failed")}}},
+		{name: "kill", responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: []byte("1\n")}, {Err: errors.New("kill failed")}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(tt.responses...)
+			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
+				return tmuxx.Session{ID: "$4", Name: "fleet"}, nil
+			})
+			var stdout, stderr bytes.Buffer
+
+			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+
+			if code != exitTmux {
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "failed") {
+				t.Fatalf("stderr = %q, want tmux failure", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
 	}
 }
 
@@ -280,6 +415,12 @@ type resolverFunc func(context.Context, *string) (tmuxx.Session, error)
 
 func (f resolverFunc) Resolve(ctx context.Context, explicit *string) (tmuxx.Session, error) {
 	return f(ctx, explicit)
+}
+
+type sessionKillerFunc func(context.Context, tmuxx.Session) error
+
+func (f sessionKillerFunc) Execute(ctx context.Context, target tmuxx.Session) error {
+	return f(ctx, target)
 }
 
 func lookupValues(values map[string]string) session.LookupEnv {
