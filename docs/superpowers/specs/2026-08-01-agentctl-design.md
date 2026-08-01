@@ -212,12 +212,36 @@ identity) may be issued. Row 7 (read window option) is permitted by the table bu
 already carries every window option — tests assert it is **absent** from recorded calls, so an accidental per-window
 read loop is caught rather than merely discouraged.
 
-**Unmanaged session.** `@agentctl_managed` missing or not `1` → render `{"schema": 1, "session": S, "managed": false,
-"agents": []}` and exit 0. A version present but not `1` is still exit 3 (§12.6).
+**Session-level inputs.** Every value `status` reads at session scope, in every state it can hold:
+
+| `@agentctl_managed` | `@agentctl_version` | `@agentctl_roles` | Result |
+|---|---|---|---|
+| missing or ≠ `1` | absent or `1` | any | render `{"schema": 1, "session": S, "managed": false, "agents": []}`, exit 0 |
+| any | present and ≠ `1` | any | exit 3 — created by a different agentctl version (§12.6) |
+| `1` | **absent** | any | exit 3 — *"managed session carries no `@agentctl_version` marker"* |
+| `1` | `1` | **absent** | exit 3 — *"managed session has no `@agentctl_roles` roster"* |
+| `1` | `1` | present with an **empty entry** | exit 3 — naming the raw roster value |
+| `1` | `1` | present, all entries non-empty | proceed to per-role enumeration |
+
+The last three are session-state defects of the same family: the session claims management but its metadata is absent
+or malformed. All fail closed, and each message states the fact that is true — an **absent** marker is not "a different
+version", and saying so would assert an event that did not happen (§1.1).
+
+The roster is comma-split, so `planner,,codex1`, a leading comma, or a trailing comma each yield an empty entry.
+Rendering that as a `missing` role would have `status` assert a role that **never existed** — §1.1's first half again,
+and worse than refusing, because it invents a fleet member rather than declining to describe one. `launch` cannot
+produce this: role names are charset-validated to exclude commas and empty roles are rejected at parse (§7). It is
+therefore purely a corruption or hand-edit detection path, which is exactly why it must fail closed rather than be
+smoothed over — the only way to reach it is for something to have gone wrong already.
 
 **Roster drives enumeration.** Roles come from `@agentctl_roles` (§6.5), not from whatever windows happen to exist. A
 roster role with no exactly-matching window is `missing` — including the snapshot-then-gone race, where a window
 disappears between `list-windows` and `list-panes`.
+
+**Process-identity read failures** (row 14) split by what happened. `ErrProcessUnavailable` — the process is gone, or
+`ps` reported nothing for it — is `unexpected-process`, because identity that cannot be verified is not identity
+verified. Any *other* failure means the `ps` command itself failed, which is a tool failure: exit 6, carrying its
+cause. A command did run, so exit 6 is available here in a way it is not for input validation (§1.1, §4.1).
 
 **State precedence**, evaluated in this order, first match wins:
 
