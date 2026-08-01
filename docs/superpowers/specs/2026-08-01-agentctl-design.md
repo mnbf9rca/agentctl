@@ -313,7 +313,8 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 4 additionally covers a role that resolves to more than one window (§13.5). Exit 6 additionally covers a
 pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
-failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1).
+failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
+or a version other than `1` (§6.4, §12.6); `attach` uses 6 when control mode cannot be established.
 
 **Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
