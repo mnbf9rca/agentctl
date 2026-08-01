@@ -40,3 +40,26 @@ func TestSetReturnsParsedValuesAndArguments(t *testing.T) {
 		t.Fatalf("Args() = %q, want %q", got, want)
 	}
 }
+
+func TestSetDistinguishesOmittedFromExplicitlyEmptyOption(t *testing.T) {
+	omitted := New("launch")
+	omitted.String("models", "", "role and model assignments")
+	if err := omitted.Parse(nil); err != nil {
+		t.Fatalf("Parse(nil) error = %v", err)
+	}
+	if omitted.WasSet("models") {
+		t.Fatal("WasSet(models) = true for omitted option")
+	}
+
+	provided := New("launch")
+	models := provided.String("models", "", "role and model assignments")
+	if err := provided.Parse([]string{"--models="}); err != nil {
+		t.Fatalf("Parse(--models=) error = %v", err)
+	}
+	if !provided.WasSet("models") {
+		t.Fatal("WasSet(models) = false for explicitly empty option")
+	}
+	if *models != "" {
+		t.Fatalf("models = %q, want empty", *models)
+	}
+}

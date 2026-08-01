@@ -48,6 +48,39 @@ func TestRunRejectsDuplicateBoolOption(t *testing.T) {
 	}
 }
 
+func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
+	tests := [][]string{
+		{"launch", "--session", "fleet", "--roles", "planner:claude", "--models="},
+		{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", ""},
+	}
+
+	for _, arguments := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := run(arguments, &stdout, &stderr); code != exitUsage {
+			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
+		}
+		if !strings.Contains(stderr.String(), "--models must not be empty") || !strings.Contains(stderr.String(), "Usage:") {
+			t.Fatalf("stderr = %q, want empty-model error and usage", stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout = %q, want empty", stdout.String())
+		}
+	}
+}
+
+func TestRunAcceptsOmittedModelsBeforeReachingStub(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	code := run([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr)
+
+	if code == exitUsage {
+		t.Fatalf("run() = usage error; stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "launch: not implemented") {
+		t.Fatalf("stderr = %q, want launch stub message", stderr.String())
+	}
+}
+
 func TestRunAcceptsEachCommandShapeBeforeReachingStub(t *testing.T) {
 	tests := []struct {
 		name string

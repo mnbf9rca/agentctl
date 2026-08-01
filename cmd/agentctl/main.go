@@ -77,11 +77,11 @@ func parseCommand(command string, arguments []string) error {
 	flags := cliflags.New(command)
 	session := flags.String("session", "", "session name")
 
-	var roles *string
+	var roles, models *string
 	switch command {
 	case "launch":
 		roles = flags.String("roles", "", "role and harness assignments")
-		flags.String("models", "", "role and model assignments")
+		models = flags.String("models", "", "role and model assignments")
 		flags.String("dir", "", "working directory")
 	case "status":
 		flags.Bool("json", false, "emit JSON")
@@ -99,6 +99,9 @@ func parseCommand(command string, arguments []string) error {
 		}
 		if *roles == "" {
 			return errors.New("--roles is required")
+		}
+		if flags.WasSet("models") && *models == "" {
+			return errors.New("--models must not be empty")
 		}
 		if len(positional) != 0 {
 			return errors.New("launch accepts no positional arguments")
