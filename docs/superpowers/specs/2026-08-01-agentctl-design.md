@@ -165,6 +165,20 @@ One epic, five sequential waves; issues within a wave are parallelizable across 
 4. **Control** — `target` validation chain; `control` dispatcher; manual spike re-verification.
 5. **Attach & polish** — `attach` (iTerm2); README + iTerm2 setting documentation; integration suite; deferred `--if-missing` issue filed.
 
-## 12. Out of scope
+## 12. Pinned clarifications (2026-08-01, post-kickoff)
+
+Authoritative answers to implementation questions raised during Wave 1. These bind all packages and reviews.
+
+1. **Window-command assembly site.** Exactly one place assembles the window command: `internal/fleet`, as the string `"exec " + shellq.Join(harness.AgentArgv(...))`. `harness` returns argv (starting at `amq`); `shellq` quotes and joins; `fleet` prepends the unquoted `exec` shell keyword and passes the string to `tmuxx`. No other package may compose shell-interpreted strings.
+2. **`shellq.Quote` is total.** Safe for arbitrary bytes with no validated-input precondition (defense in depth, independent of `internal/config`). Sole documented exclusion: NUL, which cannot exist in an argv element; the fuzz round-trip property skips inputs containing `\x00`.
+3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation; the table will be added to this spec before Wave 2 GO (drafted by reviewer, ratified by planner) and any change to it is a spec change.
+4. **Exact targeting everywhere.** Session targets always use the `=` exact-match prefix. Windows and panes are never resolved by passing names to `-t` matching: resolve via `list-windows`/`list-panes` output with exact string comparison in Go, then address by window ID / pane ID. This is a security invariant; reviews fail PRs on it.
+5. **Exit code for bad ROLE argument.** A ROLE failing `^[a-z0-9][a-z0-9_-]*$` is a usage error → exit 2. A well-formed ROLE with no matching managed window → exit 4.
+6. **Version gate.** The managed-session gate for control/status/kill requires `@agentctl_managed=1` **and** `@agentctl_version=1`. Any other version fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to control.
+7. **Defaulted model rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`.
+8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
+9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
+
+## 13. Out of scope
 
 Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
