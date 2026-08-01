@@ -10,8 +10,18 @@ import (
 
 // Set is a command-specific flag set.
 type Set struct {
-	set    *flag.FlagSet
-	values map[string]*onceValue
+	set        *flag.FlagSet
+	values     map[string]*onceValue
+	parseError error
+}
+
+// DuplicateOptionError reports a command-line option supplied more than once.
+type DuplicateOptionError struct {
+	Name string
+}
+
+func (e *DuplicateOptionError) Error() string {
+	return fmt.Sprintf("--%s provided more than once", e.Name)
 }
 
 // New constructs a flag set that returns parse errors without printing them.
@@ -25,7 +35,7 @@ func New(name string) *Set {
 func (s *Set) String(name, value, usage string) *string {
 	destination := new(string)
 	*destination = value
-	tracked := &onceValue{name: name, value: &stringValue{destination: destination}}
+	tracked := &onceValue{name: name, value: &stringValue{destination: destination}, parseError: &s.parseError}
 	s.values[name] = tracked
 	s.set.Var(tracked, name, usage)
 	return destination
@@ -35,7 +45,7 @@ func (s *Set) String(name, value, usage string) *string {
 func (s *Set) Bool(name string, value bool, usage string) *bool {
 	destination := new(bool)
 	*destination = value
-	tracked := &onceValue{name: name, value: &boolValue{destination: destination}}
+	tracked := &onceValue{name: name, value: &boolValue{destination: destination}, parseError: &s.parseError}
 	s.values[name] = tracked
 	s.set.Var(tracked, name, usage)
 	return destination
@@ -43,7 +53,12 @@ func (s *Set) Bool(name string, value bool, usage string) *bool {
 
 // Parse parses command arguments.
 func (s *Set) Parse(arguments []string) error {
-	return s.set.Parse(arguments)
+	s.parseError = nil
+	err := s.set.Parse(arguments)
+	if s.parseError != nil {
+		return s.parseError
+	}
+	return err
 }
 
 // Args returns positional arguments remaining after option parsing.
@@ -58,14 +73,17 @@ func (s *Set) WasSet(name string) bool {
 }
 
 type onceValue struct {
-	name  string
-	value flag.Value
-	seen  bool
+	name       string
+	value      flag.Value
+	seen       bool
+	parseError *error
 }
 
 func (v *onceValue) Set(value string) error {
 	if v.seen {
-		return fmt.Errorf("--%s provided more than once", v.name)
+		err := &DuplicateOptionError{Name: v.name}
+		*v.parseError = err
+		return err
 	}
 	v.seen = true
 	return v.value.Set(value)

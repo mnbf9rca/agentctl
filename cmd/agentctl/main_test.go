@@ -22,29 +22,56 @@ func TestRunRejectsUnknownCommandWithUsage(t *testing.T) {
 	}
 }
 
-func TestRunRejectsDuplicateCommandOption(t *testing.T) {
+func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	code := run([]string{"launch", "--session", "one", "--session", "two", "--roles", "planner:claude"}, &stdout, &stderr)
+	code := run(nil, &stdout, &stderr)
 
 	if code != exitUsage {
 		t.Fatalf("run() = %d, want %d", code, exitUsage)
 	}
-	if !strings.Contains(stderr.String(), "--session provided more than once") || !strings.Contains(stderr.String(), "Usage:") {
-		t.Fatalf("stderr = %q, want duplicate error and launch usage", stderr.String())
+	const want = "agentctl: command required\nUsage: agentctl COMMAND [OPTIONS]\n"
+	if !strings.HasPrefix(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+func TestRunRejectsDuplicateCommandOption(t *testing.T) {
+	tests := [][]string{
+		{"launch", "--session", "one", "--session", "two", "--roles", "planner:claude"},
+		{"launch", "--session=one", "--session=two", "--roles", "planner:claude"},
+	}
+	const want = "agentctl: --session provided more than once\nUsage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n"
+
+	for _, arguments := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := run(arguments, &stdout, &stderr); code != exitUsage {
+			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
+		}
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
 	}
 }
 
 func TestRunRejectsDuplicateBoolOption(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-
-	code := run([]string{"status", "--json", "--json"}, &stdout, &stderr)
-
-	if code != exitUsage {
-		t.Fatalf("run() = %d, want %d", code, exitUsage)
+	tests := [][]string{
+		{"status", "--json", "--json"},
+		{"status", "--json=true", "--json=false"},
 	}
-	if !strings.Contains(stderr.String(), "--json provided more than once") {
-		t.Fatalf("stderr = %q, want duplicate --json error", stderr.String())
+	const want = "agentctl: --json provided more than once\nUsage: agentctl status [--session SESSION] [--json]\n"
+
+	for _, arguments := range tests {
+		var stdout, stderr bytes.Buffer
+		if code := run(arguments, &stdout, &stderr); code != exitUsage {
+			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
+		}
+		if stderr.String() != want {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
 	}
 }
 
@@ -98,8 +125,8 @@ func TestRunAcceptsEachCommandShapeBeforeReachingStub(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr)
-			if code == exitUsage {
-				t.Fatalf("run(%q) = usage error; stderr = %q", tt.args, stderr.String())
+			if code != exitNotImplemented {
+				t.Fatalf("run(%q) = %d, want %d; stderr = %q", tt.args, code, exitNotImplemented, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.name+": not implemented") {
 				t.Fatalf("stderr = %q, want command stub message", stderr.String())

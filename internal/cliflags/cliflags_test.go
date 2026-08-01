@@ -1,6 +1,7 @@
 package cliflags
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,23 @@ func TestSetRejectsDuplicateStringOption(t *testing.T) {
 	err := flags.Parse([]string{"--session", "one", "--session", "two"})
 	if err == nil || !strings.Contains(err.Error(), "--session provided more than once") {
 		t.Fatalf("Parse() error = %v, want duplicate --session error", err)
+	}
+}
+
+func TestSetReturnsTypedDuplicateOptionError(t *testing.T) {
+	flags := New("launch")
+	flags.String("session", "", "session name")
+
+	err := flags.Parse([]string{"--session=one", "--session=two"})
+	var duplicate *DuplicateOptionError
+	if !errors.As(err, &duplicate) {
+		t.Fatalf("Parse() error = %T %v, want *DuplicateOptionError", err, err)
+	}
+	if duplicate.Name != "session" {
+		t.Fatalf("DuplicateOptionError.Name = %q, want %q", duplicate.Name, "session")
+	}
+	if got, want := err.Error(), "--session provided more than once"; got != want {
+		t.Fatalf("Parse() error = %q, want %q", got, want)
 	}
 }
 

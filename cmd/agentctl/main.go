@@ -12,6 +12,7 @@ import (
 
 const (
 	exitOK                = 0
+	exitNotImplemented    = 1
 	exitUsage             = 2
 	exitSession           = 3
 	exitRole              = 4
@@ -70,7 +71,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
-	return stubExitCode(command)
+	return exitNotImplemented
 }
 
 func parseCommand(command string, arguments []string) error {
@@ -122,15 +123,4 @@ func parseCommand(command string, arguments []string) error {
 func usageError(stderr io.Writer, message, usage string) int {
 	fmt.Fprintf(stderr, "agentctl: %s\n%s", message, usage)
 	return exitUsage
-}
-
-func stubExitCode(command string) int {
-	switch command {
-	case "launch":
-		return exitLaunch
-	case "clear", "compact":
-		return exitRole
-	default:
-		return exitSession
-	}
 }
