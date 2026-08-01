@@ -176,12 +176,13 @@ func TestLaunchChecksRequestedHarnessesInFirstSeenDeduplicatedOrder(t *testing.T
 	}})
 }
 
-func TestLaunchDoesNotTreatPrefixOrCaseCanariesAsExistingSession(t *testing.T) {
+func TestLaunchDoesNotTreatPrefixSuffixOrCaseCanariesAsExistingSession(t *testing.T) {
 	tests := []struct {
 		name     string
 		sessions string
 	}{
 		{name: "prefix", sessions: "$1\tepic1234\n"},
+		{name: "suffix", sessions: "$4\txepic123\n"},
 		{name: "case", sessions: "$2\tEpic123\n"},
 	}
 
@@ -553,7 +554,23 @@ func TestLaunchRollsBackMalformedLaterWindowOutput(t *testing.T) {
 	if !errors.Is(err, tmuxx.ErrCreationOutput) {
 		t.Fatalf("Launch() error = %v, want wrapped tmuxx.ErrCreationOutput", err)
 	}
-	assertLastKill(t, runner, "$17")
+	if launchErr.CleanupErr != nil {
+		t.Fatalf("LaunchError.CleanupErr = %v, want successful cleanup", launchErr.CleanupErr)
+	}
+	if got, want := len(runner.Calls), 13; got != want {
+		t.Fatalf("runner calls = %d, want %d (malformed new-window, one rollback, no recovery lookup)", got, want)
+	}
+	if got, want := runner.Calls[11], (tmuxx.Call{Executable: "tmux", Args: []string{
+		"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/repo",
+		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
+		"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'reviewer' 'codex'",
+	}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("malformed new-window call = %#v, want %#v", got, want)
+	}
+	if got, want := runner.Calls[12], (tmuxx.Call{Executable: "tmux", Args: []string{"kill-session", "-t", "$17"}}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rollback call = %#v, want returned-ID kill %#v", got, want)
+	}
+	assertNoRecoveryLookup(t, runner.Calls[1:12])
 }
 
 func TestLaunchErrorReportsCleanupResultAndUnwrapsFailureCause(t *testing.T) {
@@ -578,6 +595,10 @@ func TestLaunchErrorReportsCleanupResultAndUnwrapsFailureCause(t *testing.T) {
 			if !errors.As(err, &launchErr) {
 				t.Fatalf("Launch() error = %v, want *LaunchError", err)
 			}
+			if got, want := len(runner.Calls), 4; got != want {
+				t.Fatalf("runner calls = %d, want %d (failure, one cleanup attempt)", got, want)
+			}
+			assertExactlyOneKill(t, runner, "$17")
 			if got := err.Error(); got != tt.wantMessage {
 				t.Fatalf("Launch() error = %q, want %q", got, tt.wantMessage)
 			}
@@ -587,7 +608,6 @@ func TestLaunchErrorReportsCleanupResultAndUnwrapsFailureCause(t *testing.T) {
 			if (launchErr.CleanupErr != nil) != tt.wantCleanup {
 				t.Fatalf("LaunchError.CleanupErr = %v, want cleanup present %t", launchErr.CleanupErr, tt.wantCleanup)
 			}
-			assertLastKill(t, runner, "$17")
 		})
 	}
 }
@@ -727,6 +747,36 @@ func assertLastKill(t *testing.T, runner *tmuxx.FakeRunner, sessionID string) {
 	}
 	if got, want := runner.Calls[len(runner.Calls)-1], (tmuxx.Call{Executable: "tmux", Args: []string{"kill-session", "-t", sessionID}}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("last call = %#v, want %#v", got, want)
+	}
+}
+
+func assertExactlyOneKill(t *testing.T, runner *tmuxx.FakeRunner, sessionID string) {
+	t.Helper()
+	want := tmuxx.Call{Executable: "tmux", Args: []string{"kill-session", "-t", sessionID}}
+	var kills []tmuxx.Call
+	for _, call := range runner.Calls {
+		if call.Executable == "tmux" && len(call.Args) > 0 && call.Args[0] == "kill-session" {
+			kills = append(kills, call)
+		}
+	}
+	if got := len(kills); got != 1 {
+		t.Fatalf("kill-session calls = %#v, want exactly one", kills)
+	}
+	if got := kills[0]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("kill-session call = %#v, want %#v", got, want)
+	}
+}
+
+func assertNoRecoveryLookup(t *testing.T, calls []tmuxx.Call) {
+	t.Helper()
+	for _, call := range calls {
+		if call.Executable != "tmux" || len(call.Args) == 0 {
+			continue
+		}
+		switch call.Args[0] {
+		case "list-sessions", "list-windows", "list-panes":
+			t.Fatalf("unexpected recovery lookup before rollback: %#v", call)
+		}
 	}
 }
 
