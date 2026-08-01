@@ -9,6 +9,23 @@ This spec records the decisions, verified external contracts, and architecture a
 
 `agentctl` is a standalone Go CLI that launches a named tmux session containing a fleet of autonomous agents (one window per role, each started via `amq coop exec`), records role/harness/model metadata in tmux options, delivers only predefined control payloads (`/clear`, `/compact`) to validated panes, reports objective fleet status, and attaches the fleet as native iTerm2 tabs via tmux control mode.
 
+### 1.1 Principle: every output is a factual claim
+
+Every observable output of agentctl — an exit code, a message, a reported state — is a factual claim about what
+actually occurred. It must never assert an event that did not happen, and it must carry as much of what did happen as
+the facts allow.
+
+Both halves have already been decided several times, in different subsystems, before the principle was written down:
+
+| Half | Where it bites |
+|---|---|
+| Never assert what did not happen | Stubs must not borrow a contract code (§9). Exit 6 requires that a tmux command actually ran (§4.1). Delivery is reported as delivery, never as execution (§6.2). `status` reports objective tmux facts and never infers workflow state (§6.3). Identity that is *unverifiable* is not identity *verified* (§6.3). |
+| Carry as much as the facts allow | Every launch-failure message names what failed (§6.6). A tmux failure carries tmux's own stderr rather than a translation (§4.1). An ambiguous role names every matching window ID (§13.5). `unexpected-process` renders the executable actually observed, not the one expected (§6.3). |
+
+The rules in those sections are the operative ones; this paragraph is why they are all the same rule. When a new
+output is designed and no specific rule covers it, this is the one to apply — and the test is not "is this message
+reasonable" but "is every claim in it true, and is anything true being withheld".
+
 ## 2. Decisions resolved in the design session
 
 These extend or refine `brief.md`:
@@ -100,7 +117,7 @@ Session-name candidates are validated by `config.ValidateSessionName` — one va
 sources. `TMUX_PANE` is the exception in *what* is checked, not in how it is classified: it carries a pane ID rather
 than a session name, so it is validated as one, and an invalid value is still an invalid source the user set.
 
-**Exit 6 requires that a tmux command actually ran.** Every invalid-source case above is decided before any command is
+**Exit 6 requires that a tmux command actually ran** (§1.1). Every invalid-source case above is decided before any command is
 issued, so none of them may report a tmux failure. Exit 6 is reserved for a `Runner` or parse failure on row 1 or row
 12 and carries tmux's own stderr; claiming it when no command was executed tells the operator to debug something that
 never happened, and leaves nothing for them to read. This is the same rule as §9's prohibition on stubs borrowing
@@ -286,7 +303,7 @@ agentctl: failed to launch ROLE; failed to remove incomplete session S: CLEANUP_
 Both exit 8. A failed cleanup does not become a different class of failure; it becomes a more informative message. The
 launch is never retried, and cleanup is never attempted by name.
 
-**Every launch-failure message names what failed.** `CAUSE` is the error that stopped the launch — a baseline-poll
+**Every launch-failure message names what failed** (§1.1). `CAUSE` is the error that stopped the launch — a baseline-poll
 timeout, an option-stamping failure, a window-creation failure — and it appears in *both* variants. Without it the
 three are indistinguishable, and the launch cause is precisely the one the operator can no longer investigate, because
 rollback destroyed the session that held the evidence. The pre-ownership message below already leads with its cause, so
@@ -344,7 +361,7 @@ pre-ownership creation failure during `launch`, carrying the operator warning in
 failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
 or a version other than `1` (§6.4, §12.6); `attach` uses 6 when control mode cannot be established.
 
-**Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
+**Exit 1 is the unclassified error** (§1.1). It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
 happened to the system, which is why an unimplemented command must not borrow one. Exit 8 in particular states that a
 fleet launch failed *and was rolled back*; returning it from a stub tells an operator or a planner script that a
