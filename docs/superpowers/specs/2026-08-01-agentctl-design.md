@@ -112,12 +112,17 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 ### 6.2 clear / compact
 
-1. Resolve session; confirm it exists and is agentctl-managed.
-2. Resolve window by exact name = ROLE; confirm window-managed, stored role matches, exactly one pane, pane alive.
-3. Process-identity check against the recorded baseline (§8); fail closed → exit 5.
-4. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5 (`refusing to clear own pane`).
-5. Deliver to the resolved pane ID (§13.2 row 10): `send-keys C-u`, `send-keys -l -- '/PAYLOAD'`, brief fixed delay, `send-keys Enter`.
-6. Success means tmux accepted the keystrokes — reported as delivery, never as execution.
+1. Validate the ROLE argument's charset (§12.5). Malformed → exit 2, before any `Runner` call.
+2. Resolve the session: `list-sessions`, exact name comparison in Go, address the resulting session ID thereafter
+   (§13.1). Confirm `@agentctl_managed=1` **and** `@agentctl_version=1` (§12.6) → else exit 3.
+3. Resolve the window: `list-windows`, exact name comparison in Go, address the resulting window ID. **No name is ever
+   passed to `-t`** (§13.1). Zero matches → exit 4; more than one → exit 4, fail closed (§13.5).
+4. Confirm the window is managed and its stored role matches → exit 4; exactly one pane and the pane is alive → exit 5.
+5. Process identity against the recorded baseline (§8). Mismatch, empty baseline, or identity unavailable → exit 5.
+6. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5
+   (`refusing to clear own pane`).
+7. Deliver via `DeliverPayload` (§13.6) to the resolved pane ID.
+8. Success means tmux accepted the keystrokes — reported as delivery, never as execution.
 
 ### 6.3 status
 
