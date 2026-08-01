@@ -61,6 +61,44 @@ func TestValidateSessionNameRejectsInvalidNames(t *testing.T) {
 	}
 }
 
+func TestValidateRoleNameAcceptsValidNames(t *testing.T) {
+	t.Parallel()
+
+	for _, role := range []string{"planner", "codex_2", "review-agent"} {
+		role := role
+		t.Run(role, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateRoleName(role); err != nil {
+				t.Fatalf("ValidateRoleName(%q) error = %v, want nil", role, err)
+			}
+		})
+	}
+}
+
+func TestValidateRoleNameRejectsInvalidNames(t *testing.T) {
+	t.Parallel()
+
+	for _, role := range []string{"", "Planner", "-planner", "plan/ner", "plan\nner"} {
+		role := role
+		t.Run(fmt.Sprintf("%q", role), func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateRoleName(role)
+			var validation *ValidationError
+			if !errors.As(err, &validation) {
+				t.Fatalf("ValidateRoleName(%q) error = %T %v, want *ValidationError", role, err, err)
+			}
+			if validation.Option != "role" || validation.Value != role || validation.EntryIndex != -1 {
+				t.Fatalf("ValidationError = %#v, want option=role value=%q entryIndex=-1", validation, role)
+			}
+			want := fmt.Sprintf("invalid role %q: must match ^[a-z0-9][a-z0-9_-]*$", role)
+			if got := err.Error(); got != want {
+				t.Fatalf("error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestParseFleetPreservesRoleDeclarationOrder(t *testing.T) {
 	t.Parallel()
 
