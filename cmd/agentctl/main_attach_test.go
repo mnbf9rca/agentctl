@@ -19,6 +19,7 @@ func TestRunAttachRefusesInvalidEnvironmentBeforeSessionResolution(t *testing.T)
 		wantText string
 	}{
 		{name: "TERM_PROGRAM absent", wantText: "TERM_PROGRAM is unset"},
+		{name: "TERM_PROGRAM set empty", lookup: map[string]string{"TERM_PROGRAM": ""}, wantText: `TERM_PROGRAM=""`},
 		{name: "another terminal", lookup: map[string]string{"TERM_PROGRAM": "Apple_Terminal"}, wantText: `TERM_PROGRAM="Apple_Terminal"`},
 		{name: "inside tmux", lookup: map[string]string{"TERM_PROGRAM": "iTerm.app", "TMUX_PANE": "%9"}, wantText: `TMUX_PANE="%9"`},
 	}

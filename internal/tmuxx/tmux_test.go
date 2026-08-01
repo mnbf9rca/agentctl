@@ -315,6 +315,36 @@ func TestAttachSessionPlacesGlobalControlModeOptionFirst(t *testing.T) {
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}})
 }
 
+func TestAttachSessionUsesInteractiveRunnerOperation(t *testing.T) {
+	t.Parallel()
+
+	runner := &operationRunner{}
+	if err := New(runner).AttachSession(context.Background(), "$4"); err != nil {
+		t.Fatalf("AttachSession() error = %v", err)
+	}
+	if runner.outputCalled {
+		t.Fatal("AttachSession() used output-capturing operation")
+	}
+	if !runner.interactiveCalled {
+		t.Fatal("AttachSession() did not use interactive operation")
+	}
+}
+
+type operationRunner struct {
+	outputCalled      bool
+	interactiveCalled bool
+}
+
+func (r *operationRunner) Output(context.Context, string, ...string) ([]byte, error) {
+	r.outputCalled = true
+	return nil, nil
+}
+
+func (r *operationRunner) RunInteractive(context.Context, string, ...string) error {
+	r.interactiveCalled = true
+	return nil
+}
+
 func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
 	t.Parallel()
 

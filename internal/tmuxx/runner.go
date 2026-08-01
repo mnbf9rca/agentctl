@@ -6,21 +6,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
 
-// Runner executes one program and returns its stdout.
+// Runner executes programs either for parsed output or with connected terminal
+// streams for interactive protocols.
 type Runner interface {
 	Output(context.Context, string, ...string) ([]byte, error)
+	RunInteractive(context.Context, string, ...string) error
 }
 
 // RealRunner executes programs with os/exec.
-type RealRunner struct{}
+type RealRunner struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+}
 
 // Output executes executable with args without invoking a shell.
 func (RealRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, executable, args...).Output()
+}
+
+// RunInteractive executes executable with streams connected to the current
+// process by default.
+func (r RealRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	command := exec.CommandContext(ctx, executable, args...)
+	command.Stdin = r.Stdin
+	if command.Stdin == nil {
+		command.Stdin = os.Stdin
+	}
+	command.Stdout = r.Stdout
+	if command.Stdout == nil {
+		command.Stdout = os.Stdout
+	}
+	command.Stderr = r.Stderr
+	if command.Stderr == nil {
+		command.Stderr = os.Stderr
+	}
+	return command.Run()
 }
 
 // Call records one Runner invocation.
@@ -73,4 +100,11 @@ func (f *FakeRunner) Output(_ context.Context, executable string, args ...string
 	response := f.responses[0]
 	f.responses = f.responses[1:]
 	return append([]byte(nil), response.Stdout...), response.Err
+}
+
+// RunInteractive records an interactive call and consumes one scripted
+// response without exposing its output.
+func (f *FakeRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	_, err := f.Output(ctx, executable, args...)
+	return err
 }

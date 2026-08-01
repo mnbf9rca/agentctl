@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +43,35 @@ func TestRealRunnerHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestRealRunnerInteractivePassesArgumentsAndConnectedStreams(t *testing.T) {
+	t.Setenv("GO_WANT_TMUXX_HELPER_PROCESS", "1")
+
+	var stdout, stderr bytes.Buffer
+	runner := RealRunner{
+		Stdin:  strings.NewReader("terminal input"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	err := runner.RunInteractive(
+		context.Background(),
+		os.Args[0],
+		"-test.run=^TestRealRunnerHelper$",
+		"--",
+		"interactive",
+		"two words",
+	)
+
+	if err != nil {
+		t.Fatalf("RunInteractive() error = %v", err)
+	}
+	if want := "stdout:terminal input\x00two words"; stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if want := "stderr:terminal input"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
 func TestRealRunnerHelperRequiresMarker(t *testing.T) {
 	t.Setenv("GO_WANT_TMUXX_HELPER_PROCESS", "")
 
@@ -72,6 +103,18 @@ func TestRealRunnerHelper(t *testing.T) {
 	}
 	if separator < 0 {
 		return
+	}
+	if len(os.Args) > separator+1 && os.Args[separator+1] == "interactive" {
+		input, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "stdout:%s", input)
+		if len(os.Args) > separator+2 {
+			_, _ = fmt.Fprintf(os.Stdout, "\x00%s", os.Args[separator+2])
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "stderr:%s", input)
+		os.Exit(0)
 	}
 
 	for index, arg := range os.Args[separator+1:] {
@@ -131,6 +174,23 @@ func TestFakeRunnerFailsWhenScriptIsExhausted(t *testing.T) {
 		t.Fatalf("Output() error = %v, want ErrFakeRunnerExhausted", err)
 	}
 	wantCalls := []Call{{Executable: "tmux", Args: []string{"list-sessions"}}}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+}
+
+func TestFakeRunnerInteractiveRecordsCallAndConsumesResponse(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("interactive failed")
+	runner := NewFakeRunner(Response{Stdout: []byte("ignored control protocol"), Err: wantErr})
+
+	err := runner.RunInteractive(context.Background(), "tmux", "-CC", "attach-session", "-t", "$4")
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("RunInteractive() error = %v, want %v", err, wantErr)
+	}
+	wantCalls := []Call{{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}}}
 	if !reflect.DeepEqual(runner.Calls, wantCalls) {
 		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
 	}

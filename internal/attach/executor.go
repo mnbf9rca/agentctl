@@ -21,16 +21,17 @@ type Client interface {
 // EnvironmentError reports a local terminal environment where iTerm2 control
 // mode attachment must not be attempted.
 type EnvironmentError struct {
-	TermProgram string
-	InsideTmux  bool
-	Pane        string
+	TermProgram    string
+	TermProgramSet bool
+	InsideTmux     bool
+	Pane           string
 }
 
 func (e *EnvironmentError) Error() string {
 	if e.InsideTmux {
 		return fmt.Sprintf("attach cannot start iTerm2 control mode from inside tmux: TMUX_PANE=%q", e.Pane)
 	}
-	if e.TermProgram == "" {
+	if !e.TermProgramSet {
 		return "attach requires iTerm2: TERM_PROGRAM is unset"
 	}
 	return fmt.Sprintf("attach requires iTerm2: TERM_PROGRAM=%q", e.TermProgram)
@@ -64,12 +65,12 @@ func New(client Client, lookupEnv LookupEnv) Executor {
 // CheckEnvironment refuses before any tmux command unless this process is in
 // iTerm2 and outside tmux.
 func (e Executor) CheckEnvironment() error {
-	termProgram, _ := e.lookupEnv("TERM_PROGRAM")
+	termProgram, termProgramSet := e.lookupEnv("TERM_PROGRAM")
 	if termProgram != "iTerm.app" {
-		return &EnvironmentError{TermProgram: termProgram}
+		return &EnvironmentError{TermProgram: termProgram, TermProgramSet: termProgramSet}
 	}
 	if pane, insideTmux := e.lookupEnv("TMUX_PANE"); insideTmux {
-		return &EnvironmentError{TermProgram: termProgram, InsideTmux: true, Pane: pane}
+		return &EnvironmentError{TermProgram: termProgram, TermProgramSet: termProgramSet, InsideTmux: true, Pane: pane}
 	}
 	return nil
 }

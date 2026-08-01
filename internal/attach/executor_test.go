@@ -34,6 +34,7 @@ func TestCheckEnvironmentRefusesBeforeRunningCommands(t *testing.T) {
 		name            string
 		environment     map[string]string
 		wantTermProgram string
+		wantTermSet     bool
 		wantInsideTmux  bool
 		wantPane        string
 		wantText        string
@@ -43,15 +44,23 @@ func TestCheckEnvironmentRefusesBeforeRunningCommands(t *testing.T) {
 			wantText: "TERM_PROGRAM is unset",
 		},
 		{
+			name:        "TERM_PROGRAM set empty",
+			environment: map[string]string{"TERM_PROGRAM": ""},
+			wantTermSet: true,
+			wantText:    `TERM_PROGRAM=""`,
+		},
+		{
 			name:            "another terminal",
 			environment:     map[string]string{"TERM_PROGRAM": "Apple_Terminal"},
 			wantTermProgram: "Apple_Terminal",
+			wantTermSet:     true,
 			wantText:        `TERM_PROGRAM="Apple_Terminal"`,
 		},
 		{
 			name:            "already inside tmux",
 			environment:     map[string]string{"TERM_PROGRAM": "iTerm.app", "TMUX_PANE": "%9"},
 			wantTermProgram: "iTerm.app",
+			wantTermSet:     true,
 			wantInsideTmux:  true,
 			wantPane:        "%9",
 			wantText:        `TMUX_PANE="%9"`,
@@ -60,6 +69,7 @@ func TestCheckEnvironmentRefusesBeforeRunningCommands(t *testing.T) {
 			name:            "set empty pane remains inside signal",
 			environment:     map[string]string{"TERM_PROGRAM": "iTerm.app", "TMUX_PANE": ""},
 			wantTermProgram: "iTerm.app",
+			wantTermSet:     true,
 			wantInsideTmux:  true,
 			wantText:        `TMUX_PANE=""`,
 		},
@@ -75,8 +85,8 @@ func TestCheckEnvironmentRefusesBeforeRunningCommands(t *testing.T) {
 			if !errors.As(err, &environmentError) {
 				t.Fatalf("CheckEnvironment() error = %T %v, want *EnvironmentError", err, err)
 			}
-			if environmentError.TermProgram != tt.wantTermProgram || environmentError.InsideTmux != tt.wantInsideTmux || environmentError.Pane != tt.wantPane {
-				t.Fatalf("EnvironmentError = %#v, want term=%q inside=%v pane=%q", environmentError, tt.wantTermProgram, tt.wantInsideTmux, tt.wantPane)
+			if environmentError.TermProgram != tt.wantTermProgram || environmentError.TermProgramSet != tt.wantTermSet || environmentError.InsideTmux != tt.wantInsideTmux || environmentError.Pane != tt.wantPane {
+				t.Fatalf("EnvironmentError = %#v, want term=%q set=%v inside=%v pane=%q", environmentError, tt.wantTermProgram, tt.wantTermSet, tt.wantInsideTmux, tt.wantPane)
 			}
 			if !strings.Contains(err.Error(), tt.wantText) {
 				t.Fatalf("error = %q, want substring %q", err, tt.wantText)

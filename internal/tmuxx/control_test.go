@@ -236,3 +236,11 @@ func (r *cancelAfterSecondCallRunner) Output(ctx context.Context, executable str
 	}
 	return output, err
 }
+
+func (r *cancelAfterSecondCallRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	err := r.FakeRunner.RunInteractive(ctx, executable, args...)
+	if len(r.Calls) == 2 {
+		r.cancel()
+	}
+	return err
+}
