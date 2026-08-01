@@ -14,6 +14,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
+	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -41,9 +42,10 @@ Commands:
 `
 
 var commandUsage = map[string]string{
-	"launch":  "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n",
-	"attach":  "Usage: agentctl attach [--session SESSION]\n",
-	"status":  "Usage: agentctl status [--session SESSION] [--json]\n",
+	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n",
+	"attach": "Usage: agentctl attach [--session SESSION]\n",
+	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
+		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n",
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
 	"kill":    "Usage: agentctl kill [--session SESSION]\n",
@@ -54,10 +56,7 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
-	runner := tmuxx.RealRunner{}
-	client := tmuxx.New(runner)
-	resolver := session.New(client, os.LookupEnv)
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, kill.New(client))
+	return runWithRunner(context.Background(), arguments, stdout, stderr, tmuxx.RealRunner{}, os.LookupEnv)
 }
 
 type launchDependencies struct {
@@ -73,19 +72,44 @@ type sessionKiller interface {
 	Execute(context.Context, tmuxx.Session) error
 }
 
+type statusCollector interface {
+	Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error)
+}
+
+func runWithRunner(
+	ctx context.Context,
+	arguments []string,
+	stdout, stderr io.Writer,
+	runner tmuxx.Runner,
+	lookupEnv session.LookupEnv,
+) int {
+	client := tmuxx.New(runner)
+	resolver := session.New(client, lookupEnv)
+	collector := statuspkg.NewCollector(client)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client))
+}
+
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil)
 }
 
 func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, killer)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, killer)
 }
 
 func runWith(arguments []string, stdout, stderr io.Writer, dependencies launchDependencies) int {
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil)
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil)
 }
 
-func runWithAllDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, launch launchDependencies, resolver sessionResolver, killer sessionKiller) int {
+func runWithAllDependencies(
+	ctx context.Context,
+	arguments []string,
+	stdout, stderr io.Writer,
+	launch launchDependencies,
+	resolver sessionResolver,
+	collector statusCollector,
+	killer sessionKiller,
+) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
 	}
@@ -136,7 +160,26 @@ func runWithAllDependencies(ctx context.Context, arguments []string, stdout, std
 	if err != nil {
 		return resolverError(stderr, usage, err)
 	}
+	if command == "status" && collector != nil {
+		report, err := collector.Collect(ctx, resolved.Name, resolved.ID)
+		if err != nil {
+			return statusError(stderr, err)
+		}
+		if options.json {
+			err = statuspkg.WriteJSON(stdout, report)
+		} else {
+			err = statuspkg.WriteTable(stdout, report)
+		}
+		if err != nil {
+			return statusError(stderr, err)
+		}
+		return exitOK
+	}
 	if command == "kill" {
+		if killer == nil {
+			fmt.Fprintln(stderr, "agentctl: kill: not implemented")
+			return exitNotImplemented
+		}
 		if err := killer.Execute(ctx, resolved); err != nil {
 			return killError(stderr, err)
 		}
@@ -225,6 +268,7 @@ func killError(stderr io.Writer, err error) int {
 type commandOptions struct {
 	session    string
 	sessionSet bool
+	json       bool
 }
 
 func parseCommand(command string, arguments []string) (commandOptions, error) {
@@ -232,19 +276,23 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	sessionValue := flags.String("session", "", "session name")
 
 	var roles, models *string
+	var jsonOutput *bool
 	switch command {
 	case "launch":
 		roles = flags.String("roles", "", "role and harness assignments")
 		models = flags.String("models", "", "role and model assignments")
 		flags.String("dir", "", "working directory")
 	case "status":
-		flags.Bool("json", false, "emit JSON")
+		jsonOutput = flags.Bool("json", false, "emit JSON")
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
 	options := commandOptions{session: *sessionValue, sessionSet: flags.WasSet("session")}
+	if jsonOutput != nil {
+		options.json = *jsonOutput
+	}
 
 	positional := flags.Args()
 	switch command {
@@ -285,6 +333,23 @@ func resolverError(stderr io.Writer, usage string, err error) int {
 	fmt.Fprintf(stderr, "agentctl: %v\n", err)
 	var resolutionFailure *session.ResolutionError
 	if errors.As(err, &resolutionFailure) {
+		return exitSession
+	}
+	var tmuxFailure *tmuxx.TmuxError
+	if errors.As(err, &tmuxFailure) {
+		return exitTmux
+	}
+	return exitNotImplemented
+}
+
+func statusError(stderr io.Writer, err error) int {
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	var versionFailure *statuspkg.VersionError
+	if errors.As(err, &versionFailure) {
+		return exitSession
+	}
+	var rosterFailure *statuspkg.RosterError
+	if errors.As(err, &rosterFailure) {
 		return exitSession
 	}
 	var tmuxFailure *tmuxx.TmuxError
