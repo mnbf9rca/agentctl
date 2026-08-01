@@ -19,7 +19,9 @@ These extend or refine `brief.md`:
 | Teardown | New command `agentctl kill [--session S]`. Validates the session is agentctl-managed (same gate as control commands) before `tmux kill-session`. Refuses unmanaged sessions. |
 | Model identifier validation | Models are catalogue-free but **not** charset-free: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. The mandatory alphanumeric first character makes flag smuggling (e.g. `--dangerously-bypass-approvals-and-sandbox`) unrepresentable in the model slot. |
 | `--if-missing` | Deferred. v1 `launch` always fails when the target session exists. The exact-fleet-comparison metadata is designed in now so `--if-missing` is cheap later; tracked as a deferred backlog issue. |
-| Harness process check | Must accept documented executable-name variations discovered in the 2026-08-01 spike (§3.3): Claude Code's foreground process name is its **version string** (e.g. `2.1.220`), not `claude`. |
+| Harness process check | No name pattern-matching. At launch, the observed executable of each pane's root process is recorded as `@agentctl_process` metadata; control and status require exact equality with that baseline (§8). Motivated by the spike finding that Claude Code's process name is its **version string** (e.g. `2.1.220`), not `claude`. |
+| Payload registry policy | The registry is hardcoded and may grow beyond `clear`/`compact`, but only with **argument-free** payloads. Commands that carry caller-supplied text (e.g. `/rename NAME`) are permanently inadmissible. |
+| Self-target guard | When invoked from inside tmux, a control command whose resolved target pane equals the caller's own pane (`$TMUX_PANE`) is refused (exit 5). Prevents an agent or planner accidentally wiping its own context; an accident guard, not a security boundary. |
 
 ## 3. Verified external contracts (2026-08-01, this machine)
 
@@ -54,7 +56,7 @@ Consequences:
 
 - The delivery sequence in the brief (`C-u`; `send-keys -l -- '/PAYLOAD'`; `Enter`) is adopted unchanged for both harnesses, with a short fixed delay between payload and Enter (the spike used 1s; implementation may tune down with testing).
 - Typing a slash command opens an autocomplete popup in both TUIs; Enter selects the highlighted entry. With the full command typed, the exact match was highlighted in both. Residual risk (user-defined commands outranking an exact match) is documented in SECURITY.md.
-- The foreground-process check cannot compare `pane_current_command` directly to the harness name for Claude Code. Policy in §8.
+- Process names cannot be pattern-matched against harness names (Claude Code reports `2.1.220`), and `#{pane_current_command}` tracks the *foreground job*, so it flaps to child commands (`bash`, `python`, …) whenever an agent runs a tool. Both problems are solved by the launch-time baseline policy in §8.
 
 ## 4. CLI surface
 
@@ -84,7 +86,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/fleet` | Launcher, rollback handler, metadata writer |
 | `internal/session` | Session resolver (precedence chain; explicit failure when unresolvable) |
 | `internal/target` | Managed-metadata reader; 8-step target validation chain |
-| `internal/control` | Hardcoded payload registry `{clear: "/clear", compact: "/compact"}`; dispatcher |
+| `internal/control` | Hardcoded registry of predefined, argument-free payloads (`clear → /clear`, `compact → /compact` in v1); dispatcher |
 | `internal/status` | Collector (tmux format strings only) + table/JSON renderers |
 | `internal/attach` | iTerm2 detection, `tmux -CC attach-session -t '=SESSION'` |
 
@@ -99,16 +101,17 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 3. Fail if target session already exists (exact match) → exit 3.
 4. Resolve cwd: `--dir` if given (must exist), else invocation cwd; pass via `-c` on every window.
 5. First role: `tmux new-session -d -s S -n ROLE -c DIR CMD`; remaining roles: `tmux new-window -d -t S -n ROLE -c DIR CMD`, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled by `shellq`.
-6. After each window: stamp metadata (§6.5).
-7. Any failure after session creation: stop, `kill-session` **only if this invocation created it**, report the failed role on stderr, exit 8.
+6. After each window: stamp metadata (§6.5), then capture the process baseline — poll `ps -o comm= -p <pane_pid>` (bounded, ~5s) until the value is no longer `amq` (the `exec` chain has completed), and store it as `@agentctl_process`. Timeout means the role failed to launch.
+7. Any failure after session creation — including baseline-capture timeout: stop, `kill-session` **only if this invocation created it**, report the failed role on stderr, exit 8.
 
 ### 6.2 clear / compact
 
 1. Resolve session; confirm it exists and is agentctl-managed.
 2. Resolve window by exact name = ROLE; confirm window-managed, stored role matches, exactly one pane, pane alive.
-3. Foreground-process check (§8); fail closed → exit 5.
-4. Deliver to the resolved pane ID: `send-keys C-u`, `send-keys -l -- '/PAYLOAD'`, brief fixed delay, `send-keys Enter`.
-5. Success means tmux accepted the keystrokes — reported as delivery, never as execution.
+3. Process-identity check against the recorded baseline (§8); fail closed → exit 5.
+4. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5 (`refusing to clear own pane`).
+5. Deliver to the resolved pane ID: `send-keys C-u`, `send-keys -l -- '/PAYLOAD'`, brief fixed delay, `send-keys Enter`.
+6. Success means tmux accepted the keystrokes — reported as delivery, never as execution.
 
 ### 6.3 status
 
@@ -120,7 +123,7 @@ Collector uses only `show-options`, `list-windows -F`, `list-panes -F`. States: 
 
 ### 6.5 Metadata
 
-Exactly as the brief: session options `@agentctl_managed=1`, `@agentctl_version=1`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read). No metadata database.
+Exactly as the brief: session options `@agentctl_managed=1`, `@agentctl_version=1`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
 ## 7. Validation rules (consolidated)
 
@@ -130,14 +133,15 @@ Exactly as the brief: session options `@agentctl_managed=1`, `@agentctl_version=
 - All rejection cases from the brief's Validation section: unknown harnesses, duplicate roles, duplicate model entries, models for undefined roles, missing values, empty `--roles`, trailing commas, whitespace in names, names beginning with `-`, duplicate command-line options.
 - `--dir`: must be an existing directory.
 
-## 8. Foreground-process policy
+## 8. Process-identity policy
 
-The check compares evidence about the pane's foreground process against the stored harness, failing closed (exit 5) on mismatch:
+No name pattern-matching. Identity is established by observation at launch and verified by equality afterwards:
 
-- `codex` → `pane_current_command == "codex"`.
-- `claude` → `pane_current_command == "claude"`, **or** a semver-shaped name (`^[0-9]+(\.[0-9]+)*$`) whose executable path — resolved via `ps` against the pane PID — contains a `claude` path segment (spike: Claude Code 2.1.220 reports `2.1.220`).
+- **Check target.** The pane's *root* process, `#{pane_pid}` — stable across `exec` and unaffected by agent subprocesses. Never `#{pane_current_command}`, which tracks the foreground job and flaps to child commands (`bash`, `python`, …) while an agent runs tools.
+- **Baseline (launch).** Poll `ps -o comm= -p <pane_pid>` until the `amq coop exec → exec(harness)` chain completes (value no longer `amq`; bounded, ~5s), then store the observed value verbatim in `@agentctl_process`. Timeout → launch failure and rollback.
+- **Verification (control/status).** Re-run the same `ps` query and require **exact equality** with the stored baseline. Mismatch → `unexpected-process` in status; fail closed (exit 5) for control commands. Empty/missing baseline also fails closed.
 
-Any further variation discovered during implementation must be added to this documented list with a test; nothing is accepted by default. The check is a safety guard, not an idleness proof.
+This handles Claude Code's versioned binary name (`2.1.220` at the time of the spike) without heuristics and is robust to future harness renames. It remains a safety guard against accidents, not an authentication mechanism or an idleness proof: a same-user process can forge metadata or match by renaming an executable.
 
 ## 9. Exit codes
 
@@ -145,7 +149,7 @@ The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/un
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; claude version-string process-name acceptance.
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `shellq`: table tests + Go fuzz test (round-trip property: rendered string, evaluated by `sh`, yields the original token).
 - Integration tests (build tag `integration`): real tmux on a throwaway socket (`tmux -L agentctl-test-$RANDOM`), windows running stub scripts standing in for harnesses; never the user's server, never real agents.
 - Manual verification checklist (tracked as a backlog issue): re-run the §3.3 spike against current harness versions before first release.
@@ -163,4 +167,4 @@ One epic, five sequential waves; issues within a wave are parallelizable across 
 
 ## 12. Out of scope
 
-Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; deterministic cwd propagation.
+Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
