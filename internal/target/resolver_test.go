@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -163,6 +164,17 @@ func TestResolverRequiresExactlyOneExactWindowName(t *testing.T) {
 			}
 			if resolution.Session != session || resolution.Role != "codex2" || !reflect.DeepEqual(resolution.WindowIDs, test.wantIDs) {
 				t.Fatalf("RoleResolutionError = %#v, want session=%#v role=codex2 ids=%#v", resolution, session, test.wantIDs)
+			}
+			if len(test.wantIDs) > 1 {
+				message := err.Error()
+				for _, id := range test.wantIDs {
+					if !strings.Contains(message, string(id)) {
+						t.Fatalf("Resolve() error = %q, want matching window ID %s", message, id)
+					}
+				}
+				if strings.Contains(message, "clear") || strings.Contains(message, "compact") {
+					t.Fatalf("Resolve() error = %q, want action-neutral target fact", message)
+				}
 			}
 
 			wantCalls := []tmuxx.Call{
@@ -402,8 +414,15 @@ func TestResolverReturnsPaneWhenCallerIsUnsetOrDifferent(t *testing.T) {
 			if paneID != "%8" {
 				t.Fatalf("Resolve() pane = %q, want %%8", paneID)
 			}
-			if got := len(runner.Calls); got != 5 {
-				t.Fatalf("recorded %d calls, want validation only and no delivery: %#v", got, runner.Calls)
+			wantCalls := []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", targetWindowFormat}},
+				{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", targetPaneFormat}},
+				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "101"}},
+			}
+			if !reflect.DeepEqual(runner.Calls, wantCalls) {
+				t.Fatalf("recorded calls = %#v, want exact identity probe and no delivery %#v", runner.Calls, wantCalls)
 			}
 		})
 	}
