@@ -39,39 +39,41 @@ func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 	}
 }
 
-func TestRunRejectsDuplicateCommandOption(t *testing.T) {
-	tests := [][]string{
-		{"launch", "--session", "one", "--session", "two", "--roles", "planner:claude"},
-		{"launch", "--session=one", "--session=two", "--roles", "planner:claude"},
+func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
+	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n"
+	const statusUsage = "Usage: agentctl status [--session SESSION] [--json]\n"
+	tests := []struct {
+		name   string
+		args   []string
+		option string
+		usage  string
+	}{
+		{name: "session spaced", args: []string{"launch", "--session", "one", "--session", "two", "--roles", "planner:claude"}, option: "session", usage: launchUsage},
+		{name: "session equals", args: []string{"launch", "--session=one", "--session=two", "--roles", "planner:claude"}, option: "session", usage: launchUsage},
+		{name: "roles spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--roles", "reviewer:codex"}, option: "roles", usage: launchUsage},
+		{name: "roles equals", args: []string{"launch", "--session", "fleet", "--roles=planner:claude", "--roles=reviewer:codex"}, option: "roles", usage: launchUsage},
+		{name: "models spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", "planner:fable", "--models", "planner:opus"}, option: "models", usage: launchUsage},
+		{name: "models equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models=planner:fable", "--models=planner:opus"}, option: "models", usage: launchUsage},
+		{name: "dir spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir", "/tmp", "--dir", "/var/tmp"}, option: "dir", usage: launchUsage},
+		{name: "dir equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir=/tmp", "--dir=/var/tmp"}, option: "dir", usage: launchUsage},
+		{name: "json spaced", args: []string{"status", "--json", "--json"}, option: "json", usage: statusUsage},
+		{name: "json equals", args: []string{"status", "--json=true", "--json=false"}, option: "json", usage: statusUsage},
 	}
-	const want = "agentctl: --session provided more than once\nUsage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n"
 
-	for _, arguments := range tests {
-		var stdout, stderr bytes.Buffer
-		if code := run(arguments, &stdout, &stderr); code != exitUsage {
-			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
-		}
-		if stderr.String() != want {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
-		}
-	}
-}
-
-func TestRunRejectsDuplicateBoolOption(t *testing.T) {
-	tests := [][]string{
-		{"status", "--json", "--json"},
-		{"status", "--json=true", "--json=false"},
-	}
-	const want = "agentctl: --json provided more than once\nUsage: agentctl status [--session SESSION] [--json]\n"
-
-	for _, arguments := range tests {
-		var stdout, stderr bytes.Buffer
-		if code := run(arguments, &stdout, &stderr); code != exitUsage {
-			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
-		}
-		if stderr.String() != want {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := run(tt.args, &stdout, &stderr); code != exitUsage {
+				t.Fatalf("run(%q) = %d, want %d", tt.args, code, exitUsage)
+			}
+			want := "agentctl: --" + tt.option + " provided more than once\n" + tt.usage
+			if stderr.String() != want {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
 	}
 }
 
