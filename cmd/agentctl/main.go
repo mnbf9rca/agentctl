@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/control"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
+	"github.com/mnbf9rca/agentctl/internal/target"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -76,6 +79,10 @@ type statusCollector interface {
 	Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error)
 }
 
+type controlExecutor interface {
+	Execute(context.Context, string, tmuxx.Session, string) error
+}
+
 func runWithRunner(
 	ctx context.Context,
 	arguments []string,
@@ -86,19 +93,25 @@ func runWithRunner(
 	client := tmuxx.New(runner)
 	resolver := session.New(client, lookupEnv)
 	collector := statuspkg.NewCollector(client)
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client))
+	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
+	controller := control.New(targetResolver, client)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client), controller)
 }
 
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, nil)
 }
 
 func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, killer)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, killer, nil)
+}
+
+func runWithControlDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, controller controlExecutor) int {
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, controller)
 }
 
 func runWith(arguments []string, stdout, stderr io.Writer, dependencies launchDependencies) int {
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil)
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil, nil)
 }
 
 func runWithAllDependencies(
@@ -109,6 +122,7 @@ func runWithAllDependencies(
 	resolver sessionResolver,
 	collector statusCollector,
 	killer sessionKiller,
+	controller controlExecutor,
 ) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
@@ -152,6 +166,11 @@ func runWithAllDependencies(
 	if err != nil {
 		return usageError(stderr, err.Error(), usage)
 	}
+	if command == "clear" || command == "compact" {
+		if err := config.ValidateRoleName(options.role); err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
+	}
 	var explicit *string
 	if options.sessionSet {
 		explicit = &options.session
@@ -183,6 +202,14 @@ func runWithAllDependencies(
 		if err := killer.Execute(ctx, resolved); err != nil {
 			return killError(stderr, err)
 		}
+		return exitOK
+	}
+	if (command == "clear" || command == "compact") && controller != nil {
+		if err := controller.Execute(ctx, command, resolved, options.role); err != nil {
+			return controlError(stderr, command, usage, err)
+		}
+		registered, _ := control.Lookup(command)
+		fmt.Fprintf(stdout, "agentctl: delivered %s to %s:%s\n", registered.Payload, resolved.Name, options.role)
 		return exitOK
 	}
 
@@ -269,6 +296,7 @@ type commandOptions struct {
 	session    string
 	sessionSet bool
 	json       bool
+	role       string
 }
 
 func parseCommand(command string, arguments []string) (commandOptions, error) {
@@ -316,6 +344,7 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		if len(positional) != 1 {
 			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
 		}
+		options.role = positional[0]
 	default:
 		if len(positional) != 0 {
 			return commandOptions{}, fmt.Errorf("%s accepts no positional arguments", command)
@@ -323,6 +352,82 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	}
 
 	return options, nil
+}
+
+func controlError(stderr io.Writer, operation, usage string, err error) int {
+	var unknown *control.UnknownOperationError
+	if errors.As(err, &unknown) {
+		return usageError(stderr, err.Error(), usage)
+	}
+	var sessionMetadata *target.SessionMetadataError
+	if errors.As(err, &sessionMetadata) {
+		controlRefusal(stderr, operation, "session %s has %s=%q; expected %q", sessionMetadata.Session.Name, sessionMetadata.Option, sessionMetadata.Value, "1")
+		return exitSession
+	}
+	var roleResolution *target.RoleResolutionError
+	if errors.As(err, &roleResolution) {
+		if len(roleResolution.WindowIDs) == 0 {
+			controlRefusal(stderr, operation, "role %s matches no windows in %s", roleResolution.Role, roleResolution.Session.Name)
+		} else {
+			ids := make([]string, len(roleResolution.WindowIDs))
+			for index, id := range roleResolution.WindowIDs {
+				ids[index] = string(id)
+			}
+			controlRefusal(stderr, operation, "role %s matches %d windows in %s (%s)", roleResolution.Role, len(ids), roleResolution.Session.Name, strings.Join(ids, ", "))
+		}
+		return exitRole
+	}
+	var windowMetadata *target.WindowMetadataError
+	if errors.As(err, &windowMetadata) {
+		if windowMetadata.Window.Managed != "1" {
+			controlRefusal(stderr, operation, "window %s for %s:%s has @agentctl_managed=%q; expected %q", windowMetadata.Window.ID, windowMetadata.Session.Name, windowMetadata.Role, windowMetadata.Window.Managed, "1")
+		} else {
+			controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
+		}
+		return exitRole
+	}
+	var paneState *target.PaneStateError
+	if errors.As(err, &paneState) {
+		switch {
+		case len(paneState.Panes) != 1:
+			controlRefusal(stderr, operation, "window %s for %s:%s contains %d panes; expected 1", paneState.Window.ID, paneState.Session.Name, paneState.Role, len(paneState.Panes))
+		case paneState.Panes[0].WindowPanes != 1:
+			controlRefusal(stderr, operation, "pane %s reports %d panes in window %s; expected 1", paneState.Panes[0].ID, paneState.Panes[0].WindowPanes, paneState.Window.ID)
+		default:
+			controlRefusal(stderr, operation, "%s:%s pane %s is dead", paneState.Session.Name, paneState.Role, paneState.Panes[0].ID)
+		}
+		return exitUnsafe
+	}
+	var processIdentity *target.ProcessIdentityError
+	if errors.As(err, &processIdentity) {
+		switch {
+		case processIdentity.Window.Process == "":
+			controlRefusal(stderr, operation, "%s:%s has empty @agentctl_process baseline", processIdentity.Session.Name, processIdentity.Role)
+		case processIdentity.Err != nil:
+			controlRefusal(stderr, operation, "%s:%s process identity is unavailable for pane %s: %v", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.Err)
+		default:
+			controlRefusal(stderr, operation, "%s:%s pane %s is running %q; recorded process is %q", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.ActualProcess, processIdentity.Window.Process)
+		}
+		return exitUnsafe
+	}
+	var selfTarget *target.SelfTargetError
+	if errors.As(err, &selfTarget) {
+		controlRefusal(stderr, operation, "%s:%s is the calling pane %s", selfTarget.Session.Name, selfTarget.Role, selfTarget.CallerPane)
+		return exitUnsafe
+	}
+	var tmuxFailure *tmuxx.TmuxError
+	if errors.As(err, &tmuxFailure) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitTmux
+	}
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	return exitNotImplemented
+}
+
+func controlRefusal(stderr io.Writer, operation, format string, arguments ...any) {
+	fmt.Fprintf(stderr, "agentctl: refusing to send %s; ", operation)
+	fmt.Fprintf(stderr, format, arguments...)
+	fmt.Fprintln(stderr)
 }
 
 func resolverError(stderr io.Writer, usage string, err error) int {
