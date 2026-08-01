@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/attach"
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/control"
@@ -43,6 +44,7 @@ Commands:
   clear    deliver /clear to a role
   compact  deliver /compact to a role
   kill     terminate a managed fleet
+  version  report this binary's build identity
 `
 
 var commandUsage = map[string]string{
@@ -53,6 +55,7 @@ var commandUsage = map[string]string{
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
 	"kill":    "Usage: agentctl kill [--session SESSION]\n",
+	"version": "Usage: agentctl version\n",
 }
 
 func main() {
@@ -96,6 +99,9 @@ func runWithRunner(
 	runner tmuxx.Runner,
 	lookupEnv session.LookupEnv,
 ) int {
+	if handled, code := runVersion(arguments, stdout, stderr); handled {
+		return code
+	}
 	client := tmuxx.New(runner)
 	resolver := session.New(client, lookupEnv)
 	collector := statuspkg.NewCollector(client)
@@ -103,6 +109,21 @@ func runWithRunner(
 	controller := control.New(targetResolver, client)
 	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
 	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, collector, kill.New(client), controller, attacher)
+}
+
+func runVersion(arguments []string, stdout, stderr io.Writer) (bool, int) {
+	if len(arguments) == 1 && arguments[0] == "--version" {
+		fmt.Fprintf(stdout, "agentctl %s\n", buildinfo.Current())
+		return true, exitOK
+	}
+	if len(arguments) == 0 || arguments[0] != "version" {
+		return false, exitOK
+	}
+	if len(arguments) != 1 {
+		return true, usageError(stderr, "version accepts no arguments", commandUsage["version"])
+	}
+	fmt.Fprintf(stdout, "agentctl %s\n", buildinfo.Current())
+	return true, exitOK
 }
 
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {

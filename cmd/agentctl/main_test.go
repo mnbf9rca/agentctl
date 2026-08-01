@@ -8,10 +8,89 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/session"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
+
+func TestRunVersion(t *testing.T) {
+	restoreBuildStamp(t, "v0.1.0-test")
+
+	for _, arguments := range [][]string{{"version"}, {"--version"}} {
+		var stdout, stderr bytes.Buffer
+		code := run(arguments, &stdout, &stderr)
+		if code != exitOK {
+			t.Fatalf("run(%q) = %d, want %d; stderr = %q", arguments, code, exitOK, stderr.String())
+		}
+		if stdout.String() != "agentctl v0.1.0-test\n" {
+			t.Fatalf("run(%q) stdout = %q, want exact version line", arguments, stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("run(%q) stderr = %q, want empty", arguments, stderr.String())
+		}
+	}
+}
+
+func TestRunVersionDoesNotTouchTmux(t *testing.T) {
+	restoreBuildStamp(t, "v0.1.0-test")
+
+	for _, arguments := range [][]string{{"version"}, {"--version"}} {
+		runner := tmuxx.NewFakeRunner()
+		var stdout, stderr bytes.Buffer
+		code := runWithRunner(context.Background(), arguments, &stdout, &stderr, runner, lookupValues(nil))
+		if code != exitOK {
+			t.Fatalf("runWithRunner(%q) = %d, want %d; stderr = %q", arguments, code, exitOK, stderr.String())
+		}
+		if len(runner.Calls) != 0 {
+			t.Fatalf("runWithRunner(%q) calls = %#v, want no tmux calls", arguments, runner.Calls)
+		}
+	}
+}
+
+func TestRunRejectsVersionArguments(t *testing.T) {
+	const globalVersionUsage = `Usage: agentctl COMMAND [OPTIONS]
+
+Commands:
+  launch   create an agent fleet
+  attach   attach an agent fleet in iTerm2
+  status   report fleet status
+  clear    deliver /clear to a role
+  compact  deliver /compact to a role
+  kill     terminate a managed fleet
+  version  report this binary's build identity
+`
+	tests := []struct {
+		arguments []string
+		want      string
+	}{
+		{arguments: []string{"version", "extra"}, want: "agentctl: version accepts no arguments\nUsage: agentctl version\n"},
+		{arguments: []string{"--version", "extra"}, want: "agentctl: unknown command \"--version\"\n" + globalVersionUsage},
+	}
+
+	for _, test := range tests {
+		var stdout, stderr bytes.Buffer
+		code := run(test.arguments, &stdout, &stderr)
+		if code != exitUsage {
+			t.Fatalf("run(%q) = %d, want %d", test.arguments, code, exitUsage)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("run(%q) stdout = %q, want empty", test.arguments, stdout.String())
+		}
+		if stderr.String() != test.want {
+			t.Fatalf("run(%q) stderr = %q, want %q", test.arguments, stderr.String(), test.want)
+		}
+	}
+}
+
+func restoreBuildStamp(t *testing.T, stamp string) {
+	t.Helper()
+	previous := buildinfo.Stamp
+	buildinfo.Stamp = stamp
+	t.Cleanup(func() {
+		buildinfo.Stamp = previous
+	})
+}
 
 func TestRunRejectsUnknownCommandWithUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer

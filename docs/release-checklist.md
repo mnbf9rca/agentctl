@@ -33,6 +33,9 @@ part of verification the suite is structurally unable to perform.
 ## Preconditions
 
 - Use the release candidate checkout with no unrelated work in progress.
+- Build the release candidate with `make build` and record the exact output of
+  `./bin/agentctl version`.
+- Release identity must come from `make build`: plain `go build` inside a linked worktree records the main checkout's revision as clean, not the worktree's revision.
 - Install `tmux`, Claude Code, and `codex`; record their exact versions.
 - Expect every script to use a unique `tmux -L` socket. Never run these probes
   against the default tmux server.
