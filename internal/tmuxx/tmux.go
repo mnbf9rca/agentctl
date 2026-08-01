@@ -3,6 +3,7 @@ package tmuxx
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -10,6 +11,8 @@ const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
 	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}"
 	createdWindowFormat  = "#{window_id}\t#{pane_id}"
+	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
+	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
 
 // SessionID is an exact tmux session ID such as $4.
@@ -38,6 +41,26 @@ type CreatedSession struct {
 type CreatedWindow struct {
 	WindowID WindowID
 	PaneID   PaneID
+}
+
+// Window is one parsed window and its agentctl metadata.
+type Window struct {
+	ID      WindowID
+	Name    string
+	Managed string
+	Version string
+	Role    string
+	Harness string
+	Model   string
+	Process string
+}
+
+// Pane is one parsed pane and its objective tmux state.
+type Pane struct {
+	ID          PaneID
+	PID         int
+	Dead        bool
+	WindowPanes int
 }
 
 // Client owns agentctl's typed tmux and process operations.
@@ -171,6 +194,93 @@ func (c Client) ShowWindowOption(ctx context.Context, wid WindowID, name string)
 	return string(trimOneTrailingNewline(output)), nil
 }
 
+// ListWindows lists windows and agentctl metadata for an exact session ID.
+func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error) {
+	if err := validateID(string(sid), '$'); err != nil {
+		return nil, fmt.Errorf("list windows target: %w", err)
+	}
+	output, err := c.tmuxOutput(ctx, "list windows", "list-windows", "-t", string(sid), "-F", windowFormat)
+	if err != nil {
+		return nil, err
+	}
+	records := outputRecords(output)
+	if records == nil {
+		return nil, nil
+	}
+
+	windows := make([]Window, 0, len(records))
+	for index, record := range records {
+		fields := strings.SplitN(record, "\t", 8)
+		if len(fields) != 8 || fields[1] == "" {
+			return nil, fmt.Errorf("parse tmux window record %d: expected 8 fields and a nonempty name", index+1)
+		}
+		if err := validateID(fields[0], '@'); err != nil {
+			return nil, fmt.Errorf("parse tmux window record %d: %w", index+1, err)
+		}
+		windows = append(windows, Window{
+			ID:      WindowID(fields[0]),
+			Name:    fields[1],
+			Managed: fields[2],
+			Version: fields[3],
+			Role:    fields[4],
+			Harness: fields[5],
+			Model:   fields[6],
+			Process: fields[7],
+		})
+	}
+	return windows, nil
+}
+
+// ListPanes lists panes and objective state for an exact window ID.
+func (c Client) ListPanes(ctx context.Context, wid WindowID) ([]Pane, error) {
+	if err := validateID(string(wid), '@'); err != nil {
+		return nil, fmt.Errorf("list panes target: %w", err)
+	}
+	output, err := c.tmuxOutput(ctx, "list panes", "list-panes", "-t", string(wid), "-F", paneFormat)
+	if err != nil {
+		return nil, err
+	}
+	records := outputRecords(output)
+	if records == nil {
+		return nil, nil
+	}
+
+	panes := make([]Pane, 0, len(records))
+	for index, record := range records {
+		fields := strings.Split(record, "\t")
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("parse tmux pane record %d: expected 4 fields, got %d", index+1, len(fields))
+		}
+		if err := validateID(fields[0], '%'); err != nil {
+			return nil, fmt.Errorf("parse tmux pane record %d: %w", index+1, err)
+		}
+		pid, err := parsePositiveDecimal(fields[1], "pane pid")
+		if err != nil {
+			return nil, fmt.Errorf("parse tmux pane record %d: %w", index+1, err)
+		}
+		var dead bool
+		switch fields[2] {
+		case "0":
+			dead = false
+		case "1":
+			dead = true
+		default:
+			return nil, fmt.Errorf("parse tmux pane record %d: invalid pane dead value %q", index+1, fields[2])
+		}
+		windowPanes, err := parsePositiveDecimal(fields[3], "window pane count")
+		if err != nil {
+			return nil, fmt.Errorf("parse tmux pane record %d: %w", index+1, err)
+		}
+		panes = append(panes, Pane{
+			ID:          PaneID(fields[0]),
+			PID:         pid,
+			Dead:        dead,
+			WindowPanes: windowPanes,
+		})
+	}
+	return panes, nil
+}
+
 // KillSession kills an exact session ID.
 func (c Client) KillSession(ctx context.Context, sid SessionID) error {
 	if err := validateID(string(sid), '$'); err != nil {
@@ -255,4 +365,12 @@ func trimOneTrailingNewline(output []byte) []byte {
 		return output[:len(output)-1]
 	}
 	return output
+}
+
+func parsePositiveDecimal(value, field string) (int, error) {
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: expected a positive decimal", field, value)
+	}
+	return number, nil
 }

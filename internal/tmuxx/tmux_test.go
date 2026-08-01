@@ -275,6 +275,156 @@ func TestAttachSessionPlacesGlobalControlModeOptionFirst(t *testing.T) {
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}})
 }
 
+func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{Stdout: []byte(
+		"@7\tplanner\t1\t1\tplanner\tclaude\tfable\tweird name\twith tab\n" +
+			"@8\tcodex1\t1\t1\tcodex1\tcodex\t\tcodex\n",
+	)})
+	got, err := New(runner).ListWindows(context.Background(), "$4")
+	if err != nil {
+		t.Fatalf("ListWindows() error = %v", err)
+	}
+	want := []Window{
+		{ID: "@7", Name: "planner", Managed: "1", Version: "1", Role: "planner", Harness: "claude", Model: "fable", Process: "weird name\twith tab"},
+		{ID: "@8", Name: "codex1", Managed: "1", Version: "1", Role: "codex1", Harness: "codex", Model: "", Process: "codex"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListWindows() = %#v, want %#v", got, want)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"list-windows", "-t", "$4", "-F",
+		"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+	}})
+}
+
+func TestListWindowsAcceptsEmptyOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	got, err := New(runner).ListWindows(context.Background(), "$4")
+	if err != nil {
+		t.Fatalf("ListWindows() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ListWindows() = %#v, want nil", got)
+	}
+}
+
+func TestListWindowsRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+	}{
+		{name: "too few fields", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\n"},
+		{name: "wrong id prefix", stdout: "$7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
+		{name: "empty name", stdout: "@7\t\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
+		{name: "blank trailing record", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := NewFakeRunner(Response{Stdout: []byte(tt.stdout)})
+			if _, err := New(runner).ListWindows(context.Background(), "$4"); err == nil {
+				t.Fatal("ListWindows() error = nil, want malformed-output error")
+			}
+		})
+	}
+}
+
+func TestListPanesParsesTypedState(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{Stdout: []byte("%9\t1234\t0\t1\n%10\t999\t1\t2\n")})
+	got, err := New(runner).ListPanes(context.Background(), "@7")
+	if err != nil {
+		t.Fatalf("ListPanes() error = %v", err)
+	}
+	want := []Pane{
+		{ID: "%9", PID: 1234, Dead: false, WindowPanes: 1},
+		{ID: "%10", PID: 999, Dead: true, WindowPanes: 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListPanes() = %#v, want %#v", got, want)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}",
+	}})
+}
+
+func TestListPanesAcceptsEmptyOutput(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	got, err := New(runner).ListPanes(context.Background(), "@7")
+	if err != nil {
+		t.Fatalf("ListPanes() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ListPanes() = %#v, want nil", got)
+	}
+}
+
+func TestListPanesRejectsMalformedOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+	}{
+		{name: "too few fields", stdout: "%9\t1234\t0\n"},
+		{name: "too many fields", stdout: "%9\t1234\t0\t1\textra\n"},
+		{name: "wrong id prefix", stdout: "@9\t1234\t0\t1\n"},
+		{name: "pid nonnumeric", stdout: "%9\tpid\t0\t1\n"},
+		{name: "pid zero", stdout: "%9\t0\t0\t1\n"},
+		{name: "dead invalid", stdout: "%9\t1234\tfalse\t1\n"},
+		{name: "count nonnumeric", stdout: "%9\t1234\t0\tpanes\n"},
+		{name: "count zero", stdout: "%9\t1234\t0\t0\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := NewFakeRunner(Response{Stdout: []byte(tt.stdout)})
+			if _, err := New(runner).ListPanes(context.Background(), "@7"); err == nil {
+				t.Fatal("ListPanes() error = nil, want malformed-output error")
+			}
+		})
+	}
+}
+
+func TestCollectionWrappersRejectNameTargetsBeforeRunningTmux(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		run  func(Client) error
+	}{
+		{name: "windows", run: func(client Client) error {
+			_, err := client.ListWindows(context.Background(), "epic123")
+			return err
+		}},
+		{name: "panes", run: func(client Client) error {
+			_, err := client.ListPanes(context.Background(), "planner")
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := NewFakeRunner()
+			if err := tt.run(New(runner)); err == nil {
+				t.Fatal("collection error = nil, want invalid typed ID error")
+			}
+			if len(runner.Calls) != 0 {
+				t.Fatalf("Calls = %#v, want no external command", runner.Calls)
+			}
+		})
+	}
+}
+
 func assertCalls(t *testing.T, runner *FakeRunner, want ...Call) {
 	t.Helper()
 	if !reflect.DeepEqual(runner.Calls, want) {
