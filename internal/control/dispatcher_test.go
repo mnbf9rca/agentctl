@@ -9,32 +9,43 @@ import (
 )
 
 func TestDispatcherResolvesBeforeDeliveringRegisteredLiteral(t *testing.T) {
-	target := tmuxx.Session{ID: "$4", Name: "epic123"}
-	var resolvedSession tmuxx.Session
-	var resolvedRole string
-	resolver := targetResolverFunc(func(_ context.Context, session tmuxx.Session, role string) (tmuxx.PaneID, error) {
-		resolvedSession = session
-		resolvedRole = role
-		return "%9", nil
-	})
-	var deliveredPane tmuxx.PaneID
-	var deliveredPayload string
-	deliverer := delivererFunc(func(_ context.Context, pane tmuxx.PaneID, payload string) error {
-		deliveredPane = pane
-		deliveredPayload = payload
-		return nil
-	})
-
-	err := New(resolver, deliverer).Execute(context.Background(), "clear", target, "planner")
-
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	tests := []struct {
+		operation string
+		payload   string
+	}{
+		{operation: "clear", payload: "/clear"},
+		{operation: "compact", payload: "/compact"},
 	}
-	if resolvedSession != target || resolvedRole != "planner" {
-		t.Fatalf("Resolve() inputs = (%#v, %q), want (%#v, %q)", resolvedSession, resolvedRole, target, "planner")
-	}
-	if deliveredPane != "%9" || deliveredPayload != "/clear" {
-		t.Fatalf("DeliverPayload() inputs = (%q, %q), want (%q, %q)", deliveredPane, deliveredPayload, "%9", "/clear")
+	for _, tt := range tests {
+		t.Run(tt.operation, func(t *testing.T) {
+			target := tmuxx.Session{ID: "$4", Name: "epic123"}
+			var resolvedSession tmuxx.Session
+			var resolvedRole string
+			resolver := targetResolverFunc(func(_ context.Context, session tmuxx.Session, role string) (tmuxx.PaneID, error) {
+				resolvedSession = session
+				resolvedRole = role
+				return "%9", nil
+			})
+			var deliveredPane tmuxx.PaneID
+			var deliveredPayload string
+			deliverer := delivererFunc(func(_ context.Context, pane tmuxx.PaneID, payload string) error {
+				deliveredPane = pane
+				deliveredPayload = payload
+				return nil
+			})
+
+			err := New(resolver, deliverer).Execute(context.Background(), tt.operation, target, "planner")
+
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if resolvedSession != target || resolvedRole != "planner" {
+				t.Fatalf("Resolve() inputs = (%#v, %q), want (%#v, %q)", resolvedSession, resolvedRole, target, "planner")
+			}
+			if deliveredPane != "%9" || deliveredPayload != tt.payload {
+				t.Fatalf("DeliverPayload() inputs = (%q, %q), want (%q, %q)", deliveredPane, deliveredPayload, "%9", tt.payload)
+			}
+		})
 	}
 }
 

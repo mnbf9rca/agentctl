@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -186,7 +188,9 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 			name:      "ambiguous role",
 			operation: "compact",
 			role:      "reviewer",
-			err:       &target.RoleResolutionError{Session: session, Role: "reviewer", WindowIDs: []tmuxx.WindowID{"@4", "@7"}},
+			err: fmt.Errorf("wrapped target refusal: %w", &target.RoleResolutionError{
+				Session: session, Role: "reviewer", WindowIDs: []tmuxx.WindowID{"@4", "@7"},
+			}),
 			wantCode:  exitRole,
 			wantError: "agentctl: refusing to send compact; role reviewer matches 2 windows in epic123 (@4, @7)\n",
 		},
@@ -347,6 +351,43 @@ func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("@4\tplanner\t1\t1\tplanner\tcodex\to3\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
+		tmuxx.Response{Stdout: []byte("codex\n")},
+		tmuxx.Response{Err: errors.New("send keys failed")},
+	)
+	var stdout, stderr bytes.Buffer
+
+	code := runWithRunner(context.Background(), []string{"clear", "--session", "epic123", "planner"}, &stdout, &stderr, runner, lookupValues(nil))
+
+	if code != exitTmux {
+		t.Fatalf("runWithRunner() = %d, want %d", code, exitTmux)
+	}
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
+		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
+		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+	if stderr.String() != "agentctl: tmux clear pane input: send keys failed\n" {
+		t.Fatalf("stderr = %q, want retained delivery failure", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no delivery claim", stdout.String())
 	}
 }
 
