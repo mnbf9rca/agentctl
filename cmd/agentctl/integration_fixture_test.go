@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -97,11 +98,92 @@ func (r *socketRunner) failNextTmuxOperation(operation string) {
 }
 
 func TestMain(m *testing.M) {
+	switch filepath.Base(os.Args[0]) {
+	case "amq":
+		integrationAMQMain()
+		return
+	case "claude", "codex":
+		integrationMarkerMain()
+		return
+	}
 	if os.Getenv(integrationMarkerEnv) == "1" {
 		integrationMarkerMain()
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func integrationAMQMain() {
+	arguments := append([]string(nil), os.Args[1:]...)
+	if len(arguments) < 2 || arguments[0] != "coop" || arguments[1] != "exec" {
+		fmt.Fprintln(os.Stderr, "integration amq stub: expected coop exec")
+		os.Exit(81)
+	}
+	arguments = arguments[2:]
+	session := ""
+	role := ""
+	for len(arguments) > 0 {
+		switch arguments[0] {
+		case "--session":
+			if len(arguments) < 2 {
+				fmt.Fprintln(os.Stderr, "integration amq stub: missing session")
+				os.Exit(82)
+			}
+			session = arguments[1]
+			arguments = arguments[2:]
+		case "--me":
+			if len(arguments) < 2 {
+				fmt.Fprintln(os.Stderr, "integration amq stub: missing role")
+				os.Exit(83)
+			}
+			role = arguments[1]
+			arguments = arguments[2:]
+		default:
+			goto parsedOptions
+		}
+	}
+
+parsedOptions:
+	if session == "" || role == "" || len(arguments) == 0 {
+		fmt.Fprintln(os.Stderr, "integration amq stub: incomplete launch")
+		os.Exit(84)
+	}
+	harness := arguments[0]
+	arguments = arguments[1:]
+	if len(arguments) > 0 && arguments[0] == "--" {
+		arguments = arguments[1:]
+	}
+	model := ""
+	if len(arguments) >= 2 && arguments[0] == "--model" {
+		model = arguments[1]
+	}
+
+	record, err := os.OpenFile(os.Getenv("AGENTCTL_STUB_INVOCATIONS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(85)
+	}
+	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\n", session, role, harness, model); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(86)
+	}
+	if err := record.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(87)
+	}
+
+	harnessPath, err := exec.LookPath(harness)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(88)
+	}
+	os.Setenv("AGENTCTL_STUB_ROLE", role)
+	os.Setenv(integrationMarkerEnv, "1")
+	os.Setenv(integrationCaptureEnv, filepath.Join(os.Getenv("AGENTCTL_STUB_CAPTURE_DIR"), role+".input"))
+	if err := syscall.Exec(harnessPath, append([]string{harnessPath}, arguments...), os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(89)
+	}
 }
 
 func integrationMarkerMain() {
@@ -199,50 +281,15 @@ func (f *integrationFixture) installStubs() {
 		f.t.Fatalf("resolve test binary: %v", err)
 	}
 
-	amqScript := `#!/bin/sh
-set -eu
-[ "$1" = "coop" ]
-[ "$2" = "exec" ]
-shift 2
-session=""
-role=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --session) session="$2"; shift 2 ;;
-    --me) role="$2"; shift 2 ;;
-    *) break ;;
-  esac
-done
-harness="$1"
-shift
-if [ "${1-}" = "--" ]; then shift; fi
-model=""
-if [ "${1-}" = "--model" ]; then model="$2"; fi
-printf '%s\t%s\t%s\t%s\n' "$session" "$role" "$harness" "$model" >> "$AGENTCTL_STUB_INVOCATIONS"
-export AGENTCTL_STUB_ROLE="$role"
-exec "$harness" "$@"
-`
-	harnessScript := `#!/bin/sh
-set -eu
-export AGENTCTL_INTEGRATION_MARKER=1
-export AGENTCTL_INTEGRATION_CAPTURE="$AGENTCTL_STUB_CAPTURE_DIR/$AGENTCTL_STUB_ROLE.input"
-exec "$AGENTCTL_INTEGRATION_TEST_BINARY" "$@"
-`
-	writeExecutable(f.t, filepath.Join(binDir, "amq"), amqScript)
-	writeExecutable(f.t, filepath.Join(binDir, "claude"), harnessScript)
-	writeExecutable(f.t, filepath.Join(binDir, "codex"), harnessScript)
+	for _, executable := range []string{"amq", "claude", "codex"} {
+		if err := os.Link(testBinary, filepath.Join(binDir, executable)); err != nil {
+			f.t.Fatalf("install %s integration stub: %v", executable, err)
+		}
+	}
 
 	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
 	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
-	f.t.Setenv("AGENTCTL_INTEGRATION_TEST_BINARY", testBinary)
-}
-
-func writeExecutable(t *testing.T, path, contents string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
-		t.Fatalf("write executable %q: %v", path, err)
-	}
 }
 
 func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult {
@@ -315,6 +362,16 @@ func (f *integrationFixture) sessions() []integrationSession {
 	return sessions
 }
 
+func (f *integrationFixture) hasSession(name string) bool {
+	f.t.Helper()
+	for _, session := range f.sessions() {
+		if session.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
 	f.t.Helper()
 	const format = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}\t#{pane_current_path}"
@@ -344,6 +401,11 @@ func (f *integrationFixture) panes(windowID tmuxx.WindowID) []tmuxx.Pane {
 		f.t.Fatalf("list panes for %s: %v", windowID, err)
 	}
 	return panes
+}
+
+func (f *integrationFixture) killWindow(windowID tmuxx.WindowID) {
+	f.t.Helper()
+	f.tmuxOutput("kill-window", "-t", string(windowID))
 }
 
 func (f *integrationFixture) processName(pid int) string {
@@ -378,6 +440,32 @@ func (f *integrationFixture) waitStubInvocations(count int) []stubInvocation {
 	}
 	f.t.Fatalf("wait for %d stub invocations: last = %#v, error = %v", count, last, lastErr)
 	return nil
+}
+
+func (f *integrationFixture) waitRoleInput(role, want string) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last := ""
+	for time.Now().Before(deadline) {
+		last = f.roleInput(role)
+		if last == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.t.Fatalf("wait for %q marker input: got %q, want %q", role, last, want)
+}
+
+func (f *integrationFixture) roleInput(role string) string {
+	f.t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.captureDir, role+".input"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		f.t.Fatalf("read %q marker input: %v", role, err)
+	}
+	return string(data)
 }
 
 func (f *integrationFixture) readStubInvocations() ([]stubInvocation, error) {

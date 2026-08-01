@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,7 +66,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		if len(panes) != 1 || panes[0].Dead || panes[0].WindowPanes != 1 {
 			t.Fatalf("window %q panes = %#v, want one live pane", window.Name, panes)
 		}
-		if got := fixture.processName(panes[0].PID); got != window.Process || got == "" || got == "amq" {
+		if got := fixture.processName(panes[0].PID); got != window.Process || filepath.Base(got) != want.harness {
 			t.Errorf("window %q process = %q, metadata baseline = %q", window.Name, got, window.Process)
 		}
 	}
