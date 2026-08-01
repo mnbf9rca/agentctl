@@ -22,11 +22,25 @@
 
 ## Known risks and accepted residuals
 
-1. **Keystroke delivery is not transactional.** `tmux send-keys` succeeding proves tmux accepted the keys, not that the TUI executed the command. A payload can land while the TUI is in an unexpected state (modal dialog, confirmation prompt, mid-render). Mitigations — the `C-u` input-clear, the foreground-process check, and separate Enter — narrow but do not close this window. The Fable planner, not agentctl, is responsible for only issuing control commands when a role has been released.
-2. **Slash-command popup selection.** Both harnesses open an autocomplete popup when a slash command is typed; Enter selects the highlighted entry. Verified 2026-08-01 (Claude Code 2.1.220, codex 0.146.0): with the full payload typed, the exact match is highlighted. A user-defined command that outranks an exact match in a future harness version could be selected instead. Accepted; re-verified by the release checklist.
-3. **Process identity is observational, not cryptographic.** The identity check compares the pane root process's executable against a baseline observed and recorded at launch (necessary because e.g. Claude Code's process name is its version string, `2.1.220`, not `claude`). A same-user process can forge the recorded metadata or rename an executable to match — consistent with the same-user exclusion above. The check is a guard against *accidents* (e.g. a shell where an agent should be), not an authentication mechanism.
-4. **Environment staleness.** tmux windows inherit the tmux server's environment, which may predate the current shell. Credentials or configuration exported after the server started may not reach agents. Documented behavior; not solved by agentctl.
-5. **Metadata is advisory.** `@agentctl_*` tmux options are readable and writable by any same-user process. They gate agentctl's own actions and support status reporting; they are not tamper-proof.
+1. **Keystroke delivery is not transactional, and degrades under host saturation.** This absorbs what were previously two separate residuals: delivery reliability and popup selection are not independent, and mitigating either alone does not cover the case where they compose.
+
+   `tmux send-keys` succeeding proves tmux accepted the keys, not that the TUI executed the command. A payload can land while the TUI is in an unexpected state (modal dialog, confirmation prompt, mid-render). Separately, both harnesses open an autocomplete popup when a slash command is typed, and Enter selects the **highlighted** entry — verified 2026-08-01 (Claude Code 2.1.220, codex 0.146.0) that with the *full* payload typed, the exact match is highlighted.
+
+   Those two facts couple, because the popup verification assumes a full payload. **Measured under saturation** (18 concurrent busy workers, codex, 1000ms delay, 20 loaded trials):
+
+   - **Demonstrated:** input corruption. Full-payload delay and loss-to-empty, blank redraws, and one doubled `/clearclear` in the observation leg (which matched nothing and opened no popup).
+   - **Not observed:** ambiguous truncation or wrong-highlight selection. Zero ambiguous truncations and zero wrong-highlight events across the trials.
+   - **Every observed failure left the payload unexecuted** — the fail-safe direction.
+
+   The composite risk is therefore *possible but unobserved*: corruption is real, and a truncation that happened to form a prefix the popup resolves to a different command would execute the wrong command silently. Nothing in these measurements shows that happening, and nothing in them shows it cannot. The popup ranks the harness's entire command palette, not just agentctl's registry, so the collision space is not one agentctl can enumerate or bound.
+
+   **Timing floors.** Claude: 750ms under load. Codex: **no floor established** at any tested candidate under adversarial saturation — it failed at the production constant. The 1s constant is retained as the value with the best evidence behind it, not as a value proven sufficient. These are adversarial-ceiling figures: they describe a deliberately saturated host, not normal operation.
+
+   **Responsibility.** The orchestrator — not agentctl, and not the operator alone — must not issue control commands while its own fleet is saturating the host. This extends the existing rule from *whether the role has been released* to *whether the host can carry the delivery*. It sits with the orchestrator by necessity rather than preference: agentctl cannot detect saturation without exactly the machine-state inference the design forbids it (§6.3), while the orchestrator both causes the load and chooses the timing, so it is the only component positioned to know. A human running agentctl by hand inherits the same rule.
+
+2. **Process identity is observational, not cryptographic.** The identity check compares the pane root process's executable against a baseline observed and recorded at launch (necessary because e.g. Claude Code's process name is its version string, `2.1.220`, not `claude`). A same-user process can forge the recorded metadata or rename an executable to match — consistent with the same-user exclusion above. The check is a guard against *accidents* (e.g. a shell where an agent should be), not an authentication mechanism.
+3. **Environment staleness.** tmux windows inherit the tmux server's environment, which may predate the current shell. Credentials or configuration exported after the server started may not reach agents. Documented behavior; not solved by agentctl.
+4. **Metadata is advisory.** `@agentctl_*` tmux options are readable and writable by any same-user process. They gate agentctl's own actions and support status reporting; they are not tamper-proof.
 
 ## File and socket permissions
 
