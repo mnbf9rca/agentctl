@@ -1,5 +1,7 @@
 # Target Validation Chain Implementation Plan
 
+> **Non-normative working document.** This plan records implementation steps only. The authoritative contract is issue #11 plus [`2026-08-01-agentctl-design.md`](../specs/2026-08-01-agentctl-design.md), especially §§1.1, 6.2, 8, 9, 10, 12.5–12.6, 13.1, and 13.5. If this plan differs from either source, follow the issue and design spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add the delivery-neutral, fail-closed target resolver required by issue #11 and expose the missing single-role validator.
