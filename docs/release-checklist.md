@@ -102,6 +102,13 @@ description of typical fleet load; it bounds behavior under deliberate CPU
 abuse. Idle behavior does not license a delay change, and even a loaded passing
 floor would require a separately justified safety margin.
 
+When a failed batch needs typed-text diagnosis, rerun only that harness with
+`--capture-pre-enter`. This diagnostic asks the tmux server to capture the pane
+and then send `Enter` in one command list, producing a `pre-enter.txt` file for
+every trial. Review those files for the literal input and highlighted command.
+The capture adds observer overhead, so diagnostic results classify a failure;
+they do not replace the unobserved execution-leg timing measurement.
+
 ## Cleanup confirmation
 
 After every run:
@@ -150,6 +157,32 @@ payload delivery/readiness breakdown under starvation, not popup
 mis-selection or reset-detection error. Therefore the 2026-08-01 release
 baseline is **not ready for merge**: Codex established no loaded floor at the
 current delay.
+
+A diagnostic rerun of Codex at 1000 ms used the same 10 trials and 18 workers
+with guaranteed pre-Enter pane captures. Artifact:
+`/tmp/agentctl-injection.0JfDWc`.
+
+| Trial | Pre-Enter typed text | Highlight at Enter | Reset evidence |
+| --- | --- | --- | --- |
+| 1 | `/clear` | exact `/clear` | completed (sole full pass) |
+| 2 | `/clear` | exact `/clear` | blank snapshot; no completed reset visible |
+| 3 | none visible; pane blank | none visible | blank snapshot |
+| 4 | none visible; pane blank | none visible | blank snapshot |
+| 5 | none visible; pane blank | none visible | blank snapshot |
+| 6 | `/clear` | exact `/clear` | blank snapshot |
+| 7 | empty; placeholder only | none | unchanged placeholder |
+| 8 | empty; placeholder only | none | unchanged placeholder |
+| 9 | empty; placeholder only | none | placeholder visible |
+| 10 | empty; placeholder only | none | literal `/clear` appeared unexecuted |
+
+No nonempty truncation such as `/c`, `/cl`, or `/co` appeared, so this rerun
+produced neither an ambiguous registry prefix nor a prefix matching another
+Codex palette command. No alternate command was highlighted. The earlier
+unobserved-execution run did capture `/clearclear` in an observation leg, with
+no popup match. These observations do not disprove the coupled risk that a
+future truncated prefix could rank a different harness command; they establish
+only that this diagnostic run did not instantiate silent wrong-command
+selection.
 
 `internal/tmuxx.payloadDelay` remains 1 second. Issue #13 makes no tuning
 change.

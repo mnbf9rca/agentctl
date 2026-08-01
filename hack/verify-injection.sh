@@ -7,6 +7,7 @@ Usage:
   hack/verify-injection.sh verify [--harness both|claude|codex] [--output DIR]
   hack/verify-injection.sh measure [--harness both|claude|codex] [--output DIR]
                                    [--trials N] [--load-workers N]
+                                   [--capture-pre-enter]
 
 Runs real Claude Code and/or Codex harnesses inside an isolated tmux server.
 All TUI snapshots are preserved in the printed artifact directory for review.
@@ -24,6 +25,7 @@ TRIALS=10
 LOAD_WORKERS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')
 OUTPUT=''
 OUTPUT_EXPLICIT=0
+CAPTURE_PRE_ENTER=0
 SOCKET="agentctl-injection-$$"
 SESSION=agentctl-injection
 SESSION_ID=''
@@ -71,6 +73,10 @@ while [ "$#" -gt 0 ]; do
       LOAD_WORKERS=$2
       shift 2
       ;;
+    --capture-pre-enter)
+      CAPTURE_PRE_ENTER=1
+      shift
+      ;;
     *)
       die "unsupported argument: $1"
       ;;
@@ -94,6 +100,10 @@ esac
 case "$LOAD_WORKERS" in
   ''|*[!0-9]*|0) die '--load-workers must be a positive decimal integer' ;;
 esac
+
+if [ "$CAPTURE_PRE_ENTER" -eq 1 ] && [ "$MODE" != measure ]; then
+  die '--capture-pre-enter is valid only in measure mode'
+fi
 
 tmux_cmd() {
   tmux -L "$SOCKET" "$@"
@@ -141,6 +151,7 @@ write_metadata() {
     printf 'harness=%s\n' "$HARNESS"
     printf 'trials=%s\n' "$TRIALS"
     printf 'load_workers=%s\n' "$LOAD_WORKERS"
+    printf 'capture_pre_enter=%s\n' "$CAPTURE_PRE_ENTER"
     printf 'working_directory=%s\n' "$PWD"
     printf 'tmux_version=%s\n' "$(tmux_cmd -V)"
     if [ "$HARNESS" = both ] || [ "$HARNESS" = claude ]; then
@@ -286,7 +297,13 @@ measure_candidate() {
 
     tmux_cmd send-keys -t "$pane" -l -- '/clear'
     sleep_ms "$delay"
-    tmux_cmd send-keys -t "$pane" Enter
+    if [ "$CAPTURE_PRE_ENTER" -eq 1 ]; then
+      tmux_cmd capture-pane -p -S - -t "$pane" \; \
+        send-keys -t "$pane" Enter \
+        >"$OUTPUT/${harness}-measure-${delay}ms-trial-${trial}-pre-enter.txt"
+    else
+      tmux_cmd send-keys -t "$pane" Enter
+    fi
     sleep_ms 2000
     capture_snapshot "$harness" "measure-${delay}ms-trial-${trial}-reset" "$pane"
 
@@ -299,13 +316,13 @@ measure_candidate() {
   IFS= read -r answer
   case "$answer" in
     y|Y)
-      printf 'measure\t%s\t%s\t%s\t%s\tPASS\tall paired trials operator-attested\n' \
-        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" >>"$OUTPUT/results.tsv"
+      printf 'measure\t%s\t%s\t%s\t%s\tPASS\tall paired trials operator-attested; capture_pre_enter=%s\n' \
+        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
       return 0
       ;;
     *)
-      printf 'measure\t%s\t%s\t%s\t%s\tFAIL\tbatch rejected; descending search stopped\n' \
-        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" >>"$OUTPUT/results.tsv"
+      printf 'measure\t%s\t%s\t%s\t%s\tFAIL\tbatch rejected; descending search stopped; capture_pre_enter=%s\n' \
+        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
       return 1
       ;;
   esac
