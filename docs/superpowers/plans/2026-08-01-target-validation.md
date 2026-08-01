@@ -87,7 +87,7 @@ git commit -m "config: validate single role names"
 **Interfaces:**
 - Consumes: `config.ValidateRoleName`, `tmuxx.Session`, `tmuxx.Window`, `tmuxx.Pane`, `tmuxx.ClassifyError`, and `tmuxx.ErrProcessUnavailable`.
 - Produces: `Client`, `LookupEnv`, `Resolver`, `New(Client, LookupEnv) Resolver`, and `Resolve(context.Context, tmuxx.Session, string) (tmuxx.PaneID, error)`.
-- Produces: `SessionMetadataError`, `RoleResolutionError`, `WindowMetadataError`, `PaneStateError`, `ProcessIdentityError`, and `SelfTargetError` with the ratified fields and exit categories 3, 4, 4, 5, 5, and 5.
+- Produces: `SessionMetadataError`, `RoleResolutionError`, `WindowMetadataError`, `PaneStateError`, `ProcessIdentityError`, and `SelfTargetError` with the ratified fields; exit categories per §9.
 
 - [ ] **Step 1: Write failing API and charset-first tests**
 
@@ -113,7 +113,7 @@ Use exact fake-runner argv and probe counts to cover managed unset/wrong, versio
 
 - [ ] **Step 6: Implement session gates and verify GREEN**
 
-Probe `@agentctl_managed` then `@agentctl_version`, require literal `1`, and classify call errors. Run: `go test ./internal/target -run Session`.
+Probe the session gates in the §6.2 order and classify call errors. Run: `go test ./internal/target -run Session`.
 
 - [ ] **Step 7: Add failing exact-window and metadata tests**
 
@@ -129,7 +129,7 @@ Cover zero panes, multiple panes, one record whose `WindowPanes` is not one, and
 
 - [ ] **Step 10: Implement pane-state gates and verify GREEN**
 
-Call `ListPanes` by exact window ID, then enforce `len == 1`, `WindowPanes == 1`, and `Dead == false` in that order. Run: `go test ./internal/target -run Pane`.
+Call `ListPanes` by exact window ID, then enforce the pane-state gates in the §6.2 order. Run: `go test ./internal/target -run Pane`.
 
 - [ ] **Step 11: Add failing identity and self-target tests**
 
