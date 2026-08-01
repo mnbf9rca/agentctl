@@ -67,13 +67,16 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 	if err != nil {
 		return Report{}, classifyTmuxError(err)
 	}
-	if managed != "1" {
-		report.Managed = false
-		return report, nil
-	}
 	version, err := c.client.ShowSessionOption(ctx, sessionID, "@agentctl_version")
 	if err != nil {
 		return Report{}, classifyTmuxError(err)
+	}
+	if version != "" && version != "1" {
+		return Report{}, &VersionError{Session: sessionName, Version: version}
+	}
+	if managed != "1" {
+		report.Managed = false
+		return report, nil
 	}
 	if version != "1" {
 		return Report{}, &VersionError{Session: sessionName, Version: version}

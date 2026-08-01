@@ -57,10 +57,13 @@ func TestCollectorReportsHealthyFleetInRosterOrder(t *testing.T) {
 	}
 }
 
-func TestCollectorRendersUnmanagedSessionWithoutReadingItsMetadata(t *testing.T) {
+func TestCollectorRendersUnmanagedSessionAfterCheckingAbsentVersion(t *testing.T) {
 	t.Parallel()
 
-	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("0\n")})
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
 	got, err := NewCollector(tmuxx.New(runner)).Collect(context.Background(), "other", "$9")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
@@ -69,10 +72,34 @@ func TestCollectorRendersUnmanagedSessionWithoutReadingItsMetadata(t *testing.T)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Collect() = %#v, want %#v", got, want)
 	}
-	wantCalls := []tmuxx.Call{{
-		Executable: "tmux",
-		Args:       []string{"show-options", "-qv", "-t", "$9", "@agentctl_managed"},
-	}}
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$9", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$9", "@agentctl_version"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("recorded calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+}
+
+func TestCollectorRejectsDifferentVersionForUnmanagedSession(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{Stdout: []byte("2\n")},
+	)
+	_, err := NewCollector(tmuxx.New(runner)).Collect(context.Background(), "future", "$9")
+	var versionError *VersionError
+	if !errors.As(err, &versionError) {
+		t.Fatalf("Collect() error = %T %v, want *VersionError", err, err)
+	}
+	if versionError.Session != "future" || versionError.Version != "2" {
+		t.Fatalf("VersionError = %#v, want session future and version 2", versionError)
+	}
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$9", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$9", "@agentctl_version"}},
+	}
 	if !reflect.DeepEqual(runner.Calls, wantCalls) {
 		t.Fatalf("recorded calls = %#v, want %#v", runner.Calls, wantCalls)
 	}
