@@ -69,7 +69,47 @@ agentctl compact [--session S] ROLE
 agentctl kill    [--session S]
 ```
 
-Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected. Session resolution for non-launch commands: `--session` > `AGENTCTL_SESSION` > current tmux session; `launch` requires explicit `--session`.
+Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected.
+
+### 4.1 Session resolution
+
+Precedence for non-launch commands: explicit `--session` > `AGENTCTL_SESSION` > the current tmux session. `launch`
+always requires an explicit `--session` and never invokes the resolver at all.
+
+**Empty is not the same as absent.** `--session=` (explicitly supplied, empty) is a usage error → exit 2, with **no**
+fallback: the user named the source, so falling through would substitute a session they did not ask for.
+`AGENTCTL_SESSION` set to empty counts as *absent* and falls through — an exported-but-empty variable is how shells
+represent "unset" in practice.
+
+**An invalid higher-priority source blocks the lower ones.** A source the user set is never silently skipped. Explicit
+invalid → exit 2; `AGENTCTL_SESSION` invalid → exit 3; an invalid displayed name → exit 3. Every candidate is validated
+by `config.ValidateSessionName` — one validator, so the rule cannot drift between sources.
+
+**Resolution is two-step and never targets a name.** Inside tmux, `display-message` (§13.2 row 12, targeted at
+`$TMUX_PANE`) yields a session *name*; that name is then exact-matched against `list-sessions` (row 1) to obtain the
+session ID. The displayed name never reaches `-t` (§13.1).
+
+**`TMUX_PANE` alone is the inside-tmux signal**, and its typed value is what `display-message` targets. `TMUX` being set
+proves nothing on its own, and a bare `display-message` with no `-t` is never issued — it returns empty against a
+detached server and is ambiguous with several clients attached (§13.2 row 12).
+
+**Error mapping** distinguishes a broken world from a broken command:
+
+| Condition | Exit |
+|---|---|
+| No permitted source resolved a candidate | 3 |
+| Candidate matched zero sessions | 3 |
+| Candidate matched **more than one** session (duplicate exact names) | 3, both session IDs named |
+| `Runner` or parse failure on row 1 or row 12 | 6, carrying tmux's own stderr |
+| Context cancellation | preserved as-is |
+
+Duplicate exact session names fail closed at exit 3 rather than 6: tmux returned well-formed output describing a broken
+world, so the *operation* did not fail. This parallels window ambiguity being a role/window error (exit 4, §13.5) —
+session ambiguity is a session-state error. A `tmux` failure such as "no server running" stays **exit 6 and keeps
+tmux's message**; it is never translated into "session not found", because that would be inference presented as fact.
+
+The resolver returns a typed `tmuxx.Session` and performs **zero** `@agentctl_*` reads. The §12.6 managed and version
+gates belong to the command packages that act on the session, not to resolution.
 
 ## 5. Architecture
 
@@ -105,8 +145,8 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
    checked before anything is created (§7).
 5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
-   `ps -o comm= -p <pane_pid>` (§13.2 row 14) until the `amq coop exec → exec(harness)` chain has completed, and store
-   the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
+   `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
+   lookup — until the `amq coop exec → exec(harness)` chain has completed, and store the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
 7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
    report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
 
@@ -173,7 +213,13 @@ string field, so the states added here are not a schema change (§13.5). Human o
 
 ### 6.4 attach / kill
 
-`attach`: refuse when the session is missing or unmanaged; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `attach-session` in control mode (§13.2 row 13); never create sessions. `kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
+`attach`: refuse when the session is missing, unmanaged, or at a version other than `1` (§12.6) — all exit 3, with control-mode and tmux failures exit 6; detect iTerm2 via `TERM_PROGRAM=iTerm.app` and report clearly when not in iTerm2 or when control mode cannot be established; run `attach-session` in control mode (§13.2 row 13); never create sessions. A refusal names the escape hatch, so the operator is never stuck:
+
+```text
+… ; to attach anyway, run: tmux -CC attach-session -t '=SESSION'
+```
+
+That suggested command uses tmux's `=` exact-match prefix rather than an ID, and it is **not** a contradiction of §13.1: §13.1 governs argv that *agentctl* constructs, where a resolved ID is always available. The escape hatch is a human typing tmux directly, with no resolution step to draw an ID from, so `=` is the correct idiom there — and it is the operator's own decision, not ours. `kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
 `kill-session` (§13.2 row 11). Both address the resolved session ID, never a name (§13.1).
 
 ### 6.5 Metadata
@@ -266,7 +312,9 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 4 additionally covers a role that resolves to more than one window (§13.5). Exit 6 additionally covers a
-pre-ownership creation failure during `launch`, carrying the operator warning in §6.6.
+pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
+failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
+or a version other than `1` (§6.4, §12.6); `attach` uses 6 when control mode cannot be established.
 
 **Exit 1 is the unclassified error.** It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
@@ -296,6 +344,12 @@ Consequently:
   recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
   timeout. Metadata stamping asserted as an exact ordered call sequence (§6.5). `--dir` pointing at a regular file
   exits 2 with no tmux call recorded.
+- Session resolution (§4.1): precedence with each higher source present; explicit-empty exits 2 without fallback while
+  empty `AGENTCTL_SESSION` falls through; an invalid higher source blocks the lower one; the inside-tmux path asserts
+  the **exact call order** row 12 then row 1, proving the displayed name is never a `-t` target; duplicate exact names
+  exit 3 naming both IDs; a no-server failure exits 6 with tmux's message intact. Forbidden-source canary: with
+  `AM_ROOT`, `AM_SESSION` and a suggestive cwd all set and no permitted source, resolution fails **and the fake
+  `Runner` recorded zero calls** — proving neither inference nor first-session selection.
 - Control chain (§6.2), one case per branch with its exit code: malformed ROLE exits 2 with the fake `Runner` recording
   **zero** calls; a session whose `@agentctl_version` is not `1` exits 3 for control and `kill`; a window whose stored
   role metadata mismatches exits 4; a multi-pane or dead pane exits 5; identity mismatch, empty baseline and
@@ -332,7 +386,7 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
 3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
 4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
 5. **Exit code for bad ROLE argument.** A ROLE failing `^[a-z0-9][a-z0-9_-]*$` is a usage error → exit 2. A well-formed ROLE with no matching managed window → exit 4.
-6. **Version gate.** For **control and `kill`**, the managed-session gate requires `@agentctl_managed=1` **and** `@agentctl_version=1`; anything else fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to act on. **`status` is carved out** for the *unmanaged* case only: a session with `@agentctl_managed` missing or not `1` is reported, not refused (§6.3). A version present but not `1` remains exit 3 everywhere, `status` included: we can read another version's options but cannot trust their semantics, and reporting them as if they were ours would be a false statement rather than a missing one.
+6. **Version gate.** For **control, `kill` and `attach`**, the managed-session gate requires `@agentctl_managed=1` **and** `@agentctl_version=1`; anything else fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to act on. `attach` is included deliberately: it is the only command that hands a human a live keyboard into panes whose metadata semantics we cannot interpret, and "agentctl refused" is recoverable where "operator typed into a misunderstood fleet" is not. Its refusal names the escape hatch (§6.4) — an operator tool should be conservative without pretending to be a boundary. **`status` is carved out** for the *unmanaged* case only: a session with `@agentctl_managed` missing or not `1` is reported, not refused (§6.3). A version present but not `1` remains exit 3 everywhere, `status` included: we can read another version's options but cannot trust their semantics, and reporting them as if they were ours would be a false statement rather than a missing one.
 7. **Defaulted model rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`.
 8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
 9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
@@ -384,8 +438,8 @@ row 14 is the one non-tmux command the `Runner` executes and is shown as a compl
 | # | Operation | argv |
 |---|---|---|
 | 1 | Resolve session | `list-sessions -F #{session_id}⟨TAB⟩#{session_name}` |
-| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id} -- CMD` |
-| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id} -- CMD` |
+| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
+| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
 | 4 | Set session option | `set-option -t ⟨sid⟩ NAME VALUE` |
 | 5 | Set window option | `set-option -w -t ⟨wid⟩ NAME VALUE` |
 | 6 | Read session option | `show-options -qv -t ⟨sid⟩ NAME` |
@@ -402,8 +456,21 @@ Notes:
 
 - **Rows 2–3, `--`.** Verified that tmux accepts `--` before the shell-command on both. `CMD` is the §12.1 string and
   always begins with `exec `, so it can never be read as a flag; `--` is belt-and-braces and costs nothing.
-- **Rows 2–3, `-P -F`.** `-P` prints the requested IDs on stdout at creation. This removes a resolve round-trip and the
-  race between creating a window and looking it up by name — the launcher never has to name-match its own windows.
+- **Rows 2–3, `-P -F`.** `-P` prints the requested fields on stdout at creation. This removes a resolve round-trip and
+  the race between creating a window and looking it up by name — the launcher never has to name-match its own windows.
+- **Rows 2–3 return `#{pane_pid}`** because the launcher must never look up what it just created, and because
+  `pane_id` cannot feed the process-identity command: row 14 takes a **pid**, not a pane. Without the pid in the
+  creation record, capturing the §8 baseline would require a `list-panes` round-trip keyed on the pane the launcher
+  already holds — reintroducing exactly the lookup-after-create step `-P -F` exists to remove.
+
+  The pid is consumed as a validated positive integer. A missing, non-numeric or non-positive pid is a **creation-output
+  parse failure**, in the same class as a malformed ID: it means the launcher never obtained ownership evidence it can
+  act on, so it takes the pre-ownership branch of §6.6 (exit 6, kill nothing), not the rollback branch.
+
+  Verified on tmux 3.7b (2026-08-01): `#{pane_pid}` renders in `-P -F` for both rows; the returned value equals
+  `list-panes`' `#{pane_pid}` for the same pane; and it is **stable across the `exec` chain** — a window created as
+  `sh -c 'exec sleep 60'` reported the same pid at creation and after the exec completed. That stability is what makes
+  the creation-time pid a valid target for the §8 baseline poll rather than merely a convenient one.
 - **Row 10.** Payload and `Enter` stay separate events, with the §3.3 fixed delay between them; `-l` is literal mode and
   `--` guards the leading `/`. Verified end to end: a pane running `cat` received exactly `/clear`.
 - **Row 12.** Only used by the session resolver's inside-tmux fallback, and only to obtain a *name*, which is then fed
