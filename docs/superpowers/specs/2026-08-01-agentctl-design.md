@@ -121,7 +121,50 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 ### 6.3 status
 
-Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 rows 6–9). States: `running`, `dead`, `missing`, `unexpected-process`, `unmanaged`, `ambiguous` (§13.5). Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`, not `dead` — documented in `--help` and README. JSON output uses the versioned schema from the brief (`"schema": 1`). Human output is the brief's table.
+`status` reports objective facts and refuses as little as possible. It is the one command that renders an unmanaged
+session rather than rejecting it (§12.6).
+
+**Reads are an allowlist.** Only §13.2 rows 6 (read session option), 8 (list windows), 9 (list panes) and 14 (process
+identity) may be issued. Row 7 (read window option) is permitted by the table but unused, because row 8's format string
+already carries every window option — tests assert it is **absent** from recorded calls, so an accidental per-window
+read loop is caught rather than merely discouraged.
+
+**Unmanaged session.** `@agentctl_managed` missing or not `1` → render `{"schema": 1, "session": S, "managed": false,
+"agents": []}` and exit 0. A version present but not `1` is still exit 3 (§12.6).
+
+**Roster drives enumeration.** Roles come from `@agentctl_roles` (§6.5), not from whatever windows happen to exist. A
+roster role with no exactly-matching window is `missing` — including the snapshot-then-gone race, where a window
+disappears between `list-windows` and `list-panes`.
+
+**State precedence**, evaluated in this order, first match wins:
+
+| Order | State | Condition |
+|---|---|---|
+| 1 | `ambiguous` | more than one window with this exact name (§13.5) |
+| 2 | `unmanaged` | window `@agentctl_managed` ≠ `1`, stored role metadata mismatches, **or more than one pane** |
+| 3 | `missing` | no window with this exact name, or the window has zero panes |
+| 4 | `dead` | pane reports `pane_dead` |
+| 5 | `unexpected-process` | observed executable ≠ stored baseline, **or** the baseline is empty, **or** identity is unavailable for an alive pane |
+| 6 | `running` | everything above passed |
+
+No process probe (row 14) is issued once an earlier state applies — the probe is the last resort, not a precondition.
+
+Three mappings are deliberate and easy to get backwards:
+
+- **Multiple panes → `unmanaged`, not `ambiguous`.** The window no longer satisfies the one-pane contract a managed
+  window is created with, so it is no longer ours to describe. This matches control refusing the same window.
+- **Alive pane + identity unavailable → `unexpected-process`.** Identity *unverifiable* is not identity *verified*.
+  Reporting `running` here would assert something unproven.
+- **Empty stored baseline → `unexpected-process`.** Same reasoning, and consistent with §8's fail-closed rule.
+
+**Rendering.** `unexpected-process` shows the **currently observed** executable, not the stored baseline: the operator
+needs to see what *is* running, not what was expected. Fields that were never probed render as the empty string —
+`missing` → pane ID `''` and process `''`; `dead` → the real pane ID, process `''`; `unmanaged`/`ambiguous` → the
+observed pane ID when trivially known, else `''`, process `''`.
+
+Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`,
+not `dead` — documented in `--help` and the README. JSON uses the brief's versioned schema (`"schema": 1`); `state` is a
+string field, so the states added here are not a schema change (§13.5). Human output is the brief's table.
 
 ### 6.4 attach / kill
 
@@ -129,17 +172,28 @@ Collector uses only `show-options`, `list-windows -F`, `list-panes -F` (§13.2 r
 
 ### 6.5 Metadata
 
-Exactly as the brief: session options `@agentctl_managed=1`, `@agentctl_version=1`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
+Exactly as the brief, plus one addition: session options `@agentctl_managed=1`, `@agentctl_version=1`,
+`@agentctl_roles`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
 Stamping order is **fixed and asserted**, because the fake `Runner` records calls in sequence and a reordering would
 otherwise pass silently:
 
 1. session `@agentctl_managed`
 2. session `@agentctl_version`
-3. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
+3. session `@agentctl_roles`
+4. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
    the baseline poll, and finally `@agentctl_process`.
 
 `@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
+
+**`@agentctl_roles`** is the declared roster: the role names from `--roles`, comma-joined, in declaration order. It
+exists because without it a dead agent is *unobservable*. Every other status input is derived from windows that still
+exist, so a role whose window has closed leaves no trace to report — and since managed windows run without
+`remain-on-exit` (§6.3), a crashed agent's window closes. The roster is what lets `status` say `missing` instead of
+silently omitting the role, which is the difference between status doing its job and status being actively misleading.
+It uses the same tmux-option mechanism as every other field, so "no metadata database" still holds. `launch` stamps it
+once, immediately after `@agentctl_version` — it is known from the validated config before any window exists, but the
+session must exist to hold it, so it lands with the other session options rather than earlier.
 
 ### 6.6 Launch failure, ownership, and exact messages
 
@@ -223,6 +277,12 @@ Consequently:
 ## 10. Testing
 
 - Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
+  renders `unmanaged`; alive-pane-with-unavailable-identity and empty-baseline both render `unexpected-process`; zero
+  panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
+  executable, not the baseline; unmanaged session renders `managed:false` with an empty agents array and exit 0 while a
+  non-`1` version still exits 3; the fake `Runner` recorded **no** row-7 calls and **no** row-14 call for any role whose
+  state was decided before the process probe.
 - Launch failure paths (§6.6): both exit-8 messages asserted **verbatim**, including the cleanup-failure variant with a
   cause; pre-ownership malformed creation output asserts exit 6, the `tmux ls` warning, and that the fake `Runner`
   recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
@@ -259,7 +319,7 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
 3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
 4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
 5. **Exit code for bad ROLE argument.** A ROLE failing `^[a-z0-9][a-z0-9_-]*$` is a usage error → exit 2. A well-formed ROLE with no matching managed window → exit 4.
-6. **Version gate.** The managed-session gate for control/status/kill requires `@agentctl_managed=1` **and** `@agentctl_version=1`. Any other version fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to control.
+6. **Version gate.** For **control and `kill`**, the managed-session gate requires `@agentctl_managed=1` **and** `@agentctl_version=1`; anything else fails closed (exit 3, "created by a different agentctl version") — a future agentctl's sessions are not ours to act on. **`status` is carved out** for the *unmanaged* case only: a session with `@agentctl_managed` missing or not `1` is reported, not refused (§6.3). A version present but not `1` remains exit 3 everywhere, `status` included: we can read another version's options but cannot trust their semantics, and reporting them as if they were ours would be a false statement rather than a missing one.
 7. **Defaulted model rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`.
 8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
 9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
