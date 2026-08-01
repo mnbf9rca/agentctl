@@ -374,9 +374,9 @@ func TestCollectorPropagatesProcessRunnerFailure(t *testing.T) {
 	if !errors.Is(err, processFailure) {
 		t.Fatalf("Collect() error = %v, want process failure %v", err, processFailure)
 	}
-	var tmuxError *TmuxError
+	var tmuxError *tmuxx.TmuxError
 	if !errors.As(err, &tmuxError) {
-		t.Fatalf("Collect() error = %T %v, want *TmuxError", err, err)
+		t.Fatalf("Collect() error = %T %v, want *tmuxx.TmuxError", err, err)
 	}
 	if processCalls := assertStatusCallAllowlist(t, runner.Calls); processCalls != 1 {
 		t.Fatalf("recorded %d process calls, want 1", processCalls)

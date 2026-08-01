@@ -352,7 +352,7 @@ func statusError(stderr io.Writer, err error) int {
 	if errors.As(err, &rosterFailure) {
 		return exitSession
 	}
-	var tmuxFailure *statuspkg.TmuxError
+	var tmuxFailure *tmuxx.TmuxError
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
 	}

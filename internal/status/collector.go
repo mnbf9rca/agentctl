@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
@@ -28,27 +27,6 @@ type VersionError struct {
 // managed session.
 type RosterError struct {
 	Roster string
-}
-
-// TmuxError reports a tmux or process-runner failure during status collection.
-type TmuxError struct {
-	Err error
-}
-
-func (e *TmuxError) Error() string {
-	message := e.Err.Error()
-	var exitError *exec.ExitError
-	if errors.As(e.Err, &exitError) {
-		stderr := strings.TrimRight(string(exitError.Stderr), "\r\n")
-		if stderr != "" && !strings.Contains(message, stderr) {
-			return message + ": " + stderr
-		}
-	}
-	return message
-}
-
-func (e *TmuxError) Unwrap() error {
-	return e.Err
 }
 
 func (e *VersionError) Error() string {
@@ -81,11 +59,11 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 
 	managed, err := c.client.ShowSessionOption(ctx, sessionID, "@agentctl_managed")
 	if err != nil {
-		return Report{}, classifyTmuxError(err)
+		return Report{}, tmuxx.ClassifyError(err)
 	}
 	version, err := c.client.ShowSessionOption(ctx, sessionID, "@agentctl_version")
 	if err != nil {
-		return Report{}, classifyTmuxError(err)
+		return Report{}, tmuxx.ClassifyError(err)
 	}
 	if version != "" && version != "1" {
 		return Report{}, &VersionError{Session: sessionName, Version: version}
@@ -99,7 +77,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 	}
 	roster, err := c.client.ShowSessionOption(ctx, sessionID, "@agentctl_roles")
 	if err != nil {
-		return Report{}, classifyTmuxError(err)
+		return Report{}, tmuxx.ClassifyError(err)
 	}
 	if roster == "" {
 		return Report{}, &RosterError{}
@@ -112,7 +90,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 	}
 	windows, err := c.client.ListWindows(ctx, sessionID)
 	if err != nil {
-		return Report{}, classifyTmuxError(err)
+		return Report{}, tmuxx.ClassifyError(err)
 	}
 
 	windowsByName := make(map[string][]tmuxx.Window, len(windows))
@@ -144,7 +122,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 		if err != nil {
 			currentWindows, recheckErr := c.client.ListWindows(ctx, sessionID)
 			if recheckErr != nil {
-				return Report{}, classifyTmuxError(errors.Join(err, fmt.Errorf("recheck windows: %w", recheckErr)))
+				return Report{}, tmuxx.ClassifyError(errors.Join(err, fmt.Errorf("recheck windows: %w", recheckErr)))
 			}
 			stillPresent := false
 			for _, current := range currentWindows {
@@ -154,7 +132,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 				}
 			}
 			if stillPresent {
-				return Report{}, classifyTmuxError(err)
+				return Report{}, tmuxx.ClassifyError(err)
 			}
 			agent.State = StateMissing
 			report.Agents = append(report.Agents, agent)
@@ -189,7 +167,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 				report.Agents = append(report.Agents, agent)
 				continue
 			}
-			return Report{}, classifyTmuxError(err)
+			return Report{}, tmuxx.ClassifyError(err)
 		}
 		agent.Process = process
 		if process != window.Process {
@@ -200,13 +178,6 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 		report.Agents = append(report.Agents, agent)
 	}
 	return report, nil
-}
-
-func classifyTmuxError(err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return &TmuxError{Err: err}
 }
 
 func agentForWindow(role string, window tmuxx.Window) Agent {
