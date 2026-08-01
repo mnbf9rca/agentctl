@@ -10,7 +10,9 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/kill"
+	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -52,9 +54,15 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
-	client := tmuxx.New(tmuxx.RealRunner{})
+	runner := tmuxx.RealRunner{}
+	client := tmuxx.New(runner)
 	resolver := session.New(client, os.LookupEnv)
-	return runWithDependencies(context.Background(), arguments, stdout, stderr, resolver, kill.New(client))
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, launchDependencies{runner: runner}, resolver, kill.New(client))
+}
+
+type launchDependencies struct {
+	runner tmuxx.Runner
+	fleet  fleet.Dependencies
 }
 
 type sessionResolver interface {
@@ -66,10 +74,18 @@ type sessionKiller interface {
 }
 
 func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithDependencies(ctx, arguments, stdout, stderr, resolver, nil)
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil)
 }
 
 func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
+	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, killer)
+}
+
+func runWith(arguments []string, stdout, stderr io.Writer, dependencies launchDependencies) int {
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil)
+}
+
+func runWithAllDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, launch launchDependencies, resolver sessionResolver, killer sessionKiller) int {
 	if len(arguments) == 0 {
 		return usageError(stderr, "command required", globalUsage)
 	}
@@ -84,6 +100,26 @@ func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr
 		return usageError(stderr, fmt.Sprintf("unknown command %q", command), globalUsage)
 	}
 
+	if command == "launch" {
+		options, err := parseLaunch(arguments[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, usage)
+			return exitOK
+		}
+		if err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
+		if err := config.ValidateSessionName(options.session); err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
+		fleetConfig, err := config.ParseFleet(options.roles, options.models)
+		if err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
+		err = fleet.New(launch.runner, launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
+		return launchResult(stderr, err, usage)
+	}
+
 	options, err := parseCommand(command, arguments[1:])
 	if errors.Is(err, flag.ErrHelp) {
 		fmt.Fprint(stdout, usage)
@@ -92,16 +128,13 @@ func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr
 	if err != nil {
 		return usageError(stderr, err.Error(), usage)
 	}
-	var resolved tmuxx.Session
-	if command != "launch" {
-		var explicit *string
-		if options.sessionSet {
-			explicit = &options.session
-		}
-		resolved, err = resolver.Resolve(ctx, explicit)
-		if err != nil {
-			return resolverError(stderr, usage, err)
-		}
+	var explicit *string
+	if options.sessionSet {
+		explicit = &options.session
+	}
+	resolved, err := resolver.Resolve(ctx, explicit)
+	if err != nil {
+		return resolverError(stderr, usage, err)
 	}
 	if command == "kill" {
 		if killer == nil {
@@ -116,6 +149,68 @@ func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr
 
 	fmt.Fprintf(stderr, "agentctl: %s: not implemented\n", command)
 	return exitNotImplemented
+}
+
+type launchOptions struct {
+	session   string
+	roles     string
+	models    *string
+	directory *string
+}
+
+func parseLaunch(arguments []string) (launchOptions, error) {
+	flags := cliflags.New("launch")
+	session := flags.String("session", "", "session name")
+	roles := flags.String("roles", "", "role and harness assignments")
+	models := flags.String("models", "", "role and model assignments")
+	directory := flags.String("dir", "", "working directory")
+
+	if err := flags.Parse(arguments); err != nil {
+		return launchOptions{}, err
+	}
+	if len(flags.Args()) != 0 {
+		return launchOptions{}, errors.New("launch accepts no positional arguments")
+	}
+
+	options := launchOptions{session: *session, roles: *roles}
+	if flags.WasSet("models") {
+		modelValue := *models
+		options.models = &modelValue
+	}
+	if flags.WasSet("dir") {
+		directoryValue := *directory
+		options.directory = &directoryValue
+	}
+	return options, nil
+}
+
+func launchResult(stderr io.Writer, err error, usage string) int {
+	if err == nil {
+		return exitOK
+	}
+
+	var directoryError *fleet.DirectoryError
+	if errors.As(err, &directoryError) {
+		return usageError(stderr, err.Error(), usage)
+	}
+	var missing *preflight.MissingExecutableError
+	if errors.As(err, &missing) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitMissingExecutable
+	}
+	var exists *fleet.SessionExistsError
+	if errors.As(err, &exists) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitSession
+	}
+	var launchError *fleet.LaunchError
+	if errors.As(err, &launchError) {
+		fmt.Fprintf(stderr, "agentctl: %v\n", err)
+		return exitLaunch
+	}
+
+	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	return exitTmux
 }
 
 func killError(stderr io.Writer, err error) int {

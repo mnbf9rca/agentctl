@@ -122,12 +122,13 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 	}
 }
 
-// Launch performs preflight before taking any tmux action.
-func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory string) error {
+// Launch performs preflight before taking any tmux action. A nil directory
+// uses the invocation working directory; a non-nil value must name a directory.
+func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) error {
 	if err := preflight.CheckExecutables(fleet, l.lookPath); err != nil {
 		return err
 	}
-	directory, err := l.resolveDirectory(directory)
+	directoryName, err := l.resolveDirectory(directory)
 	if err != nil {
 		return err
 	}
@@ -145,7 +146,7 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	}
 
 	first := fleet.Roles[0]
-	createdSession, err := l.newSession(ctx, session, first, directory)
+	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {
 		if errors.Is(err, tmuxx.ErrCreationOutput) {
 			return &CreationError{Session: session, Cause: err}
@@ -160,7 +161,7 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	}
 
 	for _, role := range fleet.Roles[1:] {
-		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directory)
+		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directoryName)
 		if err != nil {
 			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
@@ -253,18 +254,18 @@ func (l Launcher) rollback(ctx context.Context, sessionID tmuxx.SessionID, sessi
 	}
 }
 
-func (l Launcher) resolveDirectory(directory string) (string, error) {
-	if directory == "" {
+func (l Launcher) resolveDirectory(directory *string) (string, error) {
+	if directory == nil {
 		return l.getwd()
 	}
 	{
-		info, err := l.stat(directory)
+		info, err := l.stat(*directory)
 		if err != nil {
-			return "", &DirectoryError{Path: directory, Err: err}
+			return "", &DirectoryError{Path: *directory, Err: err}
 		}
 		if !info.IsDir() {
-			return "", &DirectoryError{Path: directory}
+			return "", &DirectoryError{Path: *directory}
 		}
 	}
-	return directory, nil
+	return *directory, nil
 }

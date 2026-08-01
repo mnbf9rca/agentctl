@@ -40,7 +40,7 @@ func TestLaunchMissingDependencyReturnsPreflightErrorBeforeTmux(t *testing.T) {
 		{Name: "planner", Harness: config.HarnessClaude},
 		{Name: "reviewer", Harness: config.HarnessClaude},
 		{Name: "worker", Harness: config.HarnessCodex},
-	}}, "")
+	}}, nil)
 
 	var missing *preflight.MissingExecutableError
 	if !errors.As(err, &missing) {
@@ -84,7 +84,7 @@ func TestLaunchRejectsInvalidExplicitDirectoryBeforeTmux(t *testing.T) {
 				Stat:     tt.stat,
 			})
 
-			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "/not-a-directory")
+			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr("/not-a-directory"))
 
 			var invalid *DirectoryError
 			if !errors.As(err, &invalid) {
@@ -100,6 +100,30 @@ func TestLaunchRejectsInvalidExplicitDirectoryBeforeTmux(t *testing.T) {
 	}
 }
 
+func TestLaunchRejectsExplicitEmptyDirectoryBeforeTmux(t *testing.T) {
+	runner := tmuxx.NewFakeRunner()
+	directory := ""
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Stat: func(path string) (fs.FileInfo, error) {
+			if path != "" {
+				t.Fatalf("Stat path = %q, want explicit empty path", path)
+			}
+			return nil, fs.ErrNotExist
+		},
+	})
+
+	err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), &directory)
+
+	var invalid *DirectoryError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("Launch() error = %v, want *DirectoryError", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("Runner calls = %#v, want none", runner.Calls)
+	}
+}
+
 func TestLaunchRejectsOnlyExactExistingSession(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$1\tepic1234\n$2\tEpic123\n$3\tepic123\n$4\txepic123\n")})
 	launcher := New(runner, Dependencies{
@@ -107,7 +131,7 @@ func TestLaunchRejectsOnlyExactExistingSession(t *testing.T) {
 		Getwd:    func() (string, error) { return "/invocation", nil },
 	})
 
-	err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "")
+	err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
 
 	var exists *SessionExistsError
 	if !errors.As(err, &exists) {
@@ -138,7 +162,7 @@ func TestLaunchChecksRequestedHarnessesInFirstSeenDeduplicatedOrder(t *testing.T
 		{Name: "fourth", Harness: config.HarnessClaude},
 	}}
 
-	err := launcher.Launch(context.Background(), "epic123", fleet, "")
+	err := launcher.Launch(context.Background(), "epic123", fleet, nil)
 
 	var exists *SessionExistsError
 	if !errors.As(err, &exists) {
@@ -169,7 +193,7 @@ func TestLaunchDoesNotTreatPrefixOrCaseCanariesAsExistingSession(t *testing.T) {
 				Getwd:    func() (string, error) { return "/invocation", nil },
 			})
 
-			if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), ""); err != nil {
+			if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil); err != nil {
 				t.Fatalf("Launch() error = %v, want successful launch", err)
 			}
 			if len(runner.Calls) != 11 {
@@ -199,7 +223,7 @@ func TestLaunchOneRoleCreatesAndStampsReturnedIDs(t *testing.T) {
 		Name: "planner", Harness: config.HarnessClaude, Model: "fable",
 	}}}
 
-	if err := launcher.Launch(context.Background(), "epic123", fleet, ""); err != nil {
+	if err := launcher.Launch(context.Background(), "epic123", fleet, nil); err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
 
@@ -251,7 +275,7 @@ func TestLaunchMultipleRolesUsesCreationIDsAndDeclarationOrder(t *testing.T) {
 		{Name: "reviewer", Harness: config.HarnessCodex, Model: "gpt-5.6"},
 	}}
 
-	if err := launcher.Launch(context.Background(), "epic123", fleet, "/fleet workspace"); err != nil {
+	if err := launcher.Launch(context.Background(), "epic123", fleet, directoryPtr("/fleet workspace")); err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
 	if want := []string{"tmux", "amq", "claude", "codex"}; !reflect.DeepEqual(lookedUp, want) {
@@ -289,6 +313,8 @@ func TestLaunchMultipleRolesUsesCreationIDsAndDeclarationOrder(t *testing.T) {
 }
 
 func presentExecutable(name string) (string, error) { return "/bin/" + name, nil }
+
+func directoryPtr(value string) *string { return &value }
 
 func oneRoleFleet() config.FleetConfig {
 	return config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}
@@ -329,7 +355,7 @@ func TestLaunchStoresImmediateProcessIdentityLiterallyWithoutSleeping(t *testing
 		Sleep:    clock.Sleep,
 	})
 
-	if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), ""); err != nil {
+	if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil); err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
 	if len(clock.sleeps) != 0 {
@@ -370,7 +396,7 @@ func TestLaunchPollsAmqAndUnavailableUntilHarnessIdentity(t *testing.T) {
 				Sleep:    clock.Sleep,
 			})
 
-			if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), ""); err != nil {
+			if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil); err != nil {
 				t.Fatalf("Launch() error = %v", err)
 			}
 			if want := []time.Duration{100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond}; !reflect.DeepEqual(clock.sleeps, want) {
@@ -408,7 +434,7 @@ func TestLaunchProcessPollRetriesThroughFiveSecondBoundaryThenRollsBack(t *testi
 				Sleep:    clock.Sleep,
 			})
 
-			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "")
+			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
 			var launchErr *LaunchError
 			if !errors.As(err, &launchErr) {
 				t.Fatalf("Launch() error = %v, want *LaunchError", err)
@@ -447,7 +473,7 @@ func TestLaunchProcessPollFailsImmediatelyForNonSentinelError(t *testing.T) {
 		Sleep:    clock.Sleep,
 	})
 
-	err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "")
+	err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
 	if !errors.Is(err, cause) {
 		t.Fatalf("Launch() error = %v, want wrapped %v", err, cause)
 	}
@@ -494,7 +520,7 @@ func TestLaunchRollsBackEveryPostOwnershipFailureAndStops(t *testing.T) {
 				Sleep:    func(time.Duration) { t.Fatal("unexpected process poll sleep") },
 			})
 
-			err := launcher.Launch(context.Background(), "epic123", twoRoleFleet(), "")
+			err := launcher.Launch(context.Background(), "epic123", twoRoleFleet(), nil)
 			var launchErr *LaunchError
 			if !errors.As(err, &launchErr) {
 				t.Fatalf("Launch() error = %v, want *LaunchError", err)
@@ -519,7 +545,7 @@ func TestLaunchRollsBackMalformedLaterWindowOutput(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(responses...)
 	launcher := New(runner, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
 
-	err := launcher.Launch(context.Background(), "epic123", twoRoleFleet(), "")
+	err := launcher.Launch(context.Background(), "epic123", twoRoleFleet(), nil)
 	var launchErr *LaunchError
 	if !errors.As(err, &launchErr) || launchErr.Role != "reviewer" {
 		t.Fatalf("Launch() error = %v, want reviewer *LaunchError", err)
@@ -547,7 +573,7 @@ func TestLaunchErrorReportsCleanupResultAndUnwrapsFailureCause(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(responses...)
 			launcher := New(runner, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
 
-			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "")
+			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
 			var launchErr *LaunchError
 			if !errors.As(err, &launchErr) {
 				t.Fatalf("Launch() error = %v, want *LaunchError", err)
@@ -581,7 +607,7 @@ func TestLaunchCreationFailuresDoNotClaimOwnership(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(tmuxx.Response{}, tt.response)
 			launcher := New(runner, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }})
 
-			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), "")
+			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
 			var creationErr *CreationError
 			if errors.As(err, &creationErr) != tt.wantCreation {
 				t.Fatalf("CreationError presence = %t, want %t; err = %v", errors.As(err, &creationErr), tt.wantCreation, err)
@@ -635,7 +661,7 @@ func TestLaunchOtherPreOwnershipFailuresDoNotKill(t *testing.T) {
 				responses = []tmuxx.Response{{}}
 			}
 			runner := tmuxx.NewFakeRunner(responses...)
-			err := tt.launcher(runner).Launch(context.Background(), "epic123", tt.fleet, "")
+			err := tt.launcher(runner).Launch(context.Background(), "epic123", tt.fleet, nil)
 			if err == nil {
 				t.Fatal("Launch() error = nil, want pre-ownership error")
 			}

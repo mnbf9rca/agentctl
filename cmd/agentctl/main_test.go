@@ -95,7 +95,7 @@ func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
 		if code := run(arguments, &stdout, &stderr); code != exitUsage {
 			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
 		}
-		if !strings.Contains(stderr.String(), "--models must not be empty") || !strings.Contains(stderr.String(), "Usage:") {
+		if !strings.Contains(stderr.String(), "must not be empty") || !strings.Contains(stderr.String(), "Usage:") {
 			t.Fatalf("stderr = %q, want empty-model error and usage", stderr.String())
 		}
 		if stdout.Len() != 0 {
@@ -104,20 +104,7 @@ func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsOmittedModelsBeforeReachingStub(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-
-	code := run([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr)
-
-	if code == exitUsage {
-		t.Fatalf("run() = usage error; stderr = %q", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "launch: not implemented") {
-		t.Fatalf("stderr = %q, want launch stub message", stderr.String())
-	}
-}
-
-func TestRunAcceptsEachCommandShapeBeforeReachingStub(t *testing.T) {
+func TestRunAcceptsEachNonLaunchCommandShapeBeforeReachingStub(t *testing.T) {
 	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
 		return tmuxx.Session{ID: "$1", Name: "fleet"}, nil
 	})
@@ -125,7 +112,6 @@ func TestRunAcceptsEachCommandShapeBeforeReachingStub(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "launch", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", "planner:fable", "--dir", "/tmp"}},
 		{name: "attach", args: []string{"attach", "--session", "fleet"}},
 		{name: "status", args: []string{"status", "--session", "fleet", "--json"}},
 		{name: "clear", args: []string{"clear", "--session", "fleet", "planner"}},
@@ -399,13 +385,15 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 		{name: "missing", args: []string{"launch", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "empty", args: []string{"launch", "--session=", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "invalid", args: []string{"launch", "--session", "INVALID", "--roles", "planner:claude"}, wantCode: exitUsage},
-		{name: "valid", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, wantCode: exitNotImplemented},
+		{name: "valid", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, wantCode: exitOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(launchOneRoleResponses("")...)
 			var stdout, stderr bytes.Buffer
-			if code := runWithResolver(context.Background(), tt.args, &stdout, &stderr, resolver); code != tt.wantCode {
-				t.Fatalf("runWithResolver(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
+			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, launchTestDependencies(runner), resolver, nil)
+			if code != tt.wantCode {
+				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
 			}
 		})
 	}
