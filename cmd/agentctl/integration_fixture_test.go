@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,12 @@ type stubInvocation struct {
 	Model   string
 }
 
+type sentinelSession struct {
+	SessionID tmuxx.SessionID
+	WindowID  tmuxx.WindowID
+	PaneID    tmuxx.PaneID
+}
+
 type integrationFixture struct {
 	t           *testing.T
 	runner      *socketRunner
@@ -60,16 +67,33 @@ type integrationFixture struct {
 }
 
 type socketRunner struct {
-	tmuxPath string
-	socket   string
+	tmuxPath      string
+	socket        string
+	failureMu     sync.Mutex
+	failOperation string
 }
 
 func (r *socketRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
 	if executable == "tmux" {
+		r.failureMu.Lock()
+		shouldFail := len(args) > 0 && args[0] == r.failOperation
+		if shouldFail {
+			r.failOperation = ""
+		}
+		r.failureMu.Unlock()
+		if shouldFail {
+			return nil, errors.New("injected tmux operation failure")
+		}
 		args = append([]string{"-L", r.socket}, args...)
 		executable = r.tmuxPath
 	}
 	return exec.CommandContext(ctx, executable, args...).Output()
+}
+
+func (r *socketRunner) failNextTmuxOperation(operation string) {
+	r.failureMu.Lock()
+	defer r.failureMu.Unlock()
+	r.failOperation = operation
 }
 
 func TestMain(m *testing.M) {
@@ -227,6 +251,50 @@ func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult 
 	var stderr bytes.Buffer
 	exitCode := runWithRunner(context.Background(), arguments, &stdout, &stderr, f.runner, os.LookupEnv)
 	return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func (f *integrationFixture) createSentinelSession(name string) sentinelSession {
+	f.t.Helper()
+	const format = "#{session_id}\t#{window_id}\t#{pane_id}"
+	output := f.tmuxOutput(
+		"new-session", "-d", "-s", name, "-n", "sentinel",
+		"-P", "-F", format, "--", "exec sleep 300",
+	)
+	fields := strings.Split(strings.TrimSuffix(string(output), "\n"), "\t")
+	if len(fields) != 3 {
+		f.t.Fatalf("parse sentinel creation %q: got %d fields", output, len(fields))
+	}
+	return sentinelSession{
+		SessionID: tmuxx.SessionID(fields[0]),
+		WindowID:  tmuxx.WindowID(fields[1]),
+		PaneID:    tmuxx.PaneID(fields[2]),
+	}
+}
+
+func (f *integrationFixture) sentinelSession(name string) sentinelSession {
+	f.t.Helper()
+	var found *integrationSession
+	for _, session := range f.sessions() {
+		if session.Name == name {
+			if found != nil {
+				f.t.Fatalf("multiple sentinel sessions named %q", name)
+			}
+			copy := session
+			found = &copy
+		}
+	}
+	if found == nil {
+		f.t.Fatalf("sentinel session %q is missing", name)
+	}
+	windows := f.windows(found.ID)
+	if len(windows) != 1 {
+		f.t.Fatalf("sentinel session %q windows = %#v, want one", name, windows)
+	}
+	panes := f.panes(windows[0].ID)
+	if len(panes) != 1 {
+		f.t.Fatalf("sentinel session %q panes = %#v, want one", name, panes)
+	}
+	return sentinelSession{SessionID: found.ID, WindowID: windows[0].ID, PaneID: panes[0].ID}
 }
 
 func (f *integrationFixture) sessions() []integrationSession {

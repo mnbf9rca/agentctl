@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,48 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		}
 		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model {
 			t.Errorf("stub invocation = %#v, want launch inputs preserved", invocation)
+		}
+	}
+}
+
+func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	sentinel := fixture.createSentinelSession("integration-existing")
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-existing",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != 3 || result.stdout != "" || !strings.Contains(result.stderr, `session "integration-existing" already exists`) {
+		t.Fatalf("launch result = %#v, want existing-session refusal", result)
+	}
+
+	current := fixture.sentinelSession("integration-existing")
+	if current != sentinel {
+		t.Fatalf("sentinel after refusal = %#v, want unchanged %#v", current, sentinel)
+	}
+	panes := fixture.panes(current.WindowID)
+	if len(panes) != 1 || panes[0].ID != current.PaneID || panes[0].Dead {
+		t.Fatalf("sentinel panes after refusal = %#v, want original live pane %s", panes, current.PaneID)
+	}
+}
+
+func TestIntegrationLaunchRollsBackAfterLaterWindowFailure(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	fixture.runner.failNextTmuxOperation("new-window")
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-rollback",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != 8 || result.stdout != "" || !strings.Contains(result.stderr, "removed incomplete session integration-rollback") {
+		t.Fatalf("launch result = %#v, want post-ownership rollback failure", result)
+	}
+	for _, session := range fixture.sessions() {
+		if session.Name == "integration-rollback" {
+			t.Fatalf("partially launched session remains after rollback: %#v", session)
 		}
 	}
 }
