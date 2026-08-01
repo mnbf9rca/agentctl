@@ -1,7 +1,7 @@
 # agentctl design — 2026-08-01
 
 Status: approved in design session 2026-08-01.
-Companion documents: [`brief.md`](../../../brief.md) (normative requirements), [`SECURITY.md`](../../../SECURITY.md) (threat model).
+Companion documents: [`docs/brief.md`](../../brief.md) (normative requirements), [`SECURITY.md`](../../../SECURITY.md) (threat model).
 
 This spec records the decisions, verified external contracts, and architecture agreed in the design session. Where this document and `brief.md` conflict, this document wins — every deviation from the brief is listed in §2.
 
