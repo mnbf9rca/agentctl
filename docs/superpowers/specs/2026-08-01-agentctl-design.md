@@ -81,9 +81,30 @@ fallback: the user named the source, so falling through would substitute a sessi
 `AGENTCTL_SESSION` set to empty counts as *absent* and falls through — an exported-but-empty variable is how shells
 represent "unset" in practice.
 
-**An invalid higher-priority source blocks the lower ones.** A source the user set is never silently skipped. Explicit
-invalid → exit 2; `AGENTCTL_SESSION` invalid → exit 3; an invalid displayed name → exit 3. Every candidate is validated
-by `config.ValidateSessionName` — one validator, so the rule cannot drift between sources.
+**An invalid higher-priority source blocks the lower ones.** A source the user set is never silently skipped. The full
+matrix — every source, every form it can take, and the resulting code:
+
+| Source | State | Validated as | Result |
+|---|---|---|---|
+| `--session NAME` | supplied | session name | invalid → **2** |
+| `--session=` | supplied, empty | — | **2**, no fallback |
+| `--session` | omitted | — | fall through |
+| `AGENTCTL_SESSION` | set, non-empty | session name | invalid → **3** |
+| `AGENTCTL_SESSION` | set, empty | — | treated as absent, fall through |
+| `AGENTCTL_SESSION` | unset | — | fall through |
+| `TMUX_PANE` | set | **pane ID** (`%` + digits) | invalid → **3** |
+| `TMUX_PANE` | unset | — | not inside tmux → **3**, unresolvable |
+| displayed name (row 12 output) | — | session name | invalid → **3** |
+
+Session-name candidates are validated by `config.ValidateSessionName` — one validator, so the rule cannot drift between
+sources. `TMUX_PANE` is the exception in *what* is checked, not in how it is classified: it carries a pane ID rather
+than a session name, so it is validated as one, and an invalid value is still an invalid source the user set.
+
+**Exit 6 requires that a tmux command actually ran.** Every invalid-source case above is decided before any command is
+issued, so none of them may report a tmux failure. Exit 6 is reserved for a `Runner` or parse failure on row 1 or row
+12 and carries tmux's own stderr; claiming it when no command was executed tells the operator to debug something that
+never happened, and leaves nothing for them to read. This is the same rule as §9's prohibition on stubs borrowing
+contract codes, applied to resolution: a code is a claim about what occurred.
 
 **Resolution is two-step and never targets a name.** Inside tmux, `display-message` (§13.2 row 12, targeted at
 `$TMUX_PANE`) yields a session *name*; that name is then exact-matched against `list-sessions` (row 1) to obtain the
