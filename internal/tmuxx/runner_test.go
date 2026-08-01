@@ -1,6 +1,7 @@
 package tmuxx
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestRealRunnerPassesExecutableAndArguments(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GO_WANT_TMUXX_HELPER_PROCESS", "1")
 
 	got, err := (RealRunner{}).Output(
 		context.Background(),
@@ -40,7 +41,28 @@ func TestRealRunnerHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestRealRunnerHelperRequiresMarker(t *testing.T) {
+	t.Setenv("GO_WANT_TMUXX_HELPER_PROCESS", "")
+
+	got, err := (RealRunner{}).Output(
+		context.Background(),
+		os.Args[0],
+		"-test.run=^TestRealRunnerHelper$",
+		"--",
+	)
+	if err != nil {
+		t.Fatalf("Output() error = %v", err)
+	}
+	if !bytes.Contains(got, []byte("PASS")) {
+		t.Fatalf("Output() = %q, want ordinary child test completion", got)
+	}
+}
+
 func TestRealRunnerHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_TMUXX_HELPER_PROCESS") != "1" {
+		return
+	}
+
 	separator := -1
 	for index, arg := range os.Args {
 		if arg == "--" {

@@ -81,6 +81,27 @@ func TestDeliverPayloadRejectsNameTargetBeforeRunningTmux(t *testing.T) {
 	}
 }
 
+func TestDeliverPayloadCancellationPreventsEnter(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &cancelAfterSecondCallRunner{
+		FakeRunner: NewFakeRunner(Response{}, Response{}),
+		cancel:     cancel,
+	}
+	err := New(runner).DeliverPayload(ctx, "%9", "/clear")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeliverPayload() error = %v, want context.Canceled", err)
+	}
+	want := []Call{
+		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
+		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "-l", "--", "/clear"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, want) {
+		t.Fatalf("Calls = %#v, want %#v", runner.Calls, want)
+	}
+}
+
 func TestProcessNameUsesCanonicalPsArgvAndTrimsOneNewline(t *testing.T) {
 	t.Parallel()
 
@@ -201,4 +222,17 @@ func (e scriptedExitError) Error() string {
 
 func (e scriptedExitError) ExitCode() int {
 	return e.code
+}
+
+type cancelAfterSecondCallRunner struct {
+	*FakeRunner
+	cancel context.CancelFunc
+}
+
+func (r *cancelAfterSecondCallRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	output, err := r.FakeRunner.Output(ctx, executable, args...)
+	if len(r.Calls) == 2 {
+		r.cancel()
+	}
+	return output, err
 }
