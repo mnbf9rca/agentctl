@@ -145,8 +145,8 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
    checked before anything is created (§7).
 5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
-   `ps -o comm= -p <pane_pid>` (§13.2 row 14) until the `amq coop exec → exec(harness)` chain has completed, and store
-   the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
+   `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
+   lookup — until the `amq coop exec → exec(harness)` chain has completed, and store the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
 7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
    report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
 
@@ -438,8 +438,8 @@ row 14 is the one non-tmux command the `Runner` executes and is shown as a compl
 | # | Operation | argv |
 |---|---|---|
 | 1 | Resolve session | `list-sessions -F #{session_id}⟨TAB⟩#{session_name}` |
-| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id} -- CMD` |
-| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id} -- CMD` |
+| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
+| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
 | 4 | Set session option | `set-option -t ⟨sid⟩ NAME VALUE` |
 | 5 | Set window option | `set-option -w -t ⟨wid⟩ NAME VALUE` |
 | 6 | Read session option | `show-options -qv -t ⟨sid⟩ NAME` |
@@ -456,8 +456,21 @@ Notes:
 
 - **Rows 2–3, `--`.** Verified that tmux accepts `--` before the shell-command on both. `CMD` is the §12.1 string and
   always begins with `exec `, so it can never be read as a flag; `--` is belt-and-braces and costs nothing.
-- **Rows 2–3, `-P -F`.** `-P` prints the requested IDs on stdout at creation. This removes a resolve round-trip and the
-  race between creating a window and looking it up by name — the launcher never has to name-match its own windows.
+- **Rows 2–3, `-P -F`.** `-P` prints the requested fields on stdout at creation. This removes a resolve round-trip and
+  the race between creating a window and looking it up by name — the launcher never has to name-match its own windows.
+- **Rows 2–3 return `#{pane_pid}`** because the launcher must never look up what it just created, and because
+  `pane_id` cannot feed the process-identity command: row 14 takes a **pid**, not a pane. Without the pid in the
+  creation record, capturing the §8 baseline would require a `list-panes` round-trip keyed on the pane the launcher
+  already holds — reintroducing exactly the lookup-after-create step `-P -F` exists to remove.
+
+  The pid is consumed as a validated positive integer. A missing, non-numeric or non-positive pid is a **creation-output
+  parse failure**, in the same class as a malformed ID: it means the launcher never obtained ownership evidence it can
+  act on, so it takes the pre-ownership branch of §6.6 (exit 6, kill nothing), not the rollback branch.
+
+  Verified on tmux 3.7b (2026-08-01): `#{pane_pid}` renders in `-P -F` for both rows; the returned value equals
+  `list-panes`' `#{pane_pid}` for the same pane; and it is **stable across the `exec` chain** — a window created as
+  `sh -c 'exec sleep 60'` reported the same pid at creation and after the exec completed. That stability is what makes
+  the creation-time pid a valid target for the §8 baseline poll rather than merely a convenient one.
 - **Row 10.** Payload and `Enter` stay separate events, with the §3.3 fixed delay between them; `-l` is literal mode and
   `--` guards the leading `/`. Verified end to end: a pane running `cat` received exactly `/clear`.
 - **Row 12.** Only used by the session resolver's inside-tmux fallback, and only to obtain a *name*, which is then fed
