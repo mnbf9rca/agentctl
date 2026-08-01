@@ -55,9 +55,9 @@ For each selected harness, `verify` reproduces spec §3.3:
 
 1. Send a literal junk string and capture that pending input is visible.
 2. Send `C-u` and capture that pending input is cleared.
-3. Send literal `/clear` with `send-keys -l --`.
-4. Wait the current product delay of 1000ms and capture the popup before submission.
-5. Send `Enter` separately, wait for rendering, and capture the resulting reset conversation.
+3. For the observation leg, send literal `/clear` with `send-keys -l --`, wait the current product delay of 1000ms, capture the popup, then cancel the unsubmitted text with `C-u`.
+4. For the execution leg, send literal `/clear` again, wait exactly 1000ms, and invoke `send-keys Enter` immediately with no capture or other command between the wait and `Enter`.
+5. Wait for rendering and capture the resulting reset conversation.
 6. Record `#{pane_current_command}`.
 
 The operator marks a harness pass only when all of these facts are visible:
@@ -80,7 +80,7 @@ For each harness, candidate delays descend through:
 1000ms, 750ms, 500ms, 250ms, 100ms, 50ms, 0ms
 ```
 
-At each delay the tool performs 10 consecutive `/clear` trials by default. Every trial captures the popup immediately before `Enter` and the TUI after submission. The operator reviews the batch and records pass or fail. A candidate passes only when every trial visibly highlights exact `/clear` and resets the conversation. Measurement stops descending after the first candidate with any failed trial; the smallest preceding all-pass candidate is the observed loaded floor. If 1000ms fails, no floor is recorded and the release check fails. If 0ms passes every trial, the observation is recorded as `0ms at the script's measurement resolution`, without claiming that scheduler or rendering latency is zero or bounded.
+At each delay the tool performs 10 consecutive paired `/clear` trials by default. The observation leg types `/clear`, waits the candidate delay, captures the popup, and cancels the unsubmitted text. The execution leg then types `/clear` again, waits the same delay, and sends `Enter` immediately; no capture, process launch, or other command is allowed between that wait and `Enter`, because observer overhead would invalidate the measurement. The TUI is captured only after submission. The operator reviews both legs and records pass or fail. A candidate passes only when every observation leg visibly highlights exact `/clear` and every execution leg resets the conversation. Measurement stops descending after the first candidate with any failed trial; the smallest preceding all-pass candidate is the observed loaded floor. If 1000ms fails, no floor is recorded and the release check fails. If 0ms passes every trial, the observation is recorded as `0ms at the script's measurement resolution`, without claiming that scheduler or rendering latency is zero or bounded.
 
 CPU saturation approximates one adverse scheduling condition. It does not bound real-world I/O contention, memory pressure, thermal throttling, remote-terminal latency, or future harness behavior. The checklist states this limitation next to the result.
 
