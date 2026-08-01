@@ -106,6 +106,19 @@ func (r *socketRunner) Output(ctx context.Context, executable string, args ...st
 	return exec.CommandContext(ctx, executable, args...).Output()
 }
 
+func (r *socketRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	var command *exec.Cmd
+	if executable == "tmux" {
+		command = r.tmuxCommand(ctx, args...)
+	} else {
+		command = exec.CommandContext(ctx, executable, args...)
+	}
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
+}
+
 func (r *socketRunner) tmuxCommand(ctx context.Context, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, r.tmuxPath, append([]string{"-L", r.socket}, args...)...)
 	command.Env = environmentWith(os.Environ(), "TMUX_TMPDIR", r.tmuxTmpDir)

@@ -341,8 +341,10 @@ func (c Client) AttachSession(ctx context.Context, sid SessionID) error {
 	if err := validateID(string(sid), '$'); err != nil {
 		return fmt.Errorf("attach session target: %w", err)
 	}
-	_, err := c.tmuxOutput(ctx, "attach session", "-CC", "attach-session", "-t", string(sid))
-	return err
+	if err := c.runner.RunInteractive(ctx, "tmux", "-CC", "attach-session", "-t", string(sid)); err != nil {
+		return fmt.Errorf("tmux attach session: %w", err)
+	}
+	return nil
 }
 
 func (c Client) tmuxOutput(ctx context.Context, operation string, args ...string) ([]byte, error) {
