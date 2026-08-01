@@ -4,6 +4,32 @@ Run this manual checklist for every release that changes tmux targeting, harness
 startup, or injected command delivery. The harness checks intentionally capture
 TUI output as release evidence; product code must not scrape either TUI.
 
+## Why this checklist exists
+
+Automated tests cannot cover the states this checklist covers, and the reason is
+structural rather than a matter of effort.
+
+**A fixture that establishes a precondition cannot test the code path that
+establishes that precondition.** Wherever setup does something the product must
+also do, the product's version of it is untested by construction — the fixture
+has already made the state the product is supposed to create, before the first
+assertion runs.
+
+The integration suite bootstraps a tmux server so every test starts from a known
+state. That is correct practice. It also means the suite can only reach states
+that are reachable *from a running server* — and the one state `launch` must
+handle before it has done anything is the absence of one. A first-ever launch on
+a machine with no tmux server was therefore broken in a way no test in the suite
+could observe, and a human found it in ten minutes (§6.7).
+
+The same shape recurs elsewhere here: harness behaviour under CPU saturation,
+what a TUI's autocomplete highlights at the instant `Enter` lands, and whether
+an operator can actually see eight iTerm2 tabs. In each case something the tests
+must assume is exactly the thing in question.
+
+So this document is not a belt-and-braces duplicate of the test suite. It is the
+part of verification the suite is structurally unable to perform.
+
 ## Preconditions
 
 - Use the release candidate checkout with no unrelated work in progress.
