@@ -1,4 +1,5 @@
 // Package shellq quotes tokens for POSIX shell command strings.
+// POSIX shell words cannot contain NUL bytes, so callers must not pass them.
 package shellq
 
 import "strings"
