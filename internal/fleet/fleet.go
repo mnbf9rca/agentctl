@@ -136,12 +136,17 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 		return err
 	}
 	sessions, err := l.tmux.ListSessions(ctx)
-	if err != nil {
-		return err
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
 	}
-	for _, existing := range sessions {
-		if existing.Name == session {
-			return &SessionExistsError{Name: session}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	if err == nil {
+		for _, existing := range sessions {
+			if existing.Name == session {
+				return &SessionExistsError{Name: session}
+			}
 		}
 	}
 	first := fleet.Roles[0]

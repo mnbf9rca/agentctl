@@ -9,6 +9,24 @@ import (
 	"testing"
 )
 
+func TestIntegrationLaunchStartsWithoutTmuxServer(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-first-launch",
+		"--roles", "planner:claude",
+	)
+	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want silent success", result)
+	}
+
+	sessions := fixture.sessions()
+	if len(sessions) != 1 || sessions[0].Name != "integration-first-launch" {
+		t.Fatalf("sessions = %#v, want sole integration-first-launch session", sessions)
+	}
+}
+
 func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	launchDir := t.TempDir()
@@ -125,6 +143,29 @@ func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	}
 	if invocations := fixture.stubInvocations(); len(invocations) != 0 {
 		t.Fatalf("stub invocations after existing-session refusal = %#v, want none", invocations)
+	}
+}
+
+func TestIntegrationLaunchCarriesDuplicateStderrWhenAdvisoryLookupFails(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	fixture.createSentinelSession("integration-raced-existing")
+	sentinel := fixture.sentinelSnapshot("integration-raced-existing")
+	fixture.runner.failNextTmuxOperation("list-sessions")
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-raced-existing",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != 6 || result.stdout != "" || !strings.Contains(result.stderr, "duplicate session: integration-raced-existing") {
+		t.Fatalf("launch result = %#v, want tmux duplicate refusal with captured stderr", result)
+	}
+	current := fixture.sentinelSnapshot("integration-raced-existing")
+	if current != sentinel {
+		t.Fatalf("sentinel after creation refusal = %#v, want unchanged %#v", current, sentinel)
+	}
+	if invocations := fixture.stubInvocations(); len(invocations) != 0 {
+		t.Fatalf("stub invocations after creation refusal = %#v, want none", invocations)
 	}
 }
 

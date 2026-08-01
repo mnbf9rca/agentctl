@@ -145,6 +145,50 @@ func TestLaunchRejectsOnlyExactExistingSession(t *testing.T) {
 	}})
 }
 
+func TestLaunchContinuesToCreationWhenSessionLookupFails(t *testing.T) {
+	responses := successfulOneRoleResponses("")
+	responses[0] = tmuxx.Response{Err: errors.New("no tmux server")}
+	runner := tmuxx.NewFakeRunner(responses...)
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Getwd:    func() (string, error) { return "/invocation", nil },
+	})
+
+	if err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil); err != nil {
+		t.Fatalf("Launch() error = %v, want successful launch", err)
+	}
+	if len(runner.Calls) != 11 {
+		t.Fatalf("Runner call count = %d, want 11 (advisory lookup plus successful launch)", len(runner.Calls))
+	}
+	if got := runner.Calls[0]; got.Executable != "tmux" || !reflect.DeepEqual(got.Args, []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}) {
+		t.Fatalf("first Runner call = %#v, want advisory list-sessions", got)
+	}
+	if got := runner.Calls[1]; got.Executable != "tmux" || len(got.Args) == 0 || got.Args[0] != "new-session" {
+		t.Fatalf("second Runner call = %#v, want new-session", got)
+	}
+}
+
+func TestLaunchPreservesContextFailureFromAdvisoryLookup(t *testing.T) {
+	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: sentinel})
+			launcher := New(runner, Dependencies{
+				LookPath: presentExecutable,
+				Getwd:    func() (string, error) { return "/invocation", nil },
+			})
+
+			err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
+
+			if err != sentinel {
+				t.Fatalf("Launch() error = %T %v, want exact %v", err, err, sentinel)
+			}
+			assertCalls(t, runner, tmuxx.Call{Executable: "tmux", Args: []string{
+				"list-sessions", "-F", "#{session_id}\t#{session_name}",
+			}})
+		})
+	}
+}
+
 func TestLaunchChecksRequestedHarnessesInFirstSeenDeduplicatedOrder(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$9\tepic123\n")})
 	var lookedUp []string
