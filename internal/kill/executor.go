@@ -17,11 +17,18 @@ type Client interface {
 // RefusalError reports a session that fails the managed/version ownership gate.
 type RefusalError struct {
 	Session tmuxx.Session
-	Reason  string
+	Option  string
+	Value   string
 }
 
 func (e *RefusalError) Error() string {
-	return fmt.Sprintf("session %q %s", e.Session.Name, e.Reason)
+	if e.Option == "@agentctl_managed" {
+		return fmt.Sprintf("session %q is not managed by agentctl", e.Session.Name)
+	}
+	if e.Value == "" {
+		return "managed session carries no @agentctl_version marker"
+	}
+	return fmt.Sprintf("session %q has @agentctl_version=%q; expected %q", e.Session.Name, e.Value, "1")
 }
 
 // Executor validates ownership before terminating one resolved session.
@@ -41,7 +48,7 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
 		return tmuxx.ClassifyError(err)
 	}
 	if managed != "1" {
-		return &RefusalError{Session: target, Reason: "is not managed by agentctl"}
+		return &RefusalError{Session: target, Option: "@agentctl_managed", Value: managed}
 	}
 
 	version, err := e.client.ShowSessionOption(ctx, target.ID, "@agentctl_version")
@@ -49,7 +56,7 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
 		return tmuxx.ClassifyError(err)
 	}
 	if version != "1" {
-		return &RefusalError{Session: target, Reason: "was created by a different agentctl version"}
+		return &RefusalError{Session: target, Option: "@agentctl_version", Value: version}
 	}
 
 	if err := e.client.KillSession(ctx, target.ID); err != nil {

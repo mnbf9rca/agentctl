@@ -204,25 +204,34 @@ func TestRunKillExecutesManagedSessionByResolvedID(t *testing.T) {
 
 func TestRunKillRefusalsMapToSessionExitWithoutKilling(t *testing.T) {
 	tests := []struct {
-		name      string
-		responses []tmuxx.Response
-		wantCalls []tmuxx.Call
-		wantText  string
+		name       string
+		responses  []tmuxx.Response
+		wantCalls  []tmuxx.Call
+		wantStderr string
 	}{
 		{
-			name:      "unmanaged",
-			responses: []tmuxx.Response{{Stdout: nil}},
-			wantCalls: []tmuxx.Call{{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}}},
-			wantText:  "not managed",
+			name:       "unmanaged",
+			responses:  []tmuxx.Response{{Stdout: nil}},
+			wantCalls:  []tmuxx.Call{{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}}},
+			wantStderr: "agentctl: session \"fleet\" is not managed by agentctl\n",
 		},
 		{
-			name:      "different version",
+			name:      "version marker absent",
+			responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: nil}},
+			wantCalls: []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+			},
+			wantStderr: "agentctl: managed session carries no @agentctl_version marker\n",
+		},
+		{
+			name:      "version marker observed wrong",
 			responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: []byte("2\n")}},
 			wantCalls: []tmuxx.Call{
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 			},
-			wantText: "different agentctl version",
+			wantStderr: "agentctl: session \"fleet\" has @agentctl_version=\"2\"; expected \"1\"\n",
 		},
 	}
 	for _, tt := range tests {
@@ -238,8 +247,8 @@ func TestRunKillRefusalsMapToSessionExitWithoutKilling(t *testing.T) {
 			if code != exitSession {
 				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "fleet") || !strings.Contains(stderr.String(), tt.wantText) {
-				t.Fatalf("stderr = %q, want session name and %q", stderr.String(), tt.wantText)
+			if stderr.String() != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
 			}
 			if !reflect.DeepEqual(runner.Calls, tt.wantCalls) {
 				t.Fatalf("Calls = %#v, want %#v", runner.Calls, tt.wantCalls)
