@@ -279,12 +279,19 @@ thing rollback ever targets — a session is never killed by name (§13.1).
 **Failure after ownership → exit 8.** Stop, kill the typed session ID, and report exactly one of:
 
 ```text
-agentctl: failed to launch ROLE; removed incomplete session S
-agentctl: failed to launch ROLE; failed to remove incomplete session S: CAUSE
+agentctl: failed to launch ROLE; removed incomplete session S: CAUSE
+agentctl: failed to launch ROLE; failed to remove incomplete session S: CLEANUP_CAUSE (launch failure: CAUSE)
 ```
 
 Both exit 8. A failed cleanup does not become a different class of failure; it becomes a more informative message. The
 launch is never retried, and cleanup is never attempted by name.
+
+**Every launch-failure message names what failed.** `CAUSE` is the error that stopped the launch — a baseline-poll
+timeout, an option-stamping failure, a window-creation failure — and it appears in *both* variants. Without it the
+three are indistinguishable, and the launch cause is precisely the one the operator can no longer investigate, because
+rollback destroyed the session that held the evidence. The pre-ownership message below already leads with its cause, so
+all three §6.6 outcomes state what went wrong; a message that reports only *that* a launch failed is not an acceptable
+shape here.
 
 **Failure before ownership → exit 6.** If `new-session` returns output that cannot be parsed into a session ID, that is
 a tmux failure, not a launch rollback: no typed ID means no ownership, and no ownership means no destruction. Kill
