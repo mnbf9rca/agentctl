@@ -314,7 +314,7 @@ func launchResult(stderr io.Writer, err error, usage string) int {
 		return exitLaunch
 	}
 
-	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	fmt.Fprintf(stderr, "agentctl: %v\n", tmuxx.ClassifyError(err))
 	return exitTmux
 }
 

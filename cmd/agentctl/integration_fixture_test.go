@@ -265,6 +265,14 @@ func integrationMarkerMain() {
 }
 
 func newIntegrationFixture(t *testing.T) *integrationFixture {
+	return newIntegrationFixtureWithServer(t, true)
+}
+
+func newIntegrationFixtureWithoutServer(t *testing.T) *integrationFixture {
+	return newIntegrationFixtureWithServer(t, false)
+}
+
+func newIntegrationFixtureWithServer(t *testing.T, bootstrapServer bool) *integrationFixture {
 	t.Helper()
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -304,7 +312,9 @@ func newIntegrationFixture(t *testing.T) *integrationFixture {
 		}
 		t.Errorf("clean tmux socket %q: %v: %s", socket, cleanupErr, message)
 	})
-	fixture.bootstrapEmptyServer()
+	if bootstrapServer {
+		fixture.bootstrapEmptyServer()
+	}
 	return fixture
 }
 

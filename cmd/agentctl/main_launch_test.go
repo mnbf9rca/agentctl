@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -172,7 +176,10 @@ func TestRunLaunchMapsCreationErrorWithMayExistWarningAndNoKill(t *testing.T) {
 }
 
 func TestRunLaunchMapsOrdinaryTmuxErrorToExitTmux(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: errors.New("list failed")})
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{},
+		tmuxx.Response{Err: errors.New("create failed")},
+	)
 	var stdout, stderr bytes.Buffer
 
 	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
@@ -180,8 +187,78 @@ func TestRunLaunchMapsOrdinaryTmuxErrorToExitTmux(t *testing.T) {
 	if code != exitTmux {
 		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
 	}
-	if got, want := stderr.String(), "agentctl: tmux list sessions: list failed\n"; got != want {
+	if got, want := stderr.String(), "agentctl: tmux create session: create failed\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestRunLaunchCarriesCreationStderrAfterAdvisoryLookupFailureWithoutKilling(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Err: errors.New("no tmux server")},
+		tmuxx.Response{Err: launchExitError(t, "duplicate session: fleet")},
+	)
+	var stdout, stderr bytes.Buffer
+
+	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
+
+	if code != exitTmux {
+		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
+	}
+	if got, want := stderr.String(), "agentctl: tmux create session: exit status 23: duplicate session: fleet\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	assertNoKillCall(t, runner)
+}
+
+func launchExitError(t *testing.T, message string) error {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestLaunchExitErrorHelper$")
+	command.Env = append(os.Environ(),
+		"GO_WANT_LAUNCH_EXIT_ERROR_HELPER=1",
+		"LAUNCH_EXIT_STDERR="+message,
+	)
+	_, err := command.Output()
+	if err == nil {
+		t.Fatal("launch exit-error helper returned nil, want nonzero exit")
+	}
+	return err
+}
+
+func TestLaunchExitErrorHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_LAUNCH_EXIT_ERROR_HELPER") != "1" {
+		return
+	}
+	fmt.Fprintln(os.Stderr, os.Getenv("LAUNCH_EXIT_STDERR"))
+	os.Exit(23)
+}
+
+func TestRunNonLaunchCommandsKeepNoServerFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		lookup map[string]string
+	}{
+		{name: "status", args: []string{"status", "--session", "fleet", "--json"}},
+		{name: "kill", args: []string{"kill", "--session", "fleet"}},
+		{name: "attach", args: []string{"attach", "--session", "fleet"}, lookup: map[string]string{"TERM_PROGRAM": "iTerm.app"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: launchExitError(t, "no server running")})
+			var stdout, stderr bytes.Buffer
+
+			code := runWithRunner(context.Background(), tt.args, &stdout, &stderr, runner, lookupValues(tt.lookup))
+
+			if code != exitTmux {
+				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
+			}
+			if got, want := stderr.String(), "agentctl: tmux list sessions: exit status 23: no server running\n"; got != want {
+				t.Fatalf("stderr = %q, want %q", got, want)
+			}
+			if got, want := runner.Calls, []tmuxx.Call{{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}}}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("Runner calls = %#v, want plain non-launch list-sessions %#v", got, want)
+			}
+		})
 	}
 }
 
