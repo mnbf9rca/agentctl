@@ -8,7 +8,8 @@ import (
 	"time"
 )
 
-const payloadDelay = 100 * time.Millisecond
+// empirical floor from 2026-08-01 spike; tune only with #13 measurement evidence
+const payloadDelay = time.Second
 
 // ErrProcessUnavailable means ps could not provide a nonempty process identity.
 var ErrProcessUnavailable = errors.New("process identity unavailable")
