@@ -36,6 +36,12 @@ jobs:
           brew install tmux
           brew pin tmux
       - name: Verify tmux version
-        run: test "$(tmux -V)" = "tmux 3.7b"
+        run: |
+          actual="$(tmux -V)"
+          if [[ "$actual" != "tmux 3.7b" ]]; then
+            echo "tmux is $actual; the canonical argv table and input spike were verified against tmux 3.7b."
+            echo "Re-run hack/probe-*.sh and hack/verify-injection.sh before changing this pin."
+            exit 1
+          fi
       - name: Run integration tests
         run: go test -tags integration ./...

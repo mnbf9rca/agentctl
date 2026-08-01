@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
@@ -22,15 +23,27 @@ func TestIntegrationStatusReportsLiveAndKilledRoleWindows(t *testing.T) {
 		t.Fatalf("launch result = %#v, want success", launch)
 	}
 	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
 
 	initial := fixture.runAgentctl("status", "--session", "integration-status", "--json")
 	report := parseIntegrationStatus(t, initial)
 	if report.Session != "integration-status" || !report.Managed || len(report.Agents) != 2 {
 		t.Fatalf("initial status = %#v, want managed two-role report", report)
 	}
+	initialRoles := map[string]bool{"planner": false, "coder": false}
 	for _, agent := range report.Agents {
+		seen, expected := initialRoles[agent.Role]
+		if !expected || seen {
+			t.Fatalf("initial status has unexpected or duplicate role %q: %#v", agent.Role, report.Agents)
+		}
+		initialRoles[agent.Role] = true
 		if agent.State != statuspkg.StateRunning || agent.PaneID == "" || agent.Process == "" {
 			t.Errorf("initial agent = %#v, want live process facts", agent)
+		}
+	}
+	for role, seen := range initialRoles {
+		if !seen {
+			t.Errorf("initial status missing role %q", role)
 		}
 	}
 
@@ -56,10 +69,20 @@ func TestIntegrationStatusReportsLiveAndKilledRoleWindows(t *testing.T) {
 		"planner": statuspkg.StateRunning,
 		"coder":   statuspkg.StateMissing,
 	}
+	seenRoles := make(map[string]bool, len(wantStates))
 	for _, agent := range report.Agents {
 		want, ok := wantStates[agent.Role]
-		if !ok || agent.State != want {
+		if !ok || seenRoles[agent.Role] {
+			t.Fatalf("status after window kill has unexpected or duplicate role %q: %#v", agent.Role, report.Agents)
+		}
+		seenRoles[agent.Role] = true
+		if agent.State != want {
 			t.Errorf("agent after window kill = %#v, want state %q", agent, want)
+		}
+	}
+	for role := range wantStates {
+		if !seenRoles[role] {
+			t.Errorf("status after window kill missing role %q", role)
 		}
 	}
 }
@@ -75,15 +98,14 @@ func TestIntegrationClearReachesOnlyTargetMarker(t *testing.T) {
 		t.Fatalf("launch result = %#v, want success", launch)
 	}
 	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
 
 	result := fixture.runAgentctl("clear", "--session", "integration-clear", "planner")
 	if result.exitCode != 0 || result.stderr != "" || !strings.Contains(result.stdout, "delivered /clear to integration-clear:planner") {
 		t.Fatalf("clear result = %#v, want target delivery success", result)
 	}
 	fixture.waitRoleInput("planner", "/clear\n")
-	if sibling := fixture.roleInput("coder"); sibling != "" {
-		t.Fatalf("coder marker input = %q, want no sibling delivery", sibling)
-	}
+	fixture.assertRoleInputRemains("coder", "", 750*time.Millisecond)
 }
 
 func TestIntegrationKillRemovesManagedSession(t *testing.T) {

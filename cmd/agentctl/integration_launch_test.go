@@ -43,11 +43,16 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		"planner": {harness: "claude", model: "opus"},
 		"coder":   {harness: "codex", model: "gpt-5"},
 	}
+	seenWindows := make(map[string]bool, len(expected))
 	for _, window := range windows {
 		want, ok := expected[window.Name]
 		if !ok {
 			t.Fatalf("unexpected window %#v", window)
 		}
+		if seenWindows[window.Name] {
+			t.Fatalf("duplicate window for role %q: %#v", window.Name, windows)
+		}
+		seenWindows[window.Name] = true
 		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model {
 			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
 		}
@@ -70,25 +75,41 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Errorf("window %q process = %q, metadata baseline = %q", window.Name, got, window.Process)
 		}
 	}
+	for role := range expected {
+		if !seenWindows[role] {
+			t.Errorf("missing window for role %q", role)
+		}
+	}
 
 	invocations := fixture.waitStubInvocations(2)
 	if len(invocations) != 2 {
 		t.Fatalf("stub invocations = %#v, want two", invocations)
 	}
+	seenInvocations := make(map[string]bool, len(expected))
 	for _, invocation := range invocations {
 		want, ok := expected[invocation.Role]
 		if !ok {
 			t.Fatalf("unexpected stub invocation %#v", invocation)
 		}
+		if seenInvocations[invocation.Role] {
+			t.Fatalf("duplicate stub invocation for role %q: %#v", invocation.Role, invocations)
+		}
+		seenInvocations[invocation.Role] = true
 		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model {
 			t.Errorf("stub invocation = %#v, want launch inputs preserved", invocation)
+		}
+	}
+	for role := range expected {
+		if !seenInvocations[role] {
+			t.Errorf("missing stub invocation for role %q", role)
 		}
 	}
 }
 
 func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	fixture := newIntegrationFixture(t)
-	sentinel := fixture.createSentinelSession("integration-existing")
+	fixture.createSentinelSession("integration-existing")
+	sentinel := fixture.sentinelSnapshot("integration-existing")
 
 	result := fixture.runAgentctl(
 		"launch",
@@ -98,14 +119,12 @@ func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	if result.exitCode != 3 || result.stdout != "" || !strings.Contains(result.stderr, `session "integration-existing" already exists`) {
 		t.Fatalf("launch result = %#v, want existing-session refusal", result)
 	}
-
-	current := fixture.sentinelSession("integration-existing")
+	current := fixture.sentinelSnapshot("integration-existing")
 	if current != sentinel {
 		t.Fatalf("sentinel after refusal = %#v, want unchanged %#v", current, sentinel)
 	}
-	panes := fixture.panes(current.WindowID)
-	if len(panes) != 1 || panes[0].ID != current.PaneID || panes[0].Dead {
-		t.Fatalf("sentinel panes after refusal = %#v, want original live pane %s", panes, current.PaneID)
+	if invocations := fixture.stubInvocations(); len(invocations) != 0 {
+		t.Fatalf("stub invocations after existing-session refusal = %#v, want none", invocations)
 	}
 }
 

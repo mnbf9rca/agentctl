@@ -53,10 +53,11 @@ type stubInvocation struct {
 	Model   string
 }
 
-type sentinelSession struct {
-	SessionID tmuxx.SessionID
-	WindowID  tmuxx.WindowID
-	PaneID    tmuxx.PaneID
+type sentinelSnapshot struct {
+	Session integrationSession
+	Window  integrationWindow
+	Pane    tmuxx.Pane
+	Process string
 }
 
 type integrationFixture struct {
@@ -181,39 +182,46 @@ parsedOptions:
 	}
 	harness := arguments[0]
 	arguments = arguments[1:]
-	if len(arguments) > 0 && arguments[0] == "--" {
-		arguments = arguments[1:]
+	if harness != "claude" && harness != "codex" {
+		fmt.Fprintln(os.Stderr, "integration amq stub: unsupported harness")
+		os.Exit(85)
 	}
 	model := ""
-	if len(arguments) >= 2 && arguments[0] == "--model" {
-		model = arguments[1]
+	harnessArguments := []string(nil)
+	if len(arguments) != 0 {
+		if len(arguments) != 3 || arguments[0] != "--" || arguments[1] != "--model" || arguments[2] == "" {
+			fmt.Fprintln(os.Stderr, "integration amq stub: unexpected harness arguments")
+			os.Exit(86)
+		}
+		model = arguments[2]
+		harnessArguments = arguments[1:]
 	}
 
 	record, err := os.OpenFile(os.Getenv("AGENTCTL_STUB_INVOCATIONS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(85)
+		os.Exit(87)
 	}
 	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\n", session, role, harness, model); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(86)
+		os.Exit(88)
 	}
 	if err := record.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(87)
+		os.Exit(89)
 	}
 
 	harnessPath, err := exec.LookPath(harness)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(88)
+		os.Exit(90)
 	}
 	os.Setenv("AGENTCTL_STUB_ROLE", role)
 	os.Setenv(integrationMarkerEnv, "1")
 	os.Setenv(integrationCaptureEnv, filepath.Join(os.Getenv("AGENTCTL_STUB_CAPTURE_DIR"), role+".input"))
-	if err := syscall.Exec(harnessPath, append([]string{harnessPath}, arguments...), os.Environ()); err != nil {
+	if err := syscall.Exec(harnessPath, append([]string{harnessPath}, harnessArguments...), os.Environ()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(89)
+		os.Exit(90)
 	}
 }
 
@@ -348,7 +356,7 @@ func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult 
 	return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
 }
 
-func (f *integrationFixture) createSentinelSession(name string) sentinelSession {
+func (f *integrationFixture) createSentinelSession(name string) {
 	f.t.Helper()
 	const format = "#{session_id}\t#{window_id}\t#{pane_id}"
 	output := f.tmuxOutput(
@@ -359,14 +367,14 @@ func (f *integrationFixture) createSentinelSession(name string) sentinelSession 
 	if len(fields) != 3 {
 		f.t.Fatalf("parse sentinel creation %q: got %d fields", output, len(fields))
 	}
-	return sentinelSession{
-		SessionID: tmuxx.SessionID(fields[0]),
-		WindowID:  tmuxx.WindowID(fields[1]),
-		PaneID:    tmuxx.PaneID(fields[2]),
+	for index, prefix := range []byte{'$', '@', '%'} {
+		if len(fields[index]) < 2 || fields[index][0] != prefix {
+			f.t.Fatalf("parse sentinel creation field %d %q: want %c-prefixed ID", index+1, fields[index], prefix)
+		}
 	}
 }
 
-func (f *integrationFixture) sentinelSession(name string) sentinelSession {
+func (f *integrationFixture) sentinelSnapshot(name string) sentinelSnapshot {
 	f.t.Helper()
 	var found *integrationSession
 	for _, session := range f.sessions() {
@@ -389,7 +397,8 @@ func (f *integrationFixture) sentinelSession(name string) sentinelSession {
 	if len(panes) != 1 {
 		f.t.Fatalf("sentinel session %q panes = %#v, want one", name, panes)
 	}
-	return sentinelSession{SessionID: found.ID, WindowID: windows[0].ID, PaneID: panes[0].ID}
+	process := f.waitProcessBase(panes[0].PID, "sleep")
+	return sentinelSnapshot{Session: *found, Window: windows[0], Pane: panes[0], Process: process}
 }
 
 func (f *integrationFixture) sessions() []integrationSession {
@@ -465,6 +474,22 @@ func (f *integrationFixture) processName(pid int) string {
 	return process
 }
 
+func (f *integrationFixture) waitProcessBase(pid int, wantBase string) string {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last := ""
+	var lastErr error
+	for time.Now().Before(deadline) {
+		last, lastErr = f.client.ProcessName(context.Background(), pid)
+		if lastErr == nil && filepath.Base(last) == wantBase {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.t.Fatalf("wait for process %d base %q: last = %q, error = %v", pid, wantBase, last, lastErr)
+	return ""
+}
+
 func (f *integrationFixture) stubInvocations() []stubInvocation {
 	f.t.Helper()
 	invocations, err := f.readStubInvocations()
@@ -504,6 +529,43 @@ func (f *integrationFixture) waitRoleInput(role, want string) {
 	f.t.Fatalf("wait for %q marker input: got %q, want %q", role, last, want)
 }
 
+func (f *integrationFixture) waitRoleMarkers(roles ...string) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		allReady := true
+		for _, role := range roles {
+			_, err := os.Stat(filepath.Join(f.captureDir, role+".input"))
+			if errors.Is(err, os.ErrNotExist) {
+				allReady = false
+				continue
+			}
+			if err != nil {
+				f.t.Fatalf("inspect %q marker readiness: %v", role, err)
+			}
+		}
+		if allReady {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.t.Fatalf("wait for marker readiness: roles = %q", roles)
+}
+
+func (f *integrationFixture) assertRoleInputRemains(role, want string, quietWindow time.Duration) {
+	f.t.Helper()
+	deadline := time.Now().Add(quietWindow)
+	for {
+		if got := f.roleInput(role); got != want {
+			f.t.Fatalf("%q marker input changed during quiet window: got %q, want %q", role, got, want)
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (f *integrationFixture) roleInput(role string) string {
 	f.t.Helper()
 	data, err := os.ReadFile(filepath.Join(f.captureDir, role+".input"))
@@ -518,6 +580,9 @@ func (f *integrationFixture) roleInput(role string) string {
 
 func (f *integrationFixture) readStubInvocations() ([]stubInvocation, error) {
 	data, err := os.ReadFile(f.invocations)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
