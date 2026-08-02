@@ -28,6 +28,7 @@ OUTPUT_EXPLICIT=0
 CAPTURE_PRE_ENTER=0
 SOCKET="agentctl-injection-$$"
 SESSION=agentctl-injection
+printf 'ATTACH: tmux -L %s attach -t %s\n' "$SOCKET" "$SESSION"
 SESSION_ID=''
 CLAUDE_PANE=''
 CODEX_PANE=''
