@@ -274,8 +274,8 @@ The promotion PR (main → release) is the only new process surface:
   - "No changes in checklist-covered areas since the last release — checklist not
     required."
 - Checklist results continue to live in the results-history section of
-  `docs/release-checklist.md`, merged to main **before** promotion, so the release
-  tarball contains the evidence it shipped under.
+  `docs/release-verification-notes.md`, merged to main **before** promotion, so the
+  release tarball contains the evidence it shipped under.
 - Deliberately not built: automation that detects whether the checklist "should" run.
   That judgment is exactly what the checklist's own preamble says automation
   structurally cannot make.
