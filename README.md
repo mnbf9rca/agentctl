@@ -17,26 +17,43 @@ The responsibility split is deliberate:
 | iTerm2 | Native visual interface for tmux windows |
 | agentctl | Fleet launch, metadata, status, predefined controls, and managed teardown |
 
-```mermaid
-flowchart LR
-    operator["Operator"] -->|invokes| agentctl["agentctl CLI"]
-
-    agentctl -->|"tmux argv: create sessions/windows,<br/>set options metadata, DeliverPayload keystrokes, kill"| tmux["tmux server"]
-
-    tmux -->|hosts| window1["tmux window<br/>one pane"]
-    window1 -->|runs| coop1["amq coop exec"]
-    coop1 -->|"exec()"| agent1["Agent harness<br/>Claude Code or Codex CLI"]
-
-    tmux -->|hosts| windowN["tmux window<br/>one pane"]
-    windowN -->|runs| coopN["amq coop exec"]
-    coopN -->|"exec()"| agentN["Agent harness<br/>Claude Code or Codex CLI"]
-
-    agent1 <-->|"mailboxes + wake"| amq["AMQ<br/>agent-to-agent communication"]
-    amq <-->|"mailboxes + wake"| agentN
-
-    agentctl -.->|"attach: tmux -CC"| tmux
-    tmux -.->|"control-mode stream"| iterm["iTerm2"]
-    iterm -.->|"native tabs<br/>operator-only path"| operator
+```
++----------+
+| Operator |
++----+-----+
+     | invokes
+     v
++--------------------------+
+| agentctl CLI (transient) |
++------------+-------------+
+             | tmux argv:
+             | create session/windows; set options metadata;
+             | DeliverPayload keystrokes; kill; attach via tmux -CC
+             v
++---------------------------------------+    +--------------------+
+| tmux server                           |    | AMQ                |
+| +-----------------------------------+ |    | mailboxes + wake   |
+| | session "epic123" (one per fleet) | |    | agent <-> agent    |
+| | +-------------------------------+ | |    +----------+---------+
+| | | windows: one per role         | | |               ^
+| | | planner, codex1, ...          | | |               |
+| | | +---------------------------+ | | |               | shared by
+| | | | one pane each             | | | |               | all agents
+| | | | amq coop exec -> exec()   | | | |               v
+| | | |   -> harness agent <------+--+--+---------------+
+| | | +---------------------------+ | | |
+| | +-------------------------------+ | |
+| +-----------------------------------+ |
++-------------------+-------------------+
+                    |
+                    | tmux -CC control-mode stream
+                    | operator-only attach
+                    v
+              +----------------------+
+              | iTerm2 viewer        |
+              | native tabs          |
+              +----------------------+
+              detach/close: agents keep running
 ```
 
 agentctl does not read or write AMQ state: it does not touch mailboxes or `.amqrc`, and it never infers a target from
