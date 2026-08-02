@@ -728,7 +728,7 @@ jobs:
       - name: Smoke-test built artifacts
         run: |
           set -euo pipefail
-          expected="v${{ steps.version.outputs.version }}"
+          expected="agentctl v${{ steps.version.outputs.version }}"
           arm_out="$(./dist/agentctl_darwin_arm64*/agentctl version)"
           echo "arm64 reports: $arm_out"
           if [ "$DRY_RUN" != "true" ] && [ "$arm_out" != "$expected" ]; then
@@ -807,7 +807,7 @@ jobs:
       - name: Verify installed version
         run: |
           got="$(agentctl version)"
-          want="v${{ needs.release.outputs.version }}"
+          want="agentctl v${{ needs.release.outputs.version }}"
           echo "installed binary reports: $got"
           [ "$got" = "$want" ] || { echo "installed version mismatch: got '$got', want '$want'" >&2; exit 1; }
 
