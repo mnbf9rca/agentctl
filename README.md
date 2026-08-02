@@ -4,6 +4,8 @@
 through `amq coop exec`, so the tmux session name and AMQ session name stay aligned. The CLI records enough metadata to
 report objective fleet state and exposes only predefined controls such as `clear` and `compact`.
 
+## Architecture and responsibilities
+
 The responsibility split is deliberate:
 
 | Component | Responsibility |
@@ -14,6 +16,28 @@ The responsibility split is deliberate:
 | tmux | Process hosting, persistence, and terminal input |
 | iTerm2 | Native visual interface for tmux windows |
 | agentctl | Fleet launch, metadata, status, predefined controls, and managed teardown |
+
+```mermaid
+flowchart LR
+    operator["Operator"] -->|invokes| agentctl["agentctl CLI"]
+
+    agentctl -->|"tmux argv: create sessions/windows,<br/>set options metadata, DeliverPayload keystrokes, kill"| tmux["tmux server"]
+
+    tmux -->|hosts| window1["tmux window<br/>one pane"]
+    window1 -->|runs| coop1["amq coop exec"]
+    coop1 -->|"exec()"| agent1["Agent harness<br/>Claude Code or Codex CLI"]
+
+    tmux -->|hosts| windowN["tmux window<br/>one pane"]
+    windowN -->|runs| coopN["amq coop exec"]
+    coopN -->|"exec()"| agentN["Agent harness<br/>Claude Code or Codex CLI"]
+
+    agent1 <-->|"mailboxes + wake"| amq["AMQ<br/>agent-to-agent communication"]
+    amq <-->|"mailboxes + wake"| agentN
+
+    agentctl -.->|"attach: tmux -CC"| tmux
+    tmux -.->|"control-mode stream"| iterm["iTerm2"]
+    iterm -.->|"native tabs<br/>operator-only path"| operator
+```
 
 agentctl does not modify AMQ, infer workflow state from terminal output, or accept arbitrary keystroke payloads.
 
