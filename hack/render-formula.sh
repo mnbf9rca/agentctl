@@ -5,6 +5,7 @@ set -euo pipefail
 
 version="${1:?usage: render-formula.sh VERSION CHECKSUMS_FILE}"
 checksums="${2:?usage: render-formula.sh VERSION CHECKSUMS_FILE}"
+[[ -r "$checksums" ]] || { echo "render-formula: cannot read $checksums" >&2; exit 1; }
 tmpl="$(dirname "$0")/formula.rb.tmpl"
 
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

@@ -1,6 +1,7 @@
 package hack_test
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"testing"
@@ -38,8 +39,10 @@ func TestRenderFormulaRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := render(t, tc.version, tc.checksums); err == nil {
-				t.Fatal("expected failure")
+			_, err := render(t, tc.version, tc.checksums)
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+				t.Fatalf("want exit status 1, got %v", err)
 			}
 		})
 	}
@@ -51,7 +54,9 @@ func TestRenderFormulaRejectsMissingArch(t *testing.T) {
 	if err := os.WriteFile(tmp, []byte(only), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := render(t, "0.1.0", tmp); err == nil {
-		t.Fatal("expected failure when an arch checksum is absent")
+	_, err := render(t, "0.1.0", tmp)
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("want exit status 1, got %v", err)
 	}
 }
