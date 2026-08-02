@@ -172,7 +172,7 @@ jobs:
           bad = [s for s in subs if s.get("status") == "Invalid"]
           pending = [s for s in subs if s.get("status") in ("In Progress", None)]
           for s in subs:
-              print(f"{s.get(\"createdDate\")}: {s.get(\"name\")}: {s.get(\"status\")}")
+              print("%s: %s: %s" % (s.get("createdDate"), s.get("name"), s.get("status")))
           if bad:
               print("::error::notarization rejected"); sys.exit(1)
           if pending:
