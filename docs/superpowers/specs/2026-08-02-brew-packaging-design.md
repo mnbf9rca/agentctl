@@ -298,9 +298,16 @@ must judge: TUI readiness per harness, the four snapshot attestations (junk visi
 wrapper's `PROBES PASS` / `ALL VERIFIED` output and the promotion-PR attestation. No
 step instructs copying or comparing text between files — the wrapper does that.
 Rationale and the results history live in `docs/release-verification-notes.md`.
-"No rigor lost" now means: every command the old checklist had a human type still runs,
-by machine, in the same order; and every human attestation the old checklist required
-still has a checkbox asking for it.
+
+"No rigor lost" now means, precisely: every command the old checklist had a human type
+still runs, by machine, in the same order; every human attestation about the harness
+TUIs (readiness per harness, the four snapshot judgments) still has a checkbox asking
+for it; and the pane-process-name match and the clean-checkout precondition — both
+previously eyeballed — are now machine-enforced (`hack/release-verify.sh`'s process
+check and its `git status --porcelain` guard). One thing is a recorded weakening, not a
+silent one: the old checklist's step-by-step "read each probe's output against its
+written description" review is replaced by scripted marker-plus-exit-code assertions
+per probe, which check less of the probe output than a full human read did.
 
 ## 9. Failure modes
 

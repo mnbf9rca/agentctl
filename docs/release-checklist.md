@@ -14,8 +14,9 @@ bash hack/release-verify.sh
 
 ## Test 2 — Attach Window 2
 
-Before the first readiness prompt, the wrapper prints an `ATTACH:` line.
-From Window 2, run exactly that line.
+`hack/verify-injection.sh` prints its own `ATTACH:` line early — before its
+session exists. Wait for the first "Press Enter only after its TUI is fully
+ready" prompt, then run that line from Window 2.
 - [ ] Window 2 is attached and shows the harness panes live
 
 ## Test 3 — Per-harness judgment (once for claude, once for codex)
@@ -58,3 +59,10 @@ gh pr create --base release --head main \
 - [ ] The correct box is ticked — "Checklist run" (Tests 1–4 passed, evidence
       committed on main) or "Checklist not required"
 - [ ] The `Version:` line is filled in with `hack/next-version.sh`'s output
+
+## Post-promotion — notarization
+
+The `notary-check` job exits 0 even while notarization is still pending, so
+a green `Release` run alone proves nothing. Open its log:
+- [ ] It printed `notarization accepted` (if "pending" instead, re-check
+      later before calling the release fully notarized)
