@@ -202,7 +202,7 @@ func TestRunAttachAttemptsControlModeByResolvedID(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
-	if want := "agentctl: attempted iTerm2 control-mode attachment to session \"fleet\"\n"; stdout.String() != want {
+	if want := "agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0)\n"; stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 	if stderr.Len() != 0 {

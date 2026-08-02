@@ -242,7 +242,7 @@ func runWithAllDependencies(
 		if err := attacher.Execute(ctx, resolved); err != nil {
 			return attachError(stderr, err)
 		}
-		fmt.Fprintf(stdout, "agentctl: attempted iTerm2 control-mode attachment to session %q\n", resolved.Name)
+		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0)\n", resolved.Name)
 		return exitOK
 	}
 	if command == "clear" || command == "compact" {
