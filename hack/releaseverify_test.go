@@ -47,3 +47,42 @@ func TestRenderResultsRejects(t *testing.T) {
 		})
 	}
 }
+
+func processCheck(t *testing.T, versions, artifactDir string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("./release-verify.sh", "--process-check", versions, artifactDir)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+func TestProcessCheckPasses(t *testing.T) {
+	got, err := processCheck(t, "testdata/release-verify-versions.txt", "testdata/release-verify-artifact")
+	if err != nil {
+		t.Fatalf("process-check failed: %v", err)
+	}
+	want := "PROCESS CHECK PASS (claude=2.1.220, codex=codex)\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestProcessCheckRejects(t *testing.T) {
+	cases := []struct {
+		name        string
+		versions    string
+		artifactDir string
+	}{
+		{"claude process mismatch", "testdata/release-verify-versions.txt", "testdata/release-verify-artifact-mismatch"},
+		{"missing verify row", "testdata/release-verify-versions.txt", "testdata/release-verify-artifact-missing-row"},
+		{"missing artifact dir", "testdata/release-verify-versions.txt", "testdata/absent-artifact"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := processCheck(t, tc.versions, tc.artifactDir)
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+				t.Fatalf("want exit status 1, got %v", err)
+			}
+		})
+	}
+}

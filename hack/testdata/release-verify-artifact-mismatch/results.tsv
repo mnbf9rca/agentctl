@@ -1,0 +1,3 @@
+mode	harness	delay_ms	trials	load_workers	result	detail
+verify	claude	1000	1	0	PASS	process=2.1.219; operator-attested
+verify	codex	1000	1	0	PASS	process=codex; operator-attested
