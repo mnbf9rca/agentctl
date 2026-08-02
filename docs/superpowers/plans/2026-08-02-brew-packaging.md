@@ -678,6 +678,10 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
 
@@ -688,6 +692,11 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       dry_run: ${{ steps.version.outputs.dry_run }}
     steps:
+      - name: Refuse non-dry-run dispatch
+        if: github.event_name == 'workflow_dispatch' && env.DRY_RUN != 'true'
+        run: |
+          echo "workflow_dispatch may only rehearse (dry_run=true); real releases happen by promotion to the release branch" >&2
+          exit 1
       - name: Check out repository
         uses: actions/checkout@v7
         with:
@@ -797,6 +806,7 @@ jobs:
     needs: release
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    permissions: {}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
@@ -815,6 +825,7 @@ jobs:
     needs: [release, verify-install]
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    permissions: {}
     steps:
       - name: Confirm notarization accepted
         env:
