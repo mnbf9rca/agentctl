@@ -337,10 +337,11 @@ executable by a tired human without interpretation:
 6. GitHub App created, installed on `homebrew-tap` only; client ID as a repo variable,
    private key as a secret.
 7. **Maintainer, at Apple** (Account Holder role): create a Developer ID Application
-   certificate (the keychain currently has only an Apple Development cert — §3.3),
-   export as `.p12`; create an App Store Connect **Team** API key. Five repo secrets:
-   `MACOS_SIGN_P12`, `MACOS_SIGN_PASSWORD`, `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`,
-   `MACOS_NOTARY_ISSUER_ID`.
+   certificate, export as `.p12`; create an App Store Connect **Team** API key.
+   Three repo secrets (`MACOS_SIGN_P12`, `MACOS_SIGN_PASSWORD`, `MACOS_NOTARY_KEY`)
+   and two repo variables for the non-credential identifiers (`MACOS_NOTARY_KEY_ID`,
+   `MACOS_NOTARY_ISSUER_ID`). **Done 2026-08-02** — all five verified present, and
+   the Developer ID identity confirmed in the keychain.
 8. `mnbf9rca/homebrew-tap` repo (README per §6, MIT license, empty `Formula/`).
 9. `release.yml` with dry-run mode; rehearse via dry run.
 10. Promotion PR template (§7).
