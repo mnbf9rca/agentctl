@@ -4,6 +4,8 @@
 through `amq coop exec`, so the tmux session name and AMQ session name stay aligned. The CLI records enough metadata to
 report objective fleet state and exposes only predefined controls such as `clear` and `compact`.
 
+## Architecture and responsibilities
+
 The responsibility split is deliberate:
 
 | Component | Responsibility |
@@ -15,7 +17,48 @@ The responsibility split is deliberate:
 | iTerm2 | Native visual interface for tmux windows |
 | agentctl | Fleet launch, metadata, status, predefined controls, and managed teardown |
 
-agentctl does not modify AMQ, infer workflow state from terminal output, or accept arbitrary keystroke payloads.
+```
++----------+
+| Operator |
++----+-----+
+     | invokes
+     v
++--------------------------+
+| agentctl CLI (transient) |
++------------+-------------+
+             | tmux argv:
+             | create session/windows; set options metadata;
+             | DeliverPayload keystrokes; kill; attach via tmux -CC
+             v
++---------------------------------------+    +--------------------+
+| tmux server                           |    | AMQ                |
+| +-----------------------------------+ |    | mailboxes + wake   |
+| | session "epic123" (one per fleet) | |    | agent <-> agent    |
+| | +-------------------------------+ | |    +----------+---------+
+| | | windows: one per role         | | |               ^
+| | | planner, codex1, ...          | | |               |
+| | | +---------------------------+ | | |               | shared by
+| | | | one pane each             | | | |               | all agents
+| | | | amq coop exec -> exec()   | | | |               v
+| | | |   -> harness agent <------+--+--+---------------+
+| | | +---------------------------+ | | |
+| | +-------------------------------+ | |
+| +-----------------------------------+ |
++-------------------+-------------------+
+                    |
+                    | tmux -CC control-mode stream
+                    | operator-only attach
+                    v
+              +----------------------+
+              | iTerm2 viewer        |
+              | native tabs          |
+              +----------------------+
+              detach/close: agents keep running
+```
+
+agentctl does not read or write AMQ state: it does not touch mailboxes or `.amqrc`, and it never infers a target from
+`AM_ROOT` or `AM_SESSION`. It also does not infer workflow state from terminal output or accept arbitrary keystroke
+payloads.
 
 ## Prerequisites and installation
 
