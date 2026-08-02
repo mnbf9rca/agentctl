@@ -39,7 +39,9 @@ flowchart LR
     iterm -.->|"native tabs<br/>operator-only path"| operator
 ```
 
-agentctl does not modify AMQ, infer workflow state from terminal output, or accept arbitrary keystroke payloads.
+agentctl does not read or write AMQ state: it does not touch mailboxes or `.amqrc`, and it never infers a target from
+`AM_ROOT` or `AM_SESSION`. It also does not infer workflow state from terminal output or accept arbitrary keystroke
+payloads.
 
 ## Prerequisites and installation
 
