@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearse: build + smoke test only; no tag, no publish, no Apple submission"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+jobs:
+  release:
+    runs-on: macos-26
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
+    steps:
+      - name: Refuse non-dry-run dispatch
+        if: github.event_name == 'workflow_dispatch' && env.DRY_RUN != 'true'
+        run: |
+          echo "workflow_dispatch may only rehearse (dry_run=true); real releases happen by promotion to the release branch" >&2
+          exit 1
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install goreleaser
+        run: brew install goreleaser
+      - name: Resolve version
+        id: version
+        run: |
+          v="$(./hack/next-version.sh)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
+          echo "resolved next version: $v (dry_run=$DRY_RUN)"
+      - name: Create and push tag
+        if: env.DRY_RUN != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.version.outputs.version }}" -m "agentctl v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+      - name: Build, sign, and upload draft release
+        if: env.DRY_RUN != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ vars.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ vars.MACOS_NOTARY_ISSUER_ID }}
+        run: goreleaser release --clean
+      - name: Build snapshot (dry run)
+        if: env.DRY_RUN == 'true'
+        run: goreleaser release --snapshot --clean --skip=notarize
+      - name: Smoke-test built artifacts
+        run: |
+          set -euo pipefail
+          expected="agentctl v${{ steps.version.outputs.version }}"
+          arm_out="$(./dist/agentctl_darwin_arm64*/agentctl version)"
+          echo "arm64 reports: $arm_out"
+          if [ "$DRY_RUN" != "true" ] && [ "$arm_out" != "$expected" ]; then
+            echo "arm64 version mismatch: got '$arm_out', want '$expected'" >&2; exit 1
+          fi
+          if ! pgrep -q oahd; then
+            echo "Rosetta 2 (oahd) not running on this runner; cannot verify amd64 binary" >&2
+            exit 1
+          fi
+          amd_out="$(arch -x86_64 ./dist/agentctl_darwin_amd64*/agentctl version)"
+          echo "amd64 reports: $amd_out"
+          if [ "$DRY_RUN" != "true" ] && [ "$amd_out" != "$expected" ]; then
+            echo "amd64 version mismatch: got '$amd_out', want '$expected'" >&2; exit 1
+          fi
+      - name: Publish (undraft) release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
+      - name: Attest release artifacts
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: ./dist/checksums.txt
+      - name: Attest checksums file
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest@v4
+        with:
+          subject-path: ./dist/checksums.txt
+      - name: Mint tap token
+        if: env.DRY_RUN != 'true'
+        id: tap-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: mnbf9rca
+          repositories: homebrew-tap
+          permission-contents: write
+      - name: Render and push formula
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash hack/render-formula.sh "$VERSION" dist/checksums.txt > /tmp/agentctl.rb
+          head_oid="$(gh api graphql \
+            -f query='query($o:String!,$r:String!){repository(owner:$o,name:$r){defaultBranchRef{target{oid}}}}' \
+            -f o=mnbf9rca -f r=homebrew-tap \
+            --jq '.data.repository.defaultBranchRef.target.oid')"
+          jq -n \
+            --arg oid "$head_oid" \
+            --arg msg "agentctl v${VERSION}" \
+            --arg contents "$(base64 -i /tmp/agentctl.rb)" \
+            '{query: "mutation($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid}}}",
+              variables: {input: {
+                branch: {repositoryNameWithOwner: "mnbf9rca/homebrew-tap", branchName: "main"},
+                expectedHeadOid: $oid,
+                message: {headline: $msg},
+                fileChanges: {additions: [{path: "Formula/agentctl.rb", contents: $contents}]}}}}' \
+            | gh api graphql --input -
+          echo "formula pushed for v${VERSION}"
+
+  verify-install:
+    needs: release
+    if: needs.release.outputs.dry_run != 'true'
+    runs-on: macos-26
+    permissions: {}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - name: Install from tap
+        run: brew install mnbf9rca/tap/agentctl
+      - name: brew test
+        run: brew test mnbf9rca/tap/agentctl
+      - name: Verify installed version
+        run: |
+          got="$(agentctl version)"
+          want="agentctl v${{ needs.release.outputs.version }}"
+          echo "installed binary reports: $got"
+          [ "$got" = "$want" ] || { echo "installed version mismatch: got '$got', want '$want'" >&2; exit 1; }
+
+  notary-check:
+    needs: [release, verify-install]
+    if: needs.release.outputs.dry_run != 'true'
+    runs-on: macos-26
+    permissions: {}
+    steps:
+      - name: Confirm notarization accepted
+        env:
+          KEY_B64: ${{ secrets.MACOS_NOTARY_KEY }}
+          KEY_ID: ${{ vars.MACOS_NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ vars.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$KEY_B64" | base64 -d > "$key_file"
+          # Two submissions expected (arm64 + amd64), newest first.
+          hist="$(xcrun notarytool history --key "$key_file" --key-id "$KEY_ID" --issuer "$ISSUER_ID" --output-format json)"
+          echo "$hist" | /usr/bin/python3 -c '
+          import json,sys
+          subs = json.load(sys.stdin).get("history", [])[:2]
+          if not subs:
+              print("::warning::no notary submissions found yet"); sys.exit(0)
+          bad = [s for s in subs if s.get("status") == "Invalid"]
+          pending = [s for s in subs if s.get("status") in ("In Progress", None)]
+          for s in subs:
+              print("%s: %s: %s" % (s.get("createdDate"), s.get("name"), s.get("status")))
+          if bad:
+              print("::error::notarization rejected"); sys.exit(1)
+          if pending:
+              print("::warning::notarization still pending; re-check manually"); sys.exit(0)
+          print("notarization accepted")
+          '

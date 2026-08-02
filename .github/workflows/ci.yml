@@ -23,7 +23,7 @@ jobs:
         run: go vet ./...
 
   integration:
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -45,3 +45,17 @@ jobs:
           fi
       - name: Run integration tests
         run: go test -tags integration ./...
+      - name: Install goreleaser
+        run: brew install goreleaser
+      - name: Validate goreleaser config
+        run: goreleaser check
+      - name: Snapshot release build
+        run: goreleaser release --snapshot --clean --skip=notarize
+      - name: Smoke-test snapshot binary
+        run: |
+          out="$(./dist/agentctl_darwin_arm64*/agentctl version)"
+          echo "snapshot binary reports: $out"
+          case "$out" in
+            "agentctl v"*) ;;
+            *) echo "unstamped or wrong format: $out" >&2; exit 1 ;;
+          esac

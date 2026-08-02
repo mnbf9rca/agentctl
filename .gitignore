@@ -5,3 +5,4 @@
 
 # Local build output
 /bin/
+/dist/
