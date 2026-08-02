@@ -152,9 +152,16 @@ bash hack/verify-injection.sh verify --harness both
    attested clean. Any other answer fails that harness and makes the overall
    command exit nonzero.
 6. If running `--harness both`, repeat steps 3–5 for the second harness.
-7. Preserve the printed artifact directory in full, including
-   `metadata.txt`, `results.tsv` (it records `PASS`/`FAIL` and the observed
-   pane process name per harness), and every pane snapshot.
+7. Window 1: open `results.tsv` in the printed artifact directory. This is a
+   passing criterion, not optional reading: for each harness, confirm the row
+   records `PASS` **and** the expected pane process name — Claude Code
+   reports its version string (e.g. `2.1.220`), codex reports `codex`. A
+   mismatched or missing process name means the wrong binary was under test
+   even if the snapshot review in steps 4–5 looked clean. Record both the
+   PASS/FAIL result and the observed process name per harness for the
+   Results history entry.
+8. Preserve the printed artifact directory in full, including
+   `metadata.txt`, `results.tsv`, and every pane snapshot.
 
 ## Part C: Loaded measurement (optional per release; required when timing changes)
 
