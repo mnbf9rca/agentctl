@@ -270,7 +270,7 @@ The promotion PR (main → release) is the only new process surface:
 
 - A promotion PR template with two mutually exclusive checkboxes:
   - "This release changes tmux targeting, harness startup, or injected delivery — the
-    release checklist was run; results recorded in `docs/release-checklist.md`."
+    release checklist was run; results recorded in `docs/release-verification-notes.md`."
   - "No changes in checklist-covered areas since the last release — checklist not
     required."
 - Checklist results continue to live in the results-history section of
