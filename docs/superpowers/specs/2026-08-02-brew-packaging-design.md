@@ -284,18 +284,23 @@ The promotion PR (main → release) is the only new process surface:
 
 ## 8. Release checklist rewrite
 
-`docs/release-checklist.md` is restructured into a prescriptive operator runbook,
-executable by a tired human without interpretation:
+Everything mechanical about release verification is automated in
+`hack/release-verify.sh`: preflight (tool checks, `make build`, version capture), the
+four `hack/probe-*.sh` contract probes, cleanup checks, and results rendering
+(`--render-results`, tested with a golden fixture). It runs `hack/verify-injection.sh`
+in the foreground for the one part that cannot be automated — the injection
+verification's readiness waits, snapshot review, and pass/fail attestations — and
+appends the rendered results block to `docs/release-verification-notes.md`.
 
-- Numbered steps in exact execution order; each step one imperative with the literal
-  command and where to run it ("Open three iTerm windows. Window 1: run `…`. Window 2:
-  run `agentctl attach …`, leave it running. Window 3: run `…`").
-- Each step states the expected observation, and a record-this-value instruction
-  wherever evidence is required.
-- Kept unchanged: the "why this checklist exists" section, the attestation and evidence
-  requirements, and the results-history format. Simplification targets the procedure's
-  foolproofness, not its rigor.
-- Lands on main before the first brew release.
+`docs/release-checklist.md` is reduced to a checkbox runbook holding only what a human
+must judge: TUI readiness per harness, the four snapshot attestations (junk visible,
+`C-u` cleared, exact `/clear` popup match, completed reset), and confirmation of the
+wrapper's `PROBES PASS` / `ALL VERIFIED` output and the promotion-PR attestation. No
+step instructs copying or comparing text between files — the wrapper does that.
+Rationale and the results history live in `docs/release-verification-notes.md`.
+"No rigor lost" now means: every command the old checklist had a human type still runs,
+by machine, in the same order; and every human attestation the old checklist required
+still has a checkbox asking for it.
 
 ## 9. Failure modes
 
