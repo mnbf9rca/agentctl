@@ -55,4 +55,7 @@ jobs:
         run: |
           out="$(./dist/agentctl_darwin_arm64*/agentctl version)"
           echo "snapshot binary reports: $out"
-          test -n "$out"
+          case "$out" in
+            "agentctl v"*) ;;
+            *) echo "unstamped or wrong format: $out" >&2; exit 1 ;;
+          esac
