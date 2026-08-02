@@ -169,40 +169,45 @@ bash hack/verify-injection.sh measure --harness both
    not leave the run unattended. The defaults are 10 consecutive paired
    trials at each candidate delay, under one `/usr/bin/yes` worker per
    logical CPU, with candidates descending `1000 750 500 250 100 50 0` ms.
-2. Window 1: start the command above; wait for each harness's ready prompt.
-3. Window 2: as in Part B, attach to the same isolated session to watch each
-   harness become ready before you press Enter in Window 1:
+2. Window 1: start the command above.
+3. Window 2: immediately attach to the isolated session it just created, the
+   same way as Part B:
 
    ```bash
    pid=$(pgrep -f 'hack/verify-injection.sh' | head -1)
    tmux -L "agentctl-injection-${pid}" attach -t agentctl-injection
    ```
 
-4. Window 1: at "Start the load?", type `y` only after confirming you have
+   Stay attached in Window 2 for the rest of Part C.
+4. For each harness in turn: watch its pane in Window 2 until the TUI is
+   fully ready, then return to Window 1 and press Enter at its "Press Enter
+   only after its TUI is fully ready" prompt. With `--harness both`, both
+   harnesses' readiness prompts are answered before the load starts.
+5. Window 1: at "Start the load?", type `y` only after confirming you have
    saved other work per step 1.
-5. Each trial runs an observation leg (captures the exact popup match) and a
+6. Each trial runs an observation leg (captures the exact popup match) and a
    separate execution leg (no capture or command between the candidate wait
    and `Enter`). Window 3: after each candidate's 10 trials complete, review
    every `<harness>-measure-<delay>ms-trial-*-popup.txt` and
    `*-trial-*-reset.txt` file the script names.
-6. Window 1: answer "Did every trial show exact /clear selection and a
+7. Window 1: answer "Did every trial show exact /clear selection and a
    completed reset?" truthfully. A candidate passes only when all 10 popup
-   and reset snapshot pairs pass your review in step 5.
-7. The script stops automatically at the first failed candidate, the same as
+   and reset snapshot pairs pass your review in step 6.
+8. The script stops automatically at the first failed candidate, the same as
    the checklist requires: the preceding passing candidate is the observed
    floor. If the 1000 ms candidate fails, record "no floor established"; do
    not extrapolate upward or call the release ready on that basis.
-8. Recording: retain the worker count, the pre-load and post-stabilization
+9. Recording: retain the worker count, the pre-load and post-stabilization
    `uptime` (both written to `metadata.txt`), every row of `results.tsv`, and
    all failing snapshots.
-9. Treat this as evidence, not a tuning decision. CPU saturation approximates
-   scheduler contention but does not bound I/O, memory, thermal, network,
-   terminal, or future harness contention. One worker per logical CPU is an
-   adversarial ceiling, not a description of typical fleet load; it bounds
-   behavior under deliberate CPU abuse. Idle behavior does not license a
-   delay change, and even a loaded passing floor would require a separately
-   justified safety margin.
-10. If a failed batch needs typed-text diagnosis, rerun only that harness
+10. Treat this as evidence, not a tuning decision. CPU saturation approximates
+    scheduler contention but does not bound I/O, memory, thermal, network,
+    terminal, or future harness contention. One worker per logical CPU is an
+    adversarial ceiling, not a description of typical fleet load; it bounds
+    behavior under deliberate CPU abuse. Idle behavior does not license a
+    delay change, and even a loaded passing floor would require a separately
+    justified safety margin.
+11. If a failed batch needs typed-text diagnosis, rerun only that harness
     with `--capture-pre-enter`, e.g.
     `bash hack/verify-injection.sh measure --harness codex --capture-pre-enter`.
     This asks the tmux server to capture the pane and then send `Enter` in
