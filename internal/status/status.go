@@ -21,6 +21,14 @@ type Report struct {
 	Agents  []Agent `json:"agents"`
 }
 
+// SessionsReport is the versioned status document for every agentctl-managed
+// session on the tmux server. Each element is itself a complete schema-1
+// session report.
+type SessionsReport struct {
+	Schema   int      `json:"schema"`
+	Sessions []Report `json:"sessions"`
+}
+
 // Agent is one role row in a status report.
 type Agent struct {
 	Role    string `json:"role"`

@@ -259,6 +259,38 @@ func TestResolvePreservesContextErrors(t *testing.T) {
 	}
 }
 
+func TestResolutionErrorUnresolvedOnlyWhenNoPermittedSourceNamedASession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		env           map[string]string
+		explicit      *string
+		responses     []tmuxx.Response
+		wantUnresolve bool
+	}{
+		{name: "no permitted source", env: map[string]string{"AM_SESSION": "fleet", "TMUX": "server"}, wantUnresolve: true},
+		{name: "invalid environment source", env: map[string]string{"AGENTCTL_SESSION": "INVALID"}},
+		{name: "invalid current source", env: map[string]string{"TMUX_PANE": "%bad"}},
+		{name: "named session not found", explicit: stringPointer("epic123"), responses: []tmuxx.Response{{Stdout: []byte("$1\tother\n")}}},
+		{name: "named session ambiguous", explicit: stringPointer("epic123"), responses: []tmuxx.Response{{Stdout: []byte("$1\tepic123\n$2\tepic123\n")}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := tmuxx.NewFakeRunner(tt.responses...)
+			_, err := New(tmuxx.New(runner), mapLookup(tt.env)).Resolve(context.Background(), tt.explicit)
+			var resolution *ResolutionError
+			if !errors.As(err, &resolution) {
+				t.Fatalf("Resolve() error = %T %v, want *ResolutionError", err, err)
+			}
+			if got := resolution.Unresolved(); got != tt.wantUnresolve {
+				t.Fatalf("ResolutionError.Unresolved() = %t, want %t for %v", got, tt.wantUnresolve, err)
+			}
+		})
+	}
+}
+
 func mapLookup(values map[string]string) LookupEnv {
 	return func(name string) (string, bool) {
 		value, ok := values[name]

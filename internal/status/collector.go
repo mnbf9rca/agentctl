@@ -10,6 +10,7 @@ import (
 )
 
 type tmuxClient interface {
+	ListSessions(context.Context) ([]tmuxx.Session, error)
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
 	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	ListPanes(context.Context, tmuxx.WindowID) ([]tmuxx.Pane, error)
@@ -51,6 +52,33 @@ type Collector struct {
 // NewCollector constructs a status collector.
 func NewCollector(client tmuxClient) Collector {
 	return Collector{client: client}
+}
+
+// CollectAll gathers status for every agentctl-managed session on the tmux
+// server, in the order tmux lists them. Sessions that do not claim agentctl
+// management are omitted rather than rendered: an overview of managed fleets
+// asserts nothing about the sessions it does not describe. A session that does
+// claim management but carries metadata agentctl cannot interpret fails the
+// whole listing, because silently skipping it would make the overview claim to
+// be complete when it is not.
+func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
+	sessions, err := c.client.ListSessions(ctx)
+	if err != nil {
+		return SessionsReport{}, tmuxx.ClassifyError(err)
+	}
+
+	all := SessionsReport{Schema: 1, Sessions: []Report{}}
+	for _, listed := range sessions {
+		report, err := c.Collect(ctx, listed.Name, listed.ID)
+		if err != nil {
+			return SessionsReport{}, err
+		}
+		if !report.Managed {
+			continue
+		}
+		all.Sessions = append(all.Sessions, report)
+	}
+	return all, nil
 }
 
 // Collect gathers status for one already-resolved session ID.

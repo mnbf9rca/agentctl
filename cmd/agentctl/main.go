@@ -51,6 +51,8 @@ var commandUsage = map[string]string{
 	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
 	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
+		"When no session is named by --session, AGENTCTL_SESSION, or the current tmux session, status reports every\n" +
+		"agentctl-managed session; sessions agentctl does not manage are never listed.\n" +
 		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n",
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
@@ -81,6 +83,7 @@ type sessionKiller interface {
 
 type statusCollector interface {
 	Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error)
+	CollectAll(context.Context) (statuspkg.SessionsReport, error)
 }
 
 type controlExecutor interface {
@@ -211,6 +214,10 @@ func runWithAllDependencies(
 	}
 	resolved, err := resolver.Resolve(ctx, explicit)
 	if err != nil {
+		var resolution *session.ResolutionError
+		if command == "status" && errors.As(err, &resolution) && resolution.Unresolved() {
+			return statusAll(ctx, stdout, stderr, collector, options.json)
+		}
 		return resolverError(stderr, usage, err)
 	}
 	if command == "status" {
@@ -251,6 +258,24 @@ func runWithAllDependencies(
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+// statusAll reports every agentctl-managed session, which is what status does
+// when no permitted source named one.
+func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCollector, asJSON bool) int {
+	report, err := collector.CollectAll(ctx)
+	if err != nil {
+		return statusError(stderr, err)
+	}
+	if asJSON {
+		err = statuspkg.WriteSessionsJSON(stdout, report)
+	} else {
+		err = statuspkg.WriteSessionsTable(stdout, report)
+	}
+	if err != nil {
+		return statusError(stderr, err)
+	}
+	return exitOK
 }
 
 func attachError(stderr io.Writer, err error) int {

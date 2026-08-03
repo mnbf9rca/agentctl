@@ -128,6 +128,8 @@ func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n"
 	const statusUsage = "Usage: agentctl status [--session SESSION] [--json]\n\n" +
+		"When no session is named by --session, AGENTCTL_SESSION, or the current tmux session, status reports every\n" +
+		"agentctl-managed session; sessions agentctl does not manage are never listed.\n" +
 		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n"
 	tests := []struct {
 		name   string
@@ -205,7 +207,7 @@ func TestRunMapsSessionResolverErrorsToOwnedExitCodes(t *testing.T) {
 		},
 		{
 			name:     "no permitted source is session error",
-			args:     []string{"status"},
+			args:     []string{"kill"},
 			lookup:   lookupValues(map[string]string{"AM_ROOT": "/tmp/fleet", "AM_SESSION": "fleet", "TMUX": "server"}),
 			wantCode: exitSession,
 			wantText: "session could not be resolved",
@@ -650,6 +652,126 @@ func TestRunStatusMapsCollectorErrorsToOwnedExitCodes(t *testing.T) {
 			}
 			if stdout.Len() != 0 {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunStatusWithoutAnySessionSourceListsManagedSessionsOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "human table",
+			args: []string{"status"},
+			want: "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
+				"fleet    planner  claude   default  %12   claude   running\n",
+		},
+		{
+			name: "json",
+			args: []string{"status", "--json"},
+			want: "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"fleet\",\"managed\":true," +
+				"\"agents\":[{\"role\":\"planner\",\"harness\":\"claude\",\"model\":\"\",\"window\":\"planner\"," +
+				"\"pane_id\":\"%12\",\"process\":\"claude\",\"state\":\"running\"}]}]}\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(
+				tmuxx.Response{Stdout: []byte("$4\tfleet\n$5\tshell\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("planner\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
+				tmuxx.Response{Stdout: []byte("claude\n")},
+				tmuxx.Response{Stdout: []byte("0\n")},
+				tmuxx.Response{},
+			)
+			var stdout, stderr bytes.Buffer
+
+			code := runWithRunner(context.Background(), tt.args, &stdout, &stderr, runner, lookupValues(map[string]string{
+				"AM_ROOT":    "/tmp/fleet",
+				"AM_SESSION": "fleet",
+				"TMUX":       "server",
+			}))
+
+			if code != exitOK {
+				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.want)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			wantCalls := []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
+				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_version"}},
+			}
+			if len(runner.Calls) != len(wantCalls) {
+				t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
+			}
+			for index := range wantCalls {
+				if runner.Calls[index].Executable != wantCalls[index].Executable || !equalStrings(runner.Calls[index].Args, wantCalls[index].Args) {
+					t.Fatalf("Calls[%d] = %#v, want %#v", index, runner.Calls[index], wantCalls[index])
+				}
+			}
+		})
+	}
+}
+
+func TestRunStatusPrefersANamedSessionOverListingEveryManagedSession(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		lookup session.LookupEnv
+	}{
+		{name: "explicit", args: []string{"status", "--session", "fleet"}, lookup: lookupValues(nil)},
+		{name: "environment", args: []string{"status"}, lookup: lookupValues(map[string]string{"AGENTCTL_SESSION": "fleet"})},
+		{name: "current tmux session", args: []string{"status"}, lookup: lookupValues(map[string]string{"TMUX_PANE": "%9"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := []tmuxx.Response{}
+			if tt.name == "current tmux session" {
+				responses = append(responses, tmuxx.Response{Stdout: []byte("fleet\n")})
+			}
+			responses = append(responses,
+				tmuxx.Response{Stdout: []byte("$4\tfleet\n$5\tother\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("planner\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
+				tmuxx.Response{Stdout: []byte("claude\n")},
+			)
+			runner := tmuxx.NewFakeRunner(responses...)
+			var stdout, stderr bytes.Buffer
+
+			code := runWithRunner(context.Background(), tt.args, &stdout, &stderr, runner, tt.lookup)
+
+			if code != exitOK {
+				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+			}
+			want := "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
+				"fleet    planner  claude   default  %12   claude   running\n"
+			if stdout.String() != want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+			for _, call := range runner.Calls {
+				if call.Executable == "tmux" && len(call.Args) > 3 && call.Args[3] == "$5" {
+					t.Fatalf("Calls = %#v, want no reads of the unnamed session", runner.Calls)
+				}
 			}
 		})
 	}

@@ -138,6 +138,12 @@ agentctl status --session epic123
 agentctl status --session epic123 --json
 ```
 
+With no session named, `status` lists every agentctl-managed fleet on the tmux server:
+
+```bash
+agentctl status
+```
+
 To open the eight role windows as native tabs, first enable this exact setting:
 
 ```text
@@ -231,6 +237,27 @@ agentctl status [--session SESSION] [--json]
 Reports objective tmux, metadata, and root-process facts. The default is a human-readable table; `--json` emits the
 versioned machine-readable report.
 
+When no session is named — no `--session`, no `AGENTCTL_SESSION`, and no current tmux session — `status` reports every
+agentctl-managed session instead of failing. Sessions that do not carry agentctl's management marker are never listed,
+so the overview describes only fleets agentctl created:
+
+```bash
+agentctl status
+agentctl status --json
+```
+
+The table renders one header and one row per role across all listed sessions. The JSON document wraps the same
+per-session reports:
+
+```json
+{"schema": 1, "sessions": [{"schema": 1, "session": "epic123", "managed": true, "agents": []}]}
+```
+
+A session that claims agentctl management but carries metadata agentctl cannot interpret — a foreign
+`@agentctl_version`, an absent version marker, or a malformed role roster — fails the whole listing rather than being
+skipped, because a silently shortened overview would claim to be complete when it is not. Name a healthy session with
+`--session` to inspect the rest while you repair it.
+
 ### `clear`
 
 ```text
@@ -266,8 +293,10 @@ unmanaged sessions.
 3. the current tmux session, when `TMUX_PANE` identifies the caller.
 
 An explicit empty `--session=` is rejected, as is any invalid nonempty explicit or environment value; those sources do
-not silently fall through. An empty `AGENTCTL_SESSION` is instead treated as absent. `attach` accepts the explicit and
-environment sources, but it must run outside tmux, so the current-tmux fallback is not available to that command.
+not silently fall through. An empty `AGENTCTL_SESSION` is instead treated as absent. When no source names a session,
+`clear`, `compact`, and `kill` fail — they act on exactly one target — while `status` reports every managed session.
+`attach` accepts the explicit and environment sources, but it must run outside tmux, so the current-tmux fallback is
+not available to that command.
 
 ## Understanding status
 
