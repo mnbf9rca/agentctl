@@ -575,8 +575,8 @@ row 14 is the one non-tmux command the `Runner` executes and is shown as a compl
 | # | Operation | argv |
 |---|---|---|
 | 1 | Resolve session | `list-sessions -F #{session_id}⟨TAB⟩#{session_name}` |
-| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
-| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR -P -F #{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
+| 2 | Create session (first role) | `new-session -d -s SESSION -n ROLE -c DIR [-e NAME=VALUE ...] -P -F #{session_id}⟨TAB⟩#{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
+| 3 | Create window (later roles) | `new-window -d -t ⟨sid⟩ -n ROLE -c DIR [-e NAME=VALUE ...] -P -F #{window_id}⟨TAB⟩#{pane_id}⟨TAB⟩#{pane_pid} -- CMD` |
 | 4 | Set session option | `set-option -t ⟨sid⟩ NAME VALUE` |
 | 5 | Set window option | `set-option -w -t ⟨wid⟩ NAME VALUE` |
 | 6 | Read session option | `show-options -qv -t ⟨sid⟩ NAME` |
@@ -591,6 +591,9 @@ row 14 is the one non-tmux command the `Runner` executes and is shown as a compl
 
 Notes:
 
+- **Rows 2–3, `-e`.** The `-e` segment is emitted in declaration order, one flag plus one `NAME=VALUE` element per
+  variable, from values that already passed identifier validation; it is absent entirely when no variables are
+  supplied, so the no-env argv is byte-identical to the previous rows.
 - **Rows 2–3, `--`.** Verified that tmux accepts `--` before the shell-command on both. `CMD` is the §12.1 string and
   always begins with `exec `, so it can never be read as a flag; `--` is belt-and-braces and costs nothing.
 - **Rows 2–3, `-P -F`.** `-P` prints the requested fields on stdout at creation. This removes a resolve round-trip and
