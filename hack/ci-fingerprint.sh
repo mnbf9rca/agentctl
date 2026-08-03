@@ -61,9 +61,7 @@ fingerprint() {
     fi
   fi
 
-  if [[ -n "${ImageOS:-}" || -n "${ImageVersion:-}" ]]; then
-    printf 'runner image: %s/%s\n' "${ImageOS:-not set}" "${ImageVersion:-not set}"
-  fi
+  printf 'runner image: %s/%s\n' "${ImageOS:-not set}" "${ImageVersion:-not set}"
 
   print_command "go" go go version
   print_command "tmux" tmux tmux -V
