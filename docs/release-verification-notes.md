@@ -30,6 +30,21 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-03
+
+- agentctl: `agentctl 4be8604`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.220 (Claude Code)`
+- codex-cli: `codex-cli 0.146.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.MWtiqh/verify-live`
+- Probes: all four completed, no surviving throwaway server
+- Attach: recorded y
+- Claude clear: recorded y
+- Codex clear: recorded y
+- Compact (claude): recorded y
+- Teardown check: PASS
+
 ### 2026-08-01
 
 - tmux: `3.7b`
