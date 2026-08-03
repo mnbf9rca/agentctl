@@ -151,11 +151,12 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
+      - name: Check out fingerprint script
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: hack
       - name: Environment fingerprint
-        run: |
-          sw_vers
-          uname -a
-          brew --version
+        run: ./hack/ci-fingerprint.sh
       - name: Install from tap
         run: brew install mnbf9rca/tap/agentctl
       - name: brew test
@@ -173,11 +174,12 @@ jobs:
     runs-on: macos-26
     permissions: {}
     steps:
+      - name: Check out fingerprint script
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: hack
       - name: Environment fingerprint
-        run: |
-          sw_vers
-          uname -a
-          brew --version
+        run: ./hack/ci-fingerprint.sh
       - name: Confirm notarization accepted
         env:
           KEY_B64: ${{ secrets.MACOS_NOTARY_KEY }}
