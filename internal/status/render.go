@@ -12,8 +12,8 @@ func WriteTable(output io.Writer, report Report) error {
 	return writeTable(output, []Report{report})
 }
 
-// WriteSessionsTable writes one human-readable table covering every managed
-// session, under a single header.
+// WriteSessionsTable writes one human-readable table covering every session,
+// under a single header.
 func WriteSessionsTable(output io.Writer, report SessionsReport) error {
 	return writeTable(output, report.Sessions)
 }
@@ -24,6 +24,16 @@ func writeTable(output io.Writer, reports []Report) error {
 		return err
 	}
 	for _, report := range reports {
+		if len(report.Agents) == 0 {
+			state := StateUnmanaged
+			if report.defect != "" {
+				state = State(report.defect)
+			}
+			if _, err := fmt.Fprintf(table, "%s\t\t\t\t\t\t%s\n", report.Session, state); err != nil {
+				return err
+			}
+			continue
+		}
 		for _, agent := range report.Agents {
 			model := agent.Model
 			if model == "" {
@@ -50,8 +60,7 @@ func WriteJSON(output io.Writer, report Report) error {
 	return json.NewEncoder(output).Encode(withEmptyAgents(report))
 }
 
-// WriteSessionsJSON writes the versioned JSON document covering every managed
-// session.
+// WriteSessionsJSON writes the versioned JSON document covering every session.
 func WriteSessionsJSON(output io.Writer, report SessionsReport) error {
 	sessions := make([]Report, 0, len(report.Sessions))
 	for _, session := range report.Sessions {

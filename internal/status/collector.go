@@ -54,13 +54,8 @@ func NewCollector(client tmuxClient) Collector {
 	return Collector{client: client}
 }
 
-// CollectAll gathers status for every agentctl-managed session on the tmux
-// server, in the order tmux lists them. Sessions that do not claim agentctl
-// management are omitted rather than rendered: an overview of managed fleets
-// asserts nothing about the sessions it does not describe. A session that does
-// claim management but carries metadata agentctl cannot interpret fails the
-// whole listing, because silently skipping it would make the overview claim to
-// be complete when it is not.
+// CollectAll gathers status for every session on the tmux server, in the order
+// tmux lists them.
 func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
 	sessions, err := c.client.ListSessions(ctx)
 	if err != nil {
@@ -68,17 +63,25 @@ func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
 	}
 
 	all := SessionsReport{Schema: 1, Sessions: []Report{}}
+	var defects []error
 	for _, listed := range sessions {
 		report, err := c.Collect(ctx, listed.Name, listed.ID)
 		if err != nil {
-			return SessionsReport{}, err
-		}
-		if !report.Managed {
-			continue
+			var versionError *VersionError
+			var rosterError *RosterError
+			if !errors.As(err, &versionError) && !errors.As(err, &rosterError) {
+				return SessionsReport{}, err
+			}
+			defect := err
+			if rosterError != nil || versionError.Version == "" {
+				defect = fmt.Errorf("session %q: %w", listed.Name, err)
+			}
+			report = Report{Schema: 1, Session: listed.Name, Managed: true, Agents: []Agent{}, defect: defect.Error()}
+			defects = append(defects, defect)
 		}
 		all.Sessions = append(all.Sessions, report)
 	}
-	return all, nil
+	return all, errors.Join(defects...)
 }
 
 // Collect gathers status for one already-resolved session ID.

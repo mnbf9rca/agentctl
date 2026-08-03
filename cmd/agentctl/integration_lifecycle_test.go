@@ -88,7 +88,7 @@ func TestIntegrationStatusReportsLiveAndKilledRoleWindows(t *testing.T) {
 	}
 }
 
-func TestIntegrationStatusWithoutSessionListsOnlyManagedSessions(t *testing.T) {
+func TestIntegrationStatusWithoutSessionListsEverySession(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	for _, session := range []string{"integration-all-a", "integration-all-b"} {
 		launch := fixture.runAgentctl("launch", "--session", session, "--roles", "planner:claude")
@@ -125,8 +125,8 @@ func TestIntegrationStatusWithoutSessionListsOnlyManagedSessions(t *testing.T) {
 		}
 		listed[session.Session] = session
 	}
-	if len(listed) != 2 {
-		t.Fatalf("status listed %#v, want exactly the two managed sessions", report.Sessions)
+	if len(listed) != 3 {
+		t.Fatalf("status listed %#v, want the managed and unmanaged sessions", report.Sessions)
 	}
 	for _, name := range []string{"integration-all-a", "integration-all-b"} {
 		session, ok := listed[name]
@@ -137,8 +137,12 @@ func TestIntegrationStatusWithoutSessionListsOnlyManagedSessions(t *testing.T) {
 			t.Fatalf("status session %q = %#v, want one managed planner row", name, session)
 		}
 	}
-	if _, listedSentinel := listed["integration-all-plain"]; listedSentinel {
-		t.Fatalf("status listed the unmanaged sentinel session: %#v", report.Sessions)
+	sentinel, listedSentinel := listed["integration-all-plain"]
+	if !listedSentinel {
+		t.Fatalf("status omitted the unmanaged sentinel session: %#v", report.Sessions)
+	}
+	if sentinel.Managed || len(sentinel.Agents) != 0 {
+		t.Fatalf("unmanaged sentinel = %#v, want managed false and no agents", sentinel)
 	}
 }
 

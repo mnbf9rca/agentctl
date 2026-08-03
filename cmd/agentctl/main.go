@@ -50,9 +50,9 @@ Commands:
 var commandUsage = map[string]string{
 	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
-	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
+	"status": "Usage: agentctl status [--session SESSION | --all] [--json]\n\n" +
 		"When no session is named by --session, AGENTCTL_SESSION, or the current tmux session, status reports every\n" +
-		"agentctl-managed session; sessions agentctl does not manage are never listed.\n" +
+		"session. Use --all to request the same listing even when a session source is present.\n" +
 		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n",
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
@@ -208,6 +208,9 @@ func runWithAllDependencies(
 			return attachError(stderr, err)
 		}
 	}
+	if command == "status" && options.all {
+		return statusAll(ctx, stdout, stderr, collector, options.json)
+	}
 	var explicit *string
 	if options.sessionSet {
 		explicit = &options.session
@@ -260,13 +263,14 @@ func runWithAllDependencies(
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
 }
 
-// statusAll reports every agentctl-managed session, which is what status does
-// when no permitted source named one.
+// statusAll reports every session, which is what status does when no permitted
+// source named one or --all was supplied.
 func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCollector, asJSON bool) int {
-	report, err := collector.CollectAll(ctx)
-	if err != nil {
-		return statusError(stderr, err)
+	report, collectErr := collector.CollectAll(ctx)
+	if report.Schema == 0 {
+		return statusError(stderr, collectErr)
 	}
+	var err error
 	if asJSON {
 		err = statuspkg.WriteSessionsJSON(stdout, report)
 	} else {
@@ -274,6 +278,9 @@ func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCo
 	}
 	if err != nil {
 		return statusError(stderr, err)
+	}
+	if collectErr != nil {
+		return statusError(stderr, collectErr)
 	}
 	return exitOK
 }
@@ -376,6 +383,7 @@ func killError(stderr io.Writer, err error) int {
 type commandOptions struct {
 	session    string
 	sessionSet bool
+	all        bool
 	json       bool
 	role       string
 }
@@ -385,13 +393,14 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	sessionValue := flags.String("session", "", "session name")
 
 	var roles, models *string
-	var jsonOutput *bool
+	var allSessions, jsonOutput *bool
 	switch command {
 	case "launch":
 		roles = flags.String("roles", "", "role and harness assignments")
 		models = flags.String("models", "", "role and model assignments")
 		flags.String("dir", "", "working directory")
 	case "status":
+		allSessions = flags.Bool("all", false, "report every session")
 		jsonOutput = flags.Bool("json", false, "emit JSON")
 	}
 
@@ -399,6 +408,9 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, err
 	}
 	options := commandOptions{session: *sessionValue, sessionSet: flags.WasSet("session")}
+	if allSessions != nil {
+		options.all = *allSessions
+	}
 	if jsonOutput != nil {
 		options.json = *jsonOutput
 	}
@@ -426,6 +438,13 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
 		}
 		options.role = positional[0]
+	case "status":
+		if options.all && options.sessionSet {
+			return commandOptions{}, errors.New("--all and --session cannot be combined")
+		}
+		if len(positional) != 0 {
+			return commandOptions{}, errors.New("status accepts no positional arguments")
+		}
 	default:
 		if len(positional) != 0 {
 			return commandOptions{}, fmt.Errorf("%s accepts no positional arguments", command)

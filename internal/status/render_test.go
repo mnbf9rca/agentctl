@@ -80,6 +80,7 @@ func TestWriteSessionsTableRendersOneHeaderForEverySession(t *testing.T) {
 	report := SessionsReport{
 		Schema: 1,
 		Sessions: []Report{
+			{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
 			{Schema: 1, Session: "epic123", Managed: true, Agents: []Agent{
 				{Role: "planner", Harness: "claude", Model: "fable", Window: "planner", PaneID: "%12", Process: "claude", State: StateRunning},
 			}},
@@ -95,6 +96,7 @@ func TestWriteSessionsTableRendersOneHeaderForEverySession(t *testing.T) {
 	}
 	want := "" +
 		"SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS   STATE\n" +
+		"shell                                               unmanaged\n" +
 		"epic123  planner  claude   fable    %12   claude    running\n" +
 		"fleet    codex1   codex    default  %13   /bin/zsh  unexpected-process\n"
 	if got := output.String(); got != want {
