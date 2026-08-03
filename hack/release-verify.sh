@@ -203,7 +203,7 @@ printf 'codex:    %s\n' "$CODEX_VERSION"
 # ---------------------------------------------------------------------------
 
 # Each probe's final marker line, read from its own source (hack/probe-*.sh):
-#   probe-1-argv.sh:      final `echo done` after `echo "== cleanup =="`
+#   probe-1-argv.sh:      final `echo 'done'` after `echo "== cleanup =="`
 #   probe-2-targeting.sh: final `echo cleanup-done`
 #   probe-3-ids.sh:       final `echo cleanup-done`
 #   probe-4-attach.sh:    has no "done"-style marker; its last statement is

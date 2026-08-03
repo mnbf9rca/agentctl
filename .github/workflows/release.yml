@@ -46,6 +46,8 @@ jobs:
           go-version-file: go.mod
       - name: Install goreleaser
         run: brew install goreleaser
+      - name: Environment fingerprint (post-install)
+        run: ./hack/ci-fingerprint.sh
       - name: Resolve version
         id: version
         run: |

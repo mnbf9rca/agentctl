@@ -26,3 +26,19 @@ func TestCIFingerprintWritesStdoutAndSummary(t *testing.T) {
 		t.Fatalf("summary does not contain heading:\n%s", summary)
 	}
 }
+
+func TestCIFingerprintHandlesMissingTools(t *testing.T) {
+	summaryPath := t.TempDir() + "/summary.md"
+	command := exec.Command("./ci-fingerprint.sh")
+	command.Env = []string{
+		"PATH=/usr/bin:/bin",
+		"GITHUB_STEP_SUMMARY=" + summaryPath,
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ci-fingerprint failed with missing tools: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "shellcheck: not installed") {
+		t.Fatalf("stdout does not report missing shellcheck:\n%s", output)
+	}
+}
