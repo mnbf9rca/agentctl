@@ -51,6 +51,7 @@ type stubInvocation struct {
 	Role        string
 	Harness     string
 	Model       string
+	Effort      string
 	Environment stubEnvironment
 }
 
@@ -209,14 +210,38 @@ parsedOptions:
 		os.Exit(85)
 	}
 	model := ""
+	effort := ""
 	harnessArguments := []string(nil)
 	if len(arguments) != 0 {
-		if len(arguments) != 3 || arguments[0] != "--" || arguments[1] != "--model" || arguments[2] == "" {
+		if arguments[0] != "--" || len(arguments) == 1 {
 			fmt.Fprintln(os.Stderr, "integration amq stub: unexpected harness arguments")
 			os.Exit(86)
 		}
-		model = arguments[2]
 		harnessArguments = arguments[1:]
+		remaining := harnessArguments
+		for len(remaining) != 0 {
+			if len(remaining) < 2 || remaining[1] == "" {
+				fmt.Fprintln(os.Stderr, "integration amq stub: unexpected harness arguments")
+				os.Exit(86)
+			}
+			switch remaining[0] {
+			case "--model":
+				model = remaining[1]
+			case "--effort":
+				effort = remaining[1]
+			case "--config":
+				value := strings.TrimPrefix(remaining[1], `model_reasoning_effort="`)
+				if value == remaining[1] || !strings.HasSuffix(value, `"`) {
+					fmt.Fprintln(os.Stderr, "integration amq stub: unexpected harness arguments")
+					os.Exit(86)
+				}
+				effort = strings.TrimSuffix(value, `"`)
+			default:
+				fmt.Fprintln(os.Stderr, "integration amq stub: unexpected harness arguments")
+				os.Exit(86)
+			}
+			remaining = remaining[2:]
+		}
 	}
 
 	record, err := os.OpenFile(os.Getenv("AGENTCTL_STUB_INVOCATIONS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -224,7 +249,7 @@ parsedOptions:
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(87)
 	}
-	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", session, role, harness, model,
+	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", session, role, harness, model, effort,
 		os.Getenv("AGENTCTL_SESSION"), os.Getenv("AGENTCTL_ROLE"), os.Getenv("AGENTCTL_MANAGED")); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(88)
@@ -472,21 +497,21 @@ func (f *integrationFixture) hasSession(name string) bool {
 
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
 	f.t.Helper()
-	const format = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}\t#{pane_current_path}"
+	const format = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}\t#{pane_current_path}"
 	output := f.tmuxOutput("list-windows", "-t", string(sessionID), "-F", format)
 	lines := nonemptyLines(output)
 	windows := make([]integrationWindow, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 9)
-		if len(fields) != 9 {
+		fields := strings.SplitN(line, "\t", 10)
+		if len(fields) != 10 {
 			f.t.Fatalf("parse integration window %q: got %d fields", line, len(fields))
 		}
 		windows = append(windows, integrationWindow{
 			Window: tmuxx.Window{
 				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3],
-				Role: fields[4], Harness: fields[5], Model: fields[6], Process: fields[7],
+				Role: fields[4], Harness: fields[5], Model: fields[6], Effort: fields[7], Process: fields[8],
 			},
-			Directory: fields[8],
+			Directory: fields[9],
 		})
 	}
 	return windows
@@ -630,13 +655,13 @@ func (f *integrationFixture) readStubInvocations() ([]stubInvocation, error) {
 	lines := nonemptyLines(data)
 	invocations := make([]stubInvocation, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 7)
-		if len(fields) != 7 {
+		fields := strings.SplitN(line, "\t", 8)
+		if len(fields) != 8 {
 			return nil, fmt.Errorf("parse stub invocation %q: got %d fields", line, len(fields))
 		}
 		invocations = append(invocations, stubInvocation{
-			Session: fields[0], Role: fields[1], Harness: fields[2], Model: fields[3],
-			Environment: stubEnvironment{Session: fields[4], Role: fields[5], Managed: fields[6]},
+			Session: fields[0], Role: fields[1], Harness: fields[2], Model: fields[3], Effort: fields[4],
+			Environment: stubEnvironment{Session: fields[5], Role: fields[6], Managed: fields[7]},
 		})
 	}
 	return invocations, nil

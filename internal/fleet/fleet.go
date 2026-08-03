@@ -209,7 +209,10 @@ func identityEnvironment(session, role string) []tmuxx.EnvVar {
 }
 
 func agentCommand(session string, role config.RoleConfig) (string, error) {
-	argv, err := harness.AgentArgv(session, role.Name, string(role.Harness), role.Model)
+	argv, err := harness.AgentArgv(session, role.Name, string(role.Harness), harness.Options{
+		Model:  role.Model,
+		Effort: role.Effort,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -236,6 +239,7 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 		{name: "@agentctl_role", value: role.Name},
 		{name: "@agentctl_harness", value: string(role.Harness)},
 		{name: "@agentctl_model", value: role.Model},
+		{name: "@agentctl_effort", value: role.Effort},
 	} {
 		if err := l.tmux.SetWindowOption(ctx, windowID, option.name, option.value); err != nil {
 			return err

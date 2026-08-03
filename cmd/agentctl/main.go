@@ -48,7 +48,7 @@ Commands:
 `
 
 var commandUsage = map[string]string{
-	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n",
+	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
 	"status": "Usage: agentctl status [--session SESSION | --all] [--json]\n\n" +
 		"When no session is named by --session, AGENTCTL_SESSION, or the current tmux session, status reports every\n" +
@@ -183,7 +183,7 @@ func runWithAllDependencies(
 		if err := config.ValidateSessionName(options.session); err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
-		fleetConfig, err := config.ParseFleet(options.roles, options.models)
+		fleetConfig, err := config.ParseFleet(options.roles, options.models, options.efforts)
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
@@ -348,6 +348,7 @@ type launchOptions struct {
 	session   string
 	roles     string
 	models    *string
+	efforts   *string
 	directory *string
 }
 
@@ -356,6 +357,7 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 	session := flags.String("session", "", "session name")
 	roles := flags.String("roles", "", "role and harness assignments")
 	models := flags.String("models", "", "role and model assignments")
+	efforts := flags.String("efforts", "", "role and effort assignments")
 	directory := flags.String("dir", "", "working directory")
 
 	if err := flags.Parse(arguments); err != nil {
@@ -369,6 +371,10 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 	if flags.WasSet("models") {
 		modelValue := *models
 		options.models = &modelValue
+	}
+	if flags.WasSet("efforts") {
+		effortValue := *efforts
+		options.efforts = &effortValue
 	}
 	if flags.WasSet("dir") {
 		directoryValue := *directory

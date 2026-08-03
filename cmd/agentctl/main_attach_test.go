@@ -200,13 +200,13 @@ const attachNoticeWithoutCount = "agentctl: attaching session \"fleet\" in iTerm
 	"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
 	"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
 
-const attachWindows = "@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n" +
-	"@8\tcoder\t1\t1\tcoder\tcodex\t\tcodex\n" +
-	"@9\treviewer\t1\t1\treviewer\tclaude\t\tclaude\n"
+const attachWindows = "@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
+	"@8\tcoder\t1\t1\tcoder\tcodex\t\t\tcodex\n" +
+	"@9\treviewer\t1\t1\treviewer\tclaude\t\t\tclaude\n"
 
 var attachListWindowsCall = tmuxx.Call{Executable: "tmux", Args: []string{
 	"list-windows", "-t", "$4", "-F",
-	"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+	"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
 }}
 
 func TestRunAttachAttemptsControlModeByResolvedIDAndReportsTheSessionStateItObserved(t *testing.T) {

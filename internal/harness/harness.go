@@ -8,6 +8,14 @@ type Spec struct {
 	Executable     string
 	InputClearKeys []string
 	modelArgs      func(string) []string
+	effortArgs     func(string) []string
+}
+
+// Options are the optional per-role harness settings. An empty value renders no
+// arguments at all.
+type Options struct {
+	Model  string
+	Effort string
 }
 
 var registry = map[string]Spec{
@@ -15,11 +23,13 @@ var registry = map[string]Spec{
 		Executable:     "claude",
 		InputClearKeys: []string{"C-u"},
 		modelArgs:      longModelArgs,
+		effortArgs:     claudeEffortArgs,
 	},
 	"codex": {
 		Executable:     "codex",
 		InputClearKeys: []string{"C-u"},
 		modelArgs:      longModelArgs,
+		effortArgs:     codexEffortArgs,
 	},
 }
 
@@ -40,21 +50,46 @@ func (s Spec) ModelArgs(model string) []string {
 	return s.modelArgs(model)
 }
 
+// EffortArgs renders effort as harness-specific command-line arguments.
+func (s Spec) EffortArgs(effort string) []string {
+	if effort == "" {
+		return nil
+	}
+	return s.effortArgs(effort)
+}
+
 // AgentArgv builds argv for launching one agent through amq coop exec.
-func AgentArgv(session, role, harnessName, model string) ([]string, error) {
+func AgentArgv(session, role, harnessName string, options Options) ([]string, error) {
 	spec, ok := Lookup(harnessName)
 	if !ok {
 		return nil, fmt.Errorf("unknown harness %q", harnessName)
 	}
 
 	argv := []string{"amq", "coop", "exec", "--session", session, "--me", role, spec.Executable}
-	if args := spec.ModelArgs(model); len(args) > 0 {
+	harnessArgs := append(spec.ModelArgs(options.Model), spec.EffortArgs(options.Effort)...)
+	if len(harnessArgs) > 0 {
 		argv = append(argv, "--")
-		argv = append(argv, args...)
+		argv = append(argv, harnessArgs...)
 	}
 	return argv, nil
 }
 
 func longModelArgs(model string) []string {
 	return []string{"--model", model}
+}
+
+// claudeEffortArgs renders Claude Code's own effort flag, verified against
+// Claude Code 2.1.220: `--effort <level>`.
+func claudeEffortArgs(effort string) []string {
+	return []string{"--effort", effort}
+}
+
+// codexEffortArgs renders a codex configuration override, verified against
+// codex-cli 0.146.0: the main codex CLI has no --effort flag, so the level is
+// supplied as `--config 'model_reasoning_effort="<level>"'`. The value portion
+// is parsed by codex as TOML, so it is rendered with %q; agentctl additionally
+// restricts efforts to a closed set of levels (internal/config), so the quoted
+// string can never be escaped.
+func codexEffortArgs(effort string) []string {
+	return []string{"--config", fmt.Sprintf("model_reasoning_effort=%q", effort)}
 }

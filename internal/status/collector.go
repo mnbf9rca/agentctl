@@ -216,6 +216,7 @@ func agentForWindow(role string, window tmuxx.Window) Agent {
 		Role:    role,
 		Harness: window.Harness,
 		Model:   window.Model,
+		Effort:  window.Effort,
 		Window:  window.Name,
 	}
 }
