@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  form:
-    runs-on: macos-26
+  promotion-form:
+    runs-on: ubuntu-latest
     steps:
       - name: Check out PR head
         uses: actions/checkout@v7

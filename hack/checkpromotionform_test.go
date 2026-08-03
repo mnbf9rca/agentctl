@@ -172,6 +172,15 @@ func TestCheckPromotionForm_PassesWithOneBoxAndMatchingVersion(t *testing.T) {
 	}
 }
 
+func TestCheckPromotionForm_PassesWithCRLFBody(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	crlfBody := strings.ReplaceAll(body("x", " ", "0.1.0"), "\n", "\r\n")
+	out, err := runFormCheck(t, dir, crlfBody)
+	if err != nil {
+		t.Fatalf("expected CRLF body to pass, got failure: %v\n%s", err, out)
+	}
+}
+
 func TestCheckPromotionForm_FailureNamesFormOnly(t *testing.T) {
 	dir := initFormRepo(t, "0.1.0", nil)
 	out, err := runFormCheck(t, dir, body(" ", " ", "0.1.0"))
