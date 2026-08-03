@@ -321,6 +321,8 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_version", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_roles", "planner,reviewer"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_fleet", "planner:claude:,reviewer:codex:gpt-5.6"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_dir", "/fleet workspace"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_harness", "claude"}},
@@ -353,7 +355,7 @@ func launchOneRoleResponses(sessions string) []tmuxx.Response {
 	return []tmuxx.Response{
 		{Stdout: []byte(sessions)},
 		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {}, {},
+		{}, {}, {}, {}, {}, {}, {}, {}, {}, {},
 		{Stdout: []byte("claude\n")}, {},
 	}
 }
@@ -362,7 +364,7 @@ func launchTwoRoleResponses() []tmuxx.Response {
 	return []tmuxx.Response{
 		{},
 		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {}, {}, {Stdout: []byte("claude\n")}, {},
+		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {Stdout: []byte("claude\n")}, {},
 		{Stdout: []byte("@65\t%87\t8686\n")},
 		{}, {}, {}, {}, {}, {Stdout: []byte("codex\n")}, {},
 	}

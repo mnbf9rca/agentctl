@@ -36,7 +36,7 @@ These extend or refine `brief.md`:
 | Teardown | New command `agentctl kill [--session S]`. Validates the session is agentctl-managed (same gate as control commands) before `tmux kill-session`. Refuses unmanaged sessions. |
 | Model identifier validation | Models are catalogue-free but **not** charset-free: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. The mandatory alphanumeric first character makes flag smuggling (e.g. `--dangerously-bypass-approvals-and-sandbox`) unrepresentable in the model slot. |
 | Effort validation (added 2026-08-03, issue #88) | Efforts are the **opposite** of models: a closed per-harness allowlist (`low`, `medium`, `high`, `xhigh`, `max`), rejected before anything is created. The value names a harness mode rather than an opaque identifier, and the codex rendering embeds it in an expression codex parses as TOML, so a charset rule would be the weaker instrument. Optional everywhere: a role with no effort emits no harness argument at all. |
-| `--if-missing` | Deferred. v1 `launch` always fails when the target session exists. The exact-fleet-comparison metadata is designed in now so `--if-missing` is cheap later; tracked as a deferred backlog issue. |
+| `--if-missing` | Deferred. v1 `launch` always fails when the target session exists. The exact-fleet-comparison metadata is designed in now so `--if-missing` is cheap later; tracked as a deferred backlog issue. Its direction is fixed by §6.5: comparison reads `@agentctl_fleet` and `@agentctl_dir` behind the §12.6 gate — **zero** window reads — which is correct even when roles are missing, and refuses legacy sessions carrying neither option. |
 | Harness process check | No name pattern-matching. At launch, the observed executable of each pane's root process is recorded as `@agentctl_process` metadata; control and status require exact equality with that baseline (§8). Motivated by the spike finding that Claude Code's process name is its **version string** (e.g. `2.1.220`), not `claude`. |
 | Payload registry policy | The registry is hardcoded and may grow beyond `clear`/`compact`, but only with **argument-free** payloads. Commands that carry caller-supplied text (e.g. `/rename NAME`) are permanently inadmissible. |
 | Self-target guard | When invoked from inside tmux, a control command whose resolved target pane equals the caller's own pane (`$TMUX_PANE`) is refused (exit 5). Prevents an agent or planner accidentally wiping its own context; an accident guard, not a security boundary. |
@@ -111,11 +111,12 @@ further is printed.
 
 ```
 agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
-agentctl attach  [--session S]
-agentctl status  [--session S] [--json]
-agentctl clear   [--session S] ROLE
-agentctl compact [--session S] ROLE
-agentctl kill    [--session S]
+agentctl relaunch [--session S] [--harness H] [--model M] [--dir PATH] ROLE
+agentctl attach   [--session S]
+agentctl status   [--session S | --all] [--json]
+agentctl clear    [--session S] ROLE
+agentctl compact  [--session S] ROLE
+agentctl kill     [--session S]
 ```
 
 Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected.
@@ -215,7 +216,7 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/shellq` | POSIX single-quote escaping; tiny, table- and fuzz-tested |
 | `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers, one per §13.2 operation: `ListSessions`, `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListWindows`, `ListPanes`, `DeliverPayload` (§13.6 — no bare `SendKeys` is exported), `KillSession`, `DisplayMessage`, `AttachSession`, `ProcessName` (§13.7) |
 | `internal/preflight` | Pure executable checker: `LookPathFunc` seam, `MissingExecutableError`, required-set derivation (`[tmux, amq]` + first-occurrence deduped harnesses). No `Runner` dependency — ordering relative to `Runner` calls is proven by `fleet` (§6.1 step 2). |
-| `internal/fleet` | Launcher, rollback handler, metadata writer |
+| `internal/fleet` | Launcher, single-role relauncher (§6.8), rollback handlers, metadata writer |
 | `internal/session` | Session resolver (precedence chain; explicit failure when unresolvable) |
 | `internal/target` | Managed-metadata reader; 8-step target validation chain |
 | `internal/control` | Hardcoded registry of predefined, argument-free payloads (`clear → /clear`, `compact → /compact` in v1); dispatcher |
@@ -530,8 +531,8 @@ operator even though agentctl declines to classify it.
 
 ### 6.5 Metadata
 
-Exactly as the brief, plus one addition: session options `@agentctl_managed=1`, `@agentctl_version=1`,
-`@agentctl_roles`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`, `@agentctl_effort` (both empty strings when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
+Exactly as the brief, plus three additions: session options `@agentctl_managed=1`, `@agentctl_version=1`,
+`@agentctl_roles`, `@agentctl_fleet`, `@agentctl_dir`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`, `@agentctl_effort` (the model and effort are empty strings when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
 Stamping order is **fixed and asserted**, because the fake `Runner` records calls in sequence and a reordering would
 otherwise pass silently. It orders the **option-setting calls**, not creation: `new-session` creates the session *and*
@@ -541,10 +542,36 @@ means before any *window option*, never before any window.
 1. session `@agentctl_managed`
 2. session `@agentctl_version`
 3. session `@agentctl_roles`
-4. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
+4. session `@agentctl_fleet`
+5. session `@agentctl_dir`
+6. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
    `@agentctl_effort`, the baseline poll, and finally `@agentctl_process`.
 
 `@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
+
+**`@agentctl_fleet`** records the per-role configuration the roster alone cannot carry: `role:harness:model` triples,
+comma-joined, in roster order. All three fields are charset-bound (§7), so neither `:` nor `,` can occur inside a
+field; a defaulted model renders as an empty third field (`planner:claude:`). Parsing is `strings.Split` on `,` then
+`strings.SplitN(entry, ":", 3)`. It never extends `@agentctl_roles`: the roster's meaning — the declared membership —
+is unchanged, and a consumer reading only names must keep working.
+
+It exists because `@agentctl_harness` and `@agentctl_model` are **window** options: when a role's window closes they
+close with it, so nothing surviving records what a missing role was launched with. Without it, relaunching one role
+(§6.8) could only ask the caller, and exact fleet comparison (#17, §14) is not correctly implementable at all — a
+missing role's configuration would be unknowable.
+
+**`@agentctl_dir`** records the exact resolved string passed to `-c` at launch — the `--dir` value or the invocation
+cwd, verbatim, with no symlink resolution. It is alone in its own option because, unlike every other metadata field, its
+value is unconstrained (§13.3's rule that unconstrained values must not share a delimited field). §13.4 is untouched:
+`pane_current_path` is still never read, and the recorded string is what agentctl passed, not what tmux resolved.
+
+**No `@agentctl_version` bump.** The §12.6 gate protects the semantics of the options a command *reads*; two additive
+options that no older binary reads change nothing about the existing ones. Bumping would flag-day every live fleet for
+a change none of them can observe. Sessions launched before these options exist carry neither, and are handled as the
+legacy case in §6.8 rather than being silently guessed at.
+
+**Stored configuration always equals the actual fleet.** Whenever a command changes a role's harness or model, it
+rewrites `@agentctl_fleet` in full with the new values, so the option can never disagree with the live windows.
 
 **`@agentctl_roles`** is the declared roster: the role names from `--roles`, comma-joined, in declaration order. It
 exists because without it a dead agent is *unobservable*. Every other status input is derived from windows that still
@@ -645,6 +672,55 @@ knowledge of neither.
 "no server" genuinely means "nothing to act on", and §4.1's exit 6 carrying tmux's message remains correct for them.
 Only a command that is about to create a server has standing to proceed without one.
 
+### 6.8 relaunch
+
+`agentctl relaunch ROLE [--session S] [--harness H] [--model M] [--dir PATH]` recreates **one absent** role window
+inside an existing managed session. ROLE is positional, mirroring `clear`/`compact`; duplicate options are rejected
+(§12.9) and every supplied value is validated per §7 before anything runs (violations exit 2).
+
+Stored configuration is authoritative and explicit options override it per field. Both halves matter: reading the
+fleet's own record is what makes relaunch correct without the caller remembering how the fleet was launched, and
+reporting the provenance of every field is what keeps an override from silently diverging the fleet (§1.1).
+
+1. ROLE charset → exit 2. Resolve the session by listing and address it by ID (§13.1); the §12.6 gate → exit 3.
+2. Read `@agentctl_roles`, `@agentctl_fleet`, `@agentctl_dir`. ROLE not in the roster → exit 4. A roster defect (empty
+   entry) → exit 3, the same family as §6.3's. `@agentctl_fleet` and `@agentctl_dir` both present → **stored** mode;
+   both absent → **legacy** mode; exactly one present, a structurally invalid `@agentctl_fleet`, or fleet roles that
+   differ from the roster in names or order → a metadata defect, exit 3, rendering the values observed (§1.1). Stored
+   values are re-validated against §7 on read, because tmux options are advisory (SECURITY.md residual 4).
+3. **Stored mode**: the role's harness, model and directory come from the options; `--harness`, `--model` and `--dir`
+   each override their own field. **Legacy mode**: refuse (exit 3) unless `--harness` *and* `--dir` are supplied
+   (`--model` is optional; absent means empty, the harness default). The directory is **never** defaulted to the
+   invocation cwd — relaunching one role somewhere the rest of the fleet does not live is exactly the silent
+   divergence this refusal exists to prevent.
+4. Window precondition: **exactly zero** windows match ROLE. Any match → exit 4, rendering the observed state by §6.3
+   precedence and every matching window ID (§13.5). `dead` is refused like any other survivor: a dead window exists and
+   its pane may still hold evidence, so relaunch never kills and recreates it. A **zero-pane** window refuses too —
+   creating beside it would manufacture the `ambiguous` §13.5 fails closed on.
+5. Preflight `tmux`, `amq` and the effective harness on `PATH` → exit 7. The effective directory must exist and be a
+   directory: supplied by `--dir` → exit 2 (parity with launch, §7); read from metadata → exit 3, naming the stored
+   path and `--dir` as the remedy, because a stale recorded path is a session-state fact, not a usage error.
+6. Create with §13.2 row 3 exactly: `CMD` per §12.1 through the same `shellq` path, `-c DIR`, `-P -F`, and **no index
+   argument** — the window lands at the next free index. Operator-visible ordering is unaffected because `status`
+   iterates the roster, not the window list. Unparseable creation output is pre-ownership: exit 6, kill nothing, and
+   append `; a window named ROLE may exist; inspect with tmux list-windows`.
+7. Stamp the window options in §6.5's per-window order, poll the baseline with §8's fixed parameters, and stamp
+   `@agentctl_process`. If `--harness` or `--model` overrode a stored value, rewrite `@agentctl_fleet` in full
+   afterwards. A `--dir` override does **not** rewrite `@agentctl_dir`: that option records the fleet's launch
+   directory and the other roles still live there. The divergence is stated in the output instead.
+8. Any failure after the new window's ID parses → `kill-window` on **that ID only**, exit 8:
+
+   ```text
+   agentctl: failed to relaunch ROLE; removed window W: CAUSE
+   agentctl: failed to relaunch ROLE; failed to remove window W: CLEANUP_CAUSE (relaunch failure: CAUSE)
+   ```
+
+   Same shape and same rules as §6.6, including that `CAUSE` is mandatory in both variants. Exit 8's meaning therefore
+   extends from "the session this invocation created was removed" to "**what this invocation created** was removed".
+9. Success (exit 0) states the role, harness, model (`""` in metadata, `default` in human output, §12.7), session,
+   window ID, pane ID, directory, and the provenance of each configuration field — `stored`, `flag override`, or
+   `flags`. This report is what keeps an override honest: `status` cannot detect a harness swap, so relaunch says so.
+
 ## 7. Validation rules (consolidated)
 
 - Session and role names: `^[a-z0-9][a-z0-9_-]*$`.
@@ -682,6 +758,8 @@ This handles Claude Code's versioned binary name (`2.1.220` at the time of the s
 ## 9. Exit codes
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
+Exit 8's claim extends from "the session this invocation created was removed" to "**what this invocation created**
+was removed": `launch` rolls back a session, `relaunch` rolls back the single window it created (§6.8).
 Exit 4 additionally covers a role that resolves to more than one window (§13.5). Exit 6 additionally covers a
 pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
 failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
@@ -734,6 +812,14 @@ Consequently:
   surplus arguments and concatenates them, so a `Quote` emitting `'planner' ':claude'` for `planner:claude` passes it.
   Assert the word count as well as the bytes:
   `set -- <quoted>; printf %s "$#"; printf ':'; printf %s "$1"` → `1:` + input.
+- `relaunch` (§6.8): exact argv for stored-mode recreation, with the stamping order asserted as an ordered call
+  sequence and no index argument in the creation call; flag overrides re-encoding `@agentctl_fleet` **after** the
+  baseline, and a `--dir` override leaving `@agentctl_dir` untouched; every refusal above with its exit code and
+  message — ownership gate, roster defect, role outside the roster, each metadata defect, legacy session with and
+  without the required options, and each §6.3 state a surviving window can be in, `dead` included; both rollback
+  branches asserting `kill-window` on the created ID and **no** `kill-session`; a pre-ownership creation failure
+  killing nothing; provenance rendered for stored, override and legacy cases; and the relaunched role passing `status`
+  and the control chain against its **new** `@agentctl_process` baseline.
 - Integration tests (build tag `integration`): real tmux on a throwaway socket (`tmux -L agentctl-test-$RANDOM`), windows running stub scripts standing in for harnesses; never the user's server, never real agents.
 - Manual verification checklist (tracked as a backlog issue): re-run the §3.3 spike against current harness versions before first release.
 - CI: `go test ./...`, `go vet ./...`.
@@ -812,8 +898,9 @@ express exact matching by session name at all: `=` is an error and a bare name p
 
 ### 13.2 Operations
 
-`⟨sid⟩`, `⟨wid⟩`, `⟨pid⟩` are resolved IDs; `⟨TAB⟩` is a literal 0x09 byte. Rows 1–13 are the argv **after** `tmux`;
-row 14 is the one non-tmux command the `Runner` executes and is shown as a complete argv.
+`⟨sid⟩`, `⟨wid⟩`, `⟨pid⟩` are resolved IDs; `⟨TAB⟩` is a literal 0x09 byte. Rows 1–13 (including 11a) are the argv
+**after** `tmux`; row 14 is the one non-tmux command the `Runner` executes and is shown as a complete argv. Row 11a is
+lettered rather than appended so it sits beside its sibling without renumbering rows this document cross-references.
 
 | # | Operation | argv |
 |---|---|---|
@@ -828,6 +915,7 @@ row 14 is the one non-tmux command the `Runner` executes and is shown as a compl
 | 9 | List panes | `list-panes -t ⟨wid⟩ -F #{pane_id}⟨TAB⟩#{pane_pid}⟨TAB⟩#{pane_dead}⟨TAB⟩#{window_panes}` |
 | 10 | Deliver payload (composite, §13.6) | `send-keys -t ⟨pid⟩ C-u` · `send-keys -t ⟨pid⟩ -l -- /PAYLOAD` · `send-keys -t ⟨pid⟩ Enter` |
 | 11 | Kill session | `kill-session -t ⟨sid⟩` |
+| 11a | Kill window | `kill-window -t ⟨wid⟩` |
 | 12 | Current session name | `display-message -p -t $TMUX_PANE #{session_name}` |
 | 13 | Attach | `-CC attach-session -t ⟨sid⟩` |
 | 14 | Process identity (§13.7) | `ps -o comm= -p PID` — complete argv, not prefixed by `tmux` |
@@ -854,6 +942,9 @@ Notes:
   `list-panes`' `#{pane_pid}` for the same pane; and it is **stable across the `exec` chain** — a window created as
   `sh -c 'exec sleep 60'` reported the same pid at creation and after the exec completed. That stability is what makes
   the creation-time pid a valid target for the §8 baseline poll rather than merely a convenient one.
+- **Row 11a.** Exposed **solely** to roll back the window ID the current `relaunch` invocation created (§6.8). No
+  command removes a window it did not create, and `kill-window` is never issued against a window discovered by
+  listing. The `tmuxx` wrapper takes a typed `WindowID`, so a name can never reach `-t`.
 - **Row 10.** Payload and `Enter` stay separate events, with the §3.3 fixed delay between them; `-l` is literal mode and
   `--` guards the leading `/`. Verified end to end: a pane running `cat` received exactly `/clear`.
 - **Row 12.** Only used by the session resolver's inside-tmux fallback, and only to obtain a *name*, which is then fed
@@ -974,4 +1065,7 @@ Three consequences bind the implementation:
 
 ## 14. Out of scope
 
-Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; per-harness effort allowlist enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
+Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2 — unblocked but not implemented by
+§6.5's metadata) and restarting a role whose window still exists (§6.8 refuses `dead` rather than folding it into
+`missing`; a `restart` command would be filed separately if demand appears). `status` deliberately does not read
+`@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; per-harness effort allowlist enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.

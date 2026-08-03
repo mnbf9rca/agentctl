@@ -297,6 +297,9 @@ func TestTypedTargetsRejectNamesBeforeRunningTmux(t *testing.T) {
 		{name: "kill", run: func(client Client) error {
 			return client.KillSession(context.Background(), "epic123")
 		}},
+		{name: "kill window", run: func(client Client) error {
+			return client.KillWindow(context.Background(), "worker")
+		}},
 		{name: "display", run: func(client Client) error {
 			_, err := client.DisplayMessage(context.Background(), "pane")
 			return err
@@ -327,6 +330,16 @@ func TestKillSessionUsesResolvedID(t *testing.T) {
 		t.Fatalf("KillSession() error = %v", err)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-session", "-t", "$4"}})
+}
+
+func TestKillWindowUsesResolvedID(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	if err := New(runner).KillWindow(context.Background(), "@9"); err != nil {
+		t.Fatalf("KillWindow() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@9"}})
 }
 
 func TestDisplayMessageTargetsCurrentPaneID(t *testing.T) {

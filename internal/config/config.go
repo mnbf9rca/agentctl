@@ -110,6 +110,37 @@ func ValidateRoleName(role string) error {
 	return nil
 }
 
+// ValidateModelName validates one model identifier accepted by agentctl. The
+// empty string is rejected: absence of a model is expressed by omitting the
+// option, not by supplying an empty one.
+func ValidateModelName(model string) error {
+	if !modelExpression.MatchString(model) {
+		return &ValidationError{
+			Option:     "model",
+			Value:      model,
+			EntryIndex: -1,
+			Reason:     "must match " + modelPattern,
+		}
+	}
+	return nil
+}
+
+// ParseHarness validates one harness identifier accepted by agentctl.
+func ParseHarness(name string) (Harness, error) {
+	switch name {
+	case string(HarnessClaude):
+		return HarnessClaude, nil
+	case string(HarnessCodex):
+		return HarnessCodex, nil
+	}
+	return "", &ValidationError{
+		Option:     "harness",
+		Value:      name,
+		EntryIndex: -1,
+		Reason:     "must be claude or codex",
+	}
+}
+
 // ParseFleet parses ordered role declarations and optional model and effort
 // assignments. A nil models or efforts value means the option was omitted; a
 // non-nil empty value means it was explicitly supplied as empty.

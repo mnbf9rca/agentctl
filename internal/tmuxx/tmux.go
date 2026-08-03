@@ -344,6 +344,17 @@ func (c Client) KillSession(ctx context.Context, sid SessionID) error {
 	return err
 }
 
+// KillWindow kills an exact window ID. It exists solely so a relaunch can roll
+// back the one window that invocation created; no command removes a window it
+// did not create.
+func (c Client) KillWindow(ctx context.Context, wid WindowID) error {
+	if err := validateID(string(wid), '@'); err != nil {
+		return fmt.Errorf("kill window target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "kill window", "kill-window", "-t", string(wid))
+	return err
+}
+
 // DisplayMessage returns the session name containing an exact pane ID.
 func (c Client) DisplayMessage(ctx context.Context, paneID PaneID) (string, error) {
 	if err := validateID(string(paneID), '%'); err != nil {

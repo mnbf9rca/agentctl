@@ -34,11 +34,13 @@ type integrationResult struct {
 }
 
 type integrationSession struct {
-	ID      tmuxx.SessionID
-	Name    string
-	Managed string
-	Version string
-	Roles   string
+	ID        tmuxx.SessionID
+	Name      string
+	Managed   string
+	Version   string
+	Roles     string
+	Fleet     string
+	Directory string
 }
 
 type integrationWindow struct {
@@ -469,17 +471,18 @@ func (f *integrationFixture) sentinelSnapshot(name string) sentinelSnapshot {
 
 func (f *integrationFixture) sessions() []integrationSession {
 	f.t.Helper()
-	const format = "#{session_id}\t#{session_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_roles}"
+	const format = "#{session_id}\t#{session_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_roles}\t#{@agentctl_fleet}\t#{@agentctl_dir}"
 	output := f.tmuxOutput("list-sessions", "-F", format)
 	lines := nonemptyLines(output)
 	sessions := make([]integrationSession, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 5)
-		if len(fields) != 5 {
+		fields := strings.SplitN(line, "\t", 7)
+		if len(fields) != 7 {
 			f.t.Fatalf("parse integration session %q: got %d fields", line, len(fields))
 		}
 		sessions = append(sessions, integrationSession{
-			ID: tmuxx.SessionID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3], Roles: fields[4],
+			ID: tmuxx.SessionID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3],
+			Roles: fields[4], Fleet: fields[5], Directory: fields[6],
 		})
 	}
 	return sessions
