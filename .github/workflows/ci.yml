@@ -23,10 +23,12 @@ jobs:
         run: go vet ./...
       - name: ShellCheck
         run: |
-          command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
+          command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
           shellcheck hack/*.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
 
   integration:
     runs-on: macos-26
