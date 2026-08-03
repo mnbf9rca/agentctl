@@ -15,16 +15,28 @@ func renderResults(t *testing.T, versions, artifactDir string) (string, error) {
 }
 
 func TestRenderResultsMatchesGolden(t *testing.T) {
-	got, err := renderResults(t, "testdata/release-verify-versions.txt", "testdata/release-verify-artifact")
-	if err != nil {
-		t.Fatalf("render-results failed: %v", err)
+	cases := []struct {
+		name        string
+		artifactDir string
+		goldenPath  string
+	}{
+		{"measure", "testdata/release-verify-measure-artifact", "testdata/release-verify-measure-results.golden"},
+		{"verify live", "testdata/release-verify-live-artifact", "testdata/release-verify-live-results.golden"},
 	}
-	golden, err := os.ReadFile("testdata/release-verify-results.golden")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != string(golden) {
-		t.Fatalf("output does not match golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(golden))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := renderResults(t, "testdata/release-verify-versions.txt", tc.artifactDir)
+			if err != nil {
+				t.Fatalf("render-results failed: %v", err)
+			}
+			golden, err := os.ReadFile(tc.goldenPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(golden) {
+				t.Fatalf("output does not match golden.\n--- got ---\n%s\n--- want ---\n%s", got, string(golden))
+			}
+		})
 	}
 }
 

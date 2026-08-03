@@ -1,0 +1,14 @@
+### 2026-08-02
+
+- agentctl: `agentctl version 0.1.2 (abc1234)`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.220 (Claude Code)`
+- codex-cli: `codex-cli 0.146.0 (research preview)`
+- Mode: `measure`; harness: `both`
+- Artifact: `testdata/release-verify-measure-artifact`
+
+```text
+mode	harness	delay_ms	trials	load_workers	result	detail
+measure	claude	1000	10	12	PASS	all paired trials operator-attested; capture_pre_enter=0
+measure	codex	1000	10	12	PASS	all paired trials operator-attested; capture_pre_enter=0
+```

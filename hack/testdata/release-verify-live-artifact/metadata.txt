@@ -1,0 +1,9 @@
+date_utc=2026-08-03T14:10:00Z
+mode=verify-live
+harness=both
+probes=all four completed, no surviving throwaway server
+attach_attestation=y
+claude_clear_attestation=y
+codex_clear_attestation=y
+compact_attestation=y
+teardown_check=PASS

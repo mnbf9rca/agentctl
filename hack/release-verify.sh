@@ -45,9 +45,7 @@ render_results() {
 
   [ -r "$versions_file" ] || die "cannot read versions file: $versions_file"
   metadata="$artifact_dir/metadata.txt"
-  results="$artifact_dir/results.tsv"
   [ -r "$metadata" ] || die "cannot read metadata: $metadata"
-  [ -r "$results" ] || die "cannot read results: $results"
 
   agentctl_version=$(field agentctl_version "$versions_file")
   tmux_version=$(field tmux_version "$versions_file")
@@ -78,6 +76,19 @@ render_results() {
   # Markdown backticks are literal; command substitution deliberately suppressed.
   # shellcheck disable=SC2016
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
+
+  if [ "$mode" = verify-live ]; then
+    printf -- '- Probes: %s\n' "$(field probes "$metadata")"
+    printf -- '- Attach: recorded %s\n' "$(field attach_attestation "$metadata")"
+    printf -- '- Claude clear: recorded %s\n' "$(field claude_clear_attestation "$metadata")"
+    printf -- '- Codex clear: recorded %s\n' "$(field codex_clear_attestation "$metadata")"
+    printf -- '- Compact (claude): recorded %s\n' "$(field compact_attestation "$metadata")"
+    printf -- '- Teardown check: %s\n' "$(field teardown_check "$metadata")"
+    return
+  fi
+
+  results="$artifact_dir/results.tsv"
+  [ -r "$results" ] || die "cannot read results: $results"
   printf '\n```text\n'
   cat "$results"
   printf '```\n'
