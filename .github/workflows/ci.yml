@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Environment fingerprint
+        run: ./hack/ci-fingerprint.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -44,6 +46,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Environment fingerprint
+        run: ./hack/ci-fingerprint.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
