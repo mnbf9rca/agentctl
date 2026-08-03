@@ -1,0 +1,14 @@
+### 2026-08-03
+
+- agentctl: `agentctl version 0.1.2 (abc1234)`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.220 (Claude Code)`
+- codex-cli: `codex-cli 0.146.0 (research preview)`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `testdata/release-verify-live-artifact`
+- Probes: all four completed, no surviving throwaway server
+- Attach: recorded y
+- Claude clear: recorded y
+- Codex clear: recorded y
+- Compact (claude): recorded y
+- Teardown check: PASS

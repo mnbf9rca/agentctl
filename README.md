@@ -60,6 +60,27 @@ agentctl does not read or write AMQ state: it does not touch mailboxes or `.amqr
 `AM_ROOT` or `AM_SESSION`. It also does not infer workflow state from terminal output or accept arbitrary keystroke
 payloads.
 
+## Installation
+
+```sh
+brew install mnbf9rca/tap/agentctl
+```
+
+This installs a prebuilt, signed binary and `tmux` alongside it. agentctl
+also expects `amq` and at least one agent harness (`claude`, `codex`) on
+PATH at launch time — it will tell you exactly what is missing when you run
+it.
+
+Release artifacts carry Sigstore build provenance. To verify a downloaded
+tarball:
+
+```sh
+gh attestation verify agentctl_<version>_darwin_arm64.tar.gz --repo mnbf9rca/agentctl
+```
+
+To build from source instead: `make build` (requires Go), then
+`make install`.
+
 ## Prerequisites and installation
 
 To build agentctl, install Go and Make. To operate a fleet, install tmux, AMQ, and every harness named in `--roles`:

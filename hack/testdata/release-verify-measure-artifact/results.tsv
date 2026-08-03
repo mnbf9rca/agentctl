@@ -1,0 +1,3 @@
+mode	harness	delay_ms	trials	load_workers	result	detail
+measure	claude	1000	10	12	PASS	all paired trials operator-attested; capture_pre_enter=0
+measure	codex	1000	10	12	PASS	all paired trials operator-attested; capture_pre_enter=0

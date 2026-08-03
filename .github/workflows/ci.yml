@@ -9,10 +9,12 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Environment fingerprint
+        run: ./hack/ci-fingerprint.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -21,12 +23,33 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Install shellcheck
+        run: brew install shellcheck
+      - name: Verify shellcheck version
+        run: |
+          actual="$(shellcheck --version | awk '/^version:/ {print $2}')"
+          if [[ "$actual" != "0.11.0" ]]; then
+            echo "shellcheck is $actual; the hack/ directives were verified against 0.11.0."
+            echo "Re-run shellcheck locally and review findings before changing this pin."
+            exit 1
+          fi
+      - name: Environment fingerprint (post-install)
+        run: ./hack/ci-fingerprint.sh
+      - name: ShellCheck
+        run: |
+          shellcheck hack/*.sh
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
 
   integration:
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Environment fingerprint
+        run: ./hack/ci-fingerprint.sh
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -45,3 +68,19 @@ jobs:
           fi
       - name: Run integration tests
         run: go test -tags integration ./...
+      - name: Install goreleaser
+        run: brew install goreleaser
+      - name: Environment fingerprint (post-install)
+        run: ./hack/ci-fingerprint.sh
+      - name: Validate goreleaser config
+        run: goreleaser check
+      - name: Snapshot release build
+        run: goreleaser release --snapshot --clean --skip=notarize
+      - name: Smoke-test snapshot binary
+        run: |
+          out="$(./dist/agentctl_darwin_arm64*/agentctl version)"
+          echo "snapshot binary reports: $out"
+          case "$out" in
+            "agentctl v"*) ;;
+            *) echo "unstamped or wrong format: $out" >&2; exit 1 ;;
+          esac
