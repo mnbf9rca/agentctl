@@ -514,24 +514,35 @@ else
     TEARDOWN_STATUS=1
   fi
 
-  if surviving_tmux=$(pgrep -fl '[t]mux.*relverify' 2>&1); then
-    pgrep_status=0
-  else
-    pgrep_status=$?
-  fi
-  case "$pgrep_status" in
-    0)
-      printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
-      TEARDOWN_STATUS=1
-      ;;
-    1)
-      echo 'TEARDOWN PASS (no relverify tmux process remains)'
-      ;;
-    *)
-      printf 'TEARDOWN FAIL (pgrep exited %s):\n%s\n' "$pgrep_status" "$surviving_tmux"
-      TEARDOWN_STATUS=1
-      ;;
-  esac
+  tmux_settle_retries=6
+  tmux_settle_attempt=0
+  while true; do
+    if surviving_tmux=$(pgrep -fl '[t]mux.*relverify' 2>&1); then
+      pgrep_status=0
+    else
+      pgrep_status=$?
+    fi
+    case "$pgrep_status" in
+      0)
+        if [ "$tmux_settle_attempt" -ge "$tmux_settle_retries" ]; then
+          printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
+          TEARDOWN_STATUS=1
+          break
+        fi
+        tmux_settle_attempt=$((tmux_settle_attempt + 1))
+        sleep 0.5
+        ;;
+      1)
+        echo 'TEARDOWN PASS (no relverify tmux process remains)'
+        break
+        ;;
+      *)
+        printf 'TEARDOWN FAIL (pgrep exited %s):\n%s\n' "$pgrep_status" "$surviving_tmux"
+        TEARDOWN_STATUS=1
+        break
+        ;;
+    esac
+  done
 
   trap - EXIT
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then

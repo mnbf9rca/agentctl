@@ -56,6 +56,7 @@ bash hack/release-verify.sh --measure
 ```
 The forensic `verify-injection.sh` rig is measure-only. Judge each prompted
 snapshot batch and answer exactly `y` or `n`.
+Wait for the first "Is the <harness> TUI fully ready?" prompt, then run the command printed under `ATTACH:` from Window 2.
 
 ## Part C — Promotion PR
 

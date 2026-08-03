@@ -135,6 +135,7 @@ func newLiveFixture(t *testing.T) liveFixture {
 	agentctlLog := filepath.Join(t.TempDir(), "agentctl.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
+	pgrepCalls := filepath.Join(t.TempDir(), "pgrep-calls")
 	agentctl := `#!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >>"$AGENTCTL_TEST_LOG"
@@ -186,7 +187,17 @@ esac
 case "$*" in
   *agentctl-probe-*) exit 1 ;;
   *relverify*)
+    calls=0
+    [ ! -e "$AGENTCTL_TEST_PGREP_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PGREP_CALLS")
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$AGENTCTL_TEST_PGREP_CALLS"
     code=${AGENTCTL_TEST_PGREP_CODE:-1}
+    if [ -n "${AGENTCTL_TEST_PGREP_CODES:-}" ]; then
+      IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PGREP_CODES"
+      index=$((calls - 1))
+      [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
+      code=${codes[$index]}
+    fi
     [ "$code" -eq 0 ] && echo '123 tmux relverify'
     [ "$code" -gt 1 ] && echo 'pgrep failed' >&2
     exit "$code"
@@ -203,6 +214,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_LOG", agentctlLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
+	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
 	t.Setenv("PATH", filepath.Join(dir, "stubs")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return liveFixture{dir: dir, agentctlLog: agentctlLog}
 }
@@ -332,6 +344,17 @@ func TestLiveVerificationRejectsPgrepFailure(t *testing.T) {
 	output, err := fixture.run(t, strings.Repeat("y\n", 7), "AGENTCTL_TEST_PGREP_CODE=2")
 	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (pgrep exited 2)") {
 		t.Fatalf("pgrep failure was not rejected: err=%v\n%s", err, output)
+	}
+}
+
+func TestLiveVerificationWaitsForTmuxAttachClientToExit(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 7), "AGENTCTL_TEST_PGREP_CODES=0,1")
+	if err != nil {
+		t.Fatalf("transient tmux survivor was not given time to exit: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "TEARDOWN PASS (no relverify tmux process remains)") {
+		t.Fatalf("output missing teardown pass after transient survivor:\n%s", output)
 	}
 }
 
