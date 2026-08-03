@@ -114,6 +114,8 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   for pid in $LOAD_PIDS; do
     kill "$pid" >/dev/null 2>&1 || true

@@ -120,4 +120,4 @@ echo "'"
 
 echo
 echo "== cleanup =="
-echo done
+echo 'done'
