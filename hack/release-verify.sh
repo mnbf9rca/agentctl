@@ -60,11 +60,23 @@ render_results() {
   date_only=${date_utc%%T*}
 
   printf '### %s\n\n' "$date_only"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- agentctl: `%s`\n' "$agentctl_version"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- tmux: `%s`\n' "$tmux_version"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- Claude Code: `%s`\n' "$claude_version"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- codex-cli: `%s`\n' "$codex_version"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- Mode: `%s`; harness: `%s`\n' "$mode" "$harness"
+  # Markdown backticks are literal; command substitution deliberately suppressed.
+  # shellcheck disable=SC2016
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
   printf '\n```text\n'
   cat "$results"
@@ -191,7 +203,7 @@ printf 'codex:    %s\n' "$CODEX_VERSION"
 # ---------------------------------------------------------------------------
 
 # Each probe's final marker line, read from its own source (hack/probe-*.sh):
-#   probe-1-argv.sh:      final `echo done` after `echo "== cleanup =="`
+#   probe-1-argv.sh:      final `echo 'done'` after `echo "== cleanup =="`
 #   probe-2-targeting.sh: final `echo cleanup-done`
 #   probe-3-ids.sh:       final `echo cleanup-done`
 #   probe-4-attach.sh:    has no "done"-style marker; its last statement is

@@ -25,6 +25,8 @@ echo -n "show-options -qv -t \$SESSION_ID @agentctl_managed: '"
 printf '%s' "$(tmux_cmd show-options -qv -t "$SESSION_ID" @agentctl_managed)"
 echo "'"
 echo -n "decoy 'alphabet' contaminated? managed='"
+# Literal tmux ID; expansion deliberately suppressed.
+# shellcheck disable=SC2016
 printf '%s' "$(tmux_cmd show-options -qv -t '$1' @agentctl_managed 2>&1)"
 echo "'"
 echo "-- proof bare-name is unsafe here: set-option -t alpha with alpha+alphabet present --"
