@@ -12,15 +12,16 @@ Usage:
   hack/release-verify.sh --render-results VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --process-check VERSIONS_FILE ARTIFACT_DIR
 
-Runs preflight, the four hack/probe-*.sh contract probes, then
-hack/verify-injection.sh in the foreground (verify mode, or measure mode
-with --measure), followed by cleanup checks, a pane-process-name check
-(verify mode only), and results rendering.
+Runs preflight and the four hack/probe-*.sh contract probes. By default it
+then guides a live verification through ./bin/agentctl launch, attach, clear,
+compact, kill, and status. With --measure it runs hack/verify-injection.sh in
+measure mode. Both paths finish with automated cleanup checks and results
+rendering.
 
 --render-results prints a results-history markdown block to stdout, given
 a VERSIONS_FILE (agentctl_version=/tmux_version=/claude_version=/
-codex_version= lines) and an ARTIFACT_DIR containing metadata.txt and
-results.tsv as written by hack/verify-injection.sh. No append; testable.
+codex_version= lines) and an ARTIFACT_DIR containing metadata.txt plus,
+for measure mode, results.tsv. No append; testable.
 
 --process-check prints PROCESS CHECK PASS/FAIL and exits 0/1: every "verify"
 row in ARTIFACT_DIR/results.tsv must be PASS and its process= value must
@@ -37,6 +38,30 @@ die() {
 field() {
   # field KEY FILE — print the value of the first "KEY=..." line in FILE.
   sed -n "s/^$1=//p" "$2" | sed -n '1p'
+}
+
+ASK_ANSWER=''
+ask() {
+  local question=$1
+  local answer
+  while true; do
+    answer=''
+    if ! IFS= read -r -p "$question [y/n]: " answer; then
+      printf 'input closed — answer y or n\n' >&2
+      return 1
+    fi
+    case "$answer" in
+      y|n)
+        ASK_ANSWER=$answer
+        printf 'recorded: %s\n' "$answer"
+        [ "$answer" = y ]
+        return
+        ;;
+      *)
+        printf "unrecognised: '%s' — answer y or n\n" "$answer"
+        ;;
+    esac
+  done
 }
 
 render_results() {
@@ -238,7 +263,7 @@ for probe in "$TOP"/hack/probe-*.sh; do
   probe_name=$(basename "$probe")
   marker=$(probe_marker "$probe_name")
   echo "-- $probe_name --"
-  if ! probe_out=$(bash "$probe"); then
+  if ! probe_out=$(bash "$probe" </dev/null); then
     echo "PROBES FAIL ($probe_name)"
     exit 1
   fi
@@ -260,89 +285,224 @@ fi
 echo 'PROBES PASS'
 
 # ---------------------------------------------------------------------------
-# 3. Injection verification (interactive core, unchanged)
+# 3. Interactive verification
 # ---------------------------------------------------------------------------
 
-echo
-echo '== Injection verification =='
-echo 'hack/verify-injection.sh prints its own ATTACH: line below. Its session'
-echo 'does not exist yet at that point — wait for the first "Press Enter only'
-echo 'after its TUI is fully ready" prompt, THEN run that line from Window 2.'
-
-VERIFY_MODE=verify
-[ "$MEASURE" -eq 1 ] && VERIFY_MODE=measure
-
-set +e
-bash hack/verify-injection.sh "$VERIFY_MODE" --harness both --output "$EVIDENCE_DIR/verify-injection"
-VERIFY_STATUS=$?
-set -e
-
-ARTIFACT_DIR="$EVIDENCE_DIR/verify-injection"
-
-# ---------------------------------------------------------------------------
-# 4. Cleanup checks (automated) — always run, even when the verifier failed:
-#    a failed verifier must never skip the throwaway-server/load-pid checks.
-# ---------------------------------------------------------------------------
-
-echo
-echo '== Cleanup checks =='
-CLEANUP_STATUS=0
-if pgrep -fl '[t]mux.*agentctl-(probe|injection)-' >/dev/null 2>&1; then
-  echo 'CLEANUP FAIL (throwaway tmux server still running)'
-  CLEANUP_STATUS=1
-fi
-
-LOAD_PIDS=''
-metadata_file="$ARTIFACT_DIR/metadata.txt"
-if [ -r "$metadata_file" ]; then
-  LOAD_PIDS=$(field load_pids "$metadata_file")
-fi
-
-if [ -n "$LOAD_PIDS" ]; then
-  yes_pids=$(pgrep -fl '[y]es' | awk '{print $1}')
-  for pid in $LOAD_PIDS; do
-    case " $yes_pids " in
-      *" $pid "*)
-        echo "CLEANUP FAIL (load pid $pid from metadata.txt still running)"
-        CLEANUP_STATUS=1
-        ;;
-    esac
-  done
-fi
-
-if [ "$CLEANUP_STATUS" -eq 0 ]; then
-  echo 'CLEANUP PASS'
-fi
-
-# Both facts are always reported, regardless of which (if either) failed —
-# a failing cleanup check must not hide a failing verifier, or vice versa.
-echo
-if [ "$VERIFY_STATUS" -eq 0 ]; then
-  echo 'VERIFIER RESULT: PASS'
-else
-  echo "VERIFIER RESULT: FAIL (hack/verify-injection.sh $VERIFY_MODE exited $VERIFY_STATUS)"
-fi
-if [ "$CLEANUP_STATUS" -eq 0 ]; then
-  echo 'CLEANUP RESULT: PASS'
-else
-  echo 'CLEANUP RESULT: FAIL'
-fi
-
-if [ "$VERIFY_STATUS" -ne 0 ] || [ "$CLEANUP_STATUS" -ne 0 ]; then
-  die "release verification failed (verifier=$VERIFY_STATUS, cleanup=$CLEANUP_STATUS)"
-fi
-
-# ---------------------------------------------------------------------------
-# 4b. Pane-process-name check (automated, verify mode only) — the mechanical
-#     replacement for the old checklist's "confirm the row records PASS and
-#     the expected pane process name" step (a human-eyeballed text compare).
-# ---------------------------------------------------------------------------
-
-if [ "$VERIFY_MODE" = verify ]; then
+if [ "$MEASURE" -eq 1 ]; then
   echo
-  echo '== Process check =='
-  claude_token=$(claude_version_token "$VERSIONS_FILE")
-  process_check "$ARTIFACT_DIR/results.tsv" "$claude_token" || die 'process check failed'
+  echo '== Injection measurement =='
+
+  set +e
+  bash hack/verify-injection.sh measure --harness both --output "$EVIDENCE_DIR/verify-injection"
+  VERIFY_STATUS=$?
+  set -e
+
+  ARTIFACT_DIR="$EVIDENCE_DIR/verify-injection"
+
+  # Cleanup checks always run, even when the measurement rig failed: a failed
+  # measurement must never skip the throwaway-server/load-pid checks.
+  echo
+  echo '== Cleanup checks =='
+  CLEANUP_STATUS=0
+  if pgrep -fl '[t]mux.*agentctl-(probe|injection)-' >/dev/null 2>&1; then
+    echo 'CLEANUP FAIL (throwaway tmux server still running)'
+    CLEANUP_STATUS=1
+  fi
+
+  LOAD_PIDS=''
+  metadata_file="$ARTIFACT_DIR/metadata.txt"
+  if [ -r "$metadata_file" ]; then
+    LOAD_PIDS=$(field load_pids "$metadata_file")
+  fi
+
+  if [ -n "$LOAD_PIDS" ]; then
+    yes_pids=$(pgrep -fl '[y]es' | awk '{print $1}')
+    for pid in $LOAD_PIDS; do
+      case " $yes_pids " in
+        *" $pid "*)
+          echo "CLEANUP FAIL (load pid $pid from metadata.txt still running)"
+          CLEANUP_STATUS=1
+          ;;
+      esac
+    done
+  fi
+
+  if [ "$CLEANUP_STATUS" -eq 0 ]; then
+    echo 'CLEANUP PASS'
+  fi
+
+  echo
+  if [ "$VERIFY_STATUS" -eq 0 ]; then
+    echo 'MEASUREMENT RESULT: PASS'
+  else
+    echo "MEASUREMENT RESULT: FAIL (hack/verify-injection.sh measure exited $VERIFY_STATUS)"
+  fi
+  if [ "$CLEANUP_STATUS" -eq 0 ]; then
+    echo 'CLEANUP RESULT: PASS'
+  else
+    echo 'CLEANUP RESULT: FAIL'
+  fi
+
+  if [ "$VERIFY_STATUS" -ne 0 ] || [ "$CLEANUP_STATUS" -ne 0 ]; then
+    die "release measurement failed (verifier=$VERIFY_STATUS, cleanup=$CLEANUP_STATUS)"
+  fi
+else
+  echo
+  echo '== Live product verification =='
+
+  ARTIFACT_DIR="$EVIDENCE_DIR/verify-live"
+  mkdir "$ARTIFACT_DIR"
+  LIVE_SESSION=relverify
+  LIVE_STATUS=0
+  ATTACH_ATTESTATION=''
+  CLAUDE_CLEAR_ATTESTATION=''
+  CODEX_CLEAR_ATTESTATION=''
+  COMPACT_ATTESTATION=''
+  TEARDOWN_CHECK=FAIL
+
+  # Keep teardown armed across every command and attestation. The explicit
+  # teardown below disarms this only after kill and both absence checks run.
+  trap './bin/agentctl kill --session relverify >/dev/null 2>&1 || true' EXIT
+
+  echo 'Running:'
+  echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex'
+  if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex; then
+    echo 'LIVE VERIFY FAIL (launch failed)'
+    LIVE_STATUS=1
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo
+    echo 'Attach from Window 2 with:'
+    echo '  ./bin/agentctl attach --session relverify'
+    if ask 'Is Window 2 attached and showing the claude and codex tabs?'; then
+      ATTACH_ATTESTATION=$ASK_ANSWER
+    else
+      ATTACH_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo
+    echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
+    if ask 'Is the claude junk ready for agentctl clear?'; then
+      echo 'Running:'
+      echo '  ./bin/agentctl clear --session relverify a'
+      if ./bin/agentctl clear --session "$LIVE_SESSION" a; then
+        echo 'Claude clear delivery result printed above.'
+        if ask 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+          CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
+        else
+          CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
+          LIVE_STATUS=1
+        fi
+      else
+        echo 'LIVE VERIFY FAIL (claude clear delivery failed)'
+        LIVE_STATUS=1
+      fi
+    else
+      CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo
+    echo 'In the codex tab, type junk into the input box; do NOT press Enter.'
+    if ask 'Is the codex junk ready for agentctl clear?'; then
+      echo 'Running:'
+      echo '  ./bin/agentctl clear --session relverify b'
+      if ./bin/agentctl clear --session "$LIVE_SESSION" b; then
+        echo 'Codex clear delivery result printed above.'
+        if ask 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+          CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
+        else
+          CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
+          LIVE_STATUS=1
+        fi
+      else
+        echo 'LIVE VERIFY FAIL (codex clear delivery failed)'
+        LIVE_STATUS=1
+      fi
+    else
+      CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo
+    echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
+    if ask 'Is the claude junk ready for the compact spot check?'; then
+      echo 'Running:'
+      echo '  ./bin/agentctl compact --session relverify a'
+      if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
+        echo 'Claude compact delivery result printed above.'
+        if ask 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
+          COMPACT_ATTESTATION=$ASK_ANSWER
+        else
+          COMPACT_ATTESTATION=$ASK_ANSWER
+          LIVE_STATUS=1
+        fi
+      else
+        echo 'LIVE VERIFY FAIL (claude compact delivery failed)'
+        LIVE_STATUS=1
+      fi
+    else
+      COMPACT_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
+  echo
+  echo '== Automated teardown =='
+  echo 'Running:'
+  echo '  ./bin/agentctl kill --session relverify'
+  if ! ./bin/agentctl kill --session "$LIVE_SESSION"; then
+    echo 'TEARDOWN FAIL (kill failed)'
+    LIVE_STATUS=1
+  fi
+
+  if ./bin/agentctl status --session "$LIVE_SESSION" >/dev/null 2>&1; then
+    echo 'TEARDOWN FAIL (agentctl status still finds relverify)'
+    LIVE_STATUS=1
+  else
+    echo 'TEARDOWN PASS (agentctl status no longer finds relverify)'
+  fi
+
+  if surviving_tmux=$(pgrep -fl '[t]mux.*relverify'); then
+    printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
+    LIVE_STATUS=1
+  else
+    echo 'TEARDOWN PASS (no relverify tmux process remains)'
+  fi
+
+  trap - EXIT
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    TEARDOWN_CHECK=PASS
+  fi
+
+  {
+    printf 'date_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'mode=verify-live\n'
+    printf 'harness=both\n'
+    printf 'probes=all four completed, no surviving throwaway server\n'
+    printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
+    printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
+    printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"
+    printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
+    printf 'teardown_check=%s\n' "$TEARDOWN_CHECK"
+  } >"$ARTIFACT_DIR/metadata.txt"
+
+  # The live clear/compact commands traverse agentctl's fail-closed
+  # @agentctl_process exact-match validation before delivering a literal
+  # payload and Enter. That checks pane identity on every delivery, so the
+  # results.tsv process_check remains rig-artifact tooling, not a weaker
+  # duplicate in the default live path.
+  if [ "$LIVE_STATUS" -ne 0 ]; then
+    die 'live release verification failed; teardown attempted'
+  fi
 fi
 
 # ---------------------------------------------------------------------------
