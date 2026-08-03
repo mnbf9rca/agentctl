@@ -19,6 +19,28 @@ die() {
   exit 2
 }
 
+ask() {
+  local question=$1
+  local answer
+  while true; do
+    answer=''
+    if ! IFS= read -r -p "$question [y/n]: " answer; then
+      printf 'input closed — answer y or n\n' >&2
+      return 1
+    fi
+    case "$answer" in
+      y|n)
+        printf 'recorded: %s\n' "$answer"
+        [ "$answer" = y ]
+        return
+        ;;
+      *)
+        printf "unrecognised: '%s' — answer y or n\n" "$answer"
+        ;;
+    esac
+  done
+}
+
 MODE=''
 HARNESS=both
 TRIALS=10
@@ -28,7 +50,8 @@ OUTPUT_EXPLICIT=0
 CAPTURE_PRE_ENTER=0
 SOCKET="agentctl-injection-$$"
 SESSION=agentctl-injection
-printf 'ATTACH: tmux -L %s attach -t %s\n' "$SOCKET" "$SESSION"
+printf 'ATTACH:\n'
+printf 'tmux -L %s attach -t %s\n' "$SOCKET" "$SESSION"
 SESSION_ID=''
 CLAUDE_PANE=''
 CODEX_PANE=''
@@ -209,8 +232,7 @@ verify_harness() {
   pane=$2
 
   printf '\nWaiting for %s in pane %s.\n' "$harness" "$pane"
-  printf 'Press Enter only after its TUI is fully ready: '
-  IFS= read -r _ready
+  ask "Is the $harness TUI fully ready?" || return 1
 
   tmux_cmd send-keys -t "$pane" -l -- 'agentctl-verification-junk'
   sleep_ms 500
@@ -238,36 +260,24 @@ verify_harness() {
     "$OUTPUT/${harness}-cleared.txt" \
     "$OUTPUT/${harness}-popup.txt" \
     "$OUTPUT/${harness}-reset.txt"
-  printf 'Did junk appear, C-u clear it, exact /clear match, and the conversation reset? [y/N] '
-  IFS= read -r answer
-  case "$answer" in
-    y|Y)
-      printf 'verify\t%s\t1000\t1\t0\tPASS\tprocess=%s; operator-attested\n' "$harness" "$process" >>"$OUTPUT/results.tsv"
-      return 0
-      ;;
-    *)
-      printf 'verify\t%s\t1000\t1\t0\tFAIL\tprocess=%s; operator-rejected\n' "$harness" "$process" >>"$OUTPUT/results.tsv"
-      return 1
-      ;;
-  esac
+  if ask 'Did junk appear, C-u clear it, exact /clear match, and the conversation reset?'; then
+    printf 'verify\t%s\t1000\t1\t0\tPASS\tprocess=%s; operator-attested\n' "$harness" "$process" >>"$OUTPUT/results.tsv"
+    return 0
+  fi
+  printf 'verify\t%s\t1000\t1\t0\tFAIL\tprocess=%s; operator-rejected\n' "$harness" "$process" >>"$OUTPUT/results.tsv"
+  return 1
 }
 
 wait_for_harness() {
   harness=$1
   pane=$2
   printf '\nWaiting for %s in pane %s.\n' "$harness" "$pane"
-  printf 'Press Enter only after its TUI is fully ready: '
-  IFS= read -r _ready
+  ask "Is the $harness TUI fully ready?" || die "$harness was not ready"
 }
 
 start_load() {
   printf '\nWARNING: measure mode will saturate %s logical CPUs with /usr/bin/yes.\n' "$LOAD_WORKERS"
-  printf 'This may make the machine temporarily sluggish. Start the load? [y/N] '
-  IFS= read -r answer
-  case "$answer" in
-    y|Y) ;;
-    *) die 'CPU load was declined' ;;
-  esac
+  ask 'This may make the machine temporarily sluggish. Start the load?' || die 'CPU load was declined'
 
   printf 'uptime_pre_load=%s\n' "$(uptime)" >>"$OUTPUT/metadata.txt"
   worker=1
@@ -315,20 +325,14 @@ measure_candidate() {
   done
 
   printf 'Review %s/%s-measure-%sms-trial-*-{popup,reset}.txt\n' "$OUTPUT" "$harness" "$delay"
-  printf 'Did every trial show exact /clear selection and a completed reset? [y/N] '
-  IFS= read -r answer
-  case "$answer" in
-    y|Y)
-      printf 'measure\t%s\t%s\t%s\t%s\tPASS\tall paired trials operator-attested; capture_pre_enter=%s\n' \
-        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
-      return 0
-      ;;
-    *)
-      printf 'measure\t%s\t%s\t%s\t%s\tFAIL\tbatch rejected; descending search stopped; capture_pre_enter=%s\n' \
-        "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
-      return 1
-      ;;
-  esac
+  if ask 'Did every trial show exact /clear selection and a completed reset?'; then
+    printf 'measure\t%s\t%s\t%s\t%s\tPASS\tall paired trials operator-attested; capture_pre_enter=%s\n' \
+      "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
+    return 0
+  fi
+  printf 'measure\t%s\t%s\t%s\t%s\tFAIL\tbatch rejected; descending search stopped; capture_pre_enter=%s\n' \
+    "$harness" "$delay" "$TRIALS" "$LOAD_WORKERS" "$CAPTURE_PRE_ENTER" >>"$OUTPUT/results.tsv"
+  return 1
 }
 
 measure_harness() {
