@@ -92,7 +92,8 @@ type controlExecutor interface {
 
 type sessionAttacher interface {
 	CheckEnvironment() error
-	Execute(context.Context, tmuxx.Session) error
+	Execute(context.Context, tmuxx.Session, io.Writer) error
+	StillRunning(context.Context, tmuxx.Session) (bool, error)
 }
 
 func runWithRunner(
@@ -245,10 +246,10 @@ func runWithAllDependencies(
 		return exitOK
 	}
 	if command == "attach" {
-		if err := attacher.Execute(ctx, resolved); err != nil {
+		if err := attacher.Execute(ctx, resolved, stdout); err != nil {
 			return attachError(stderr, err)
 		}
-		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0)\n", resolved.Name)
+		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0); %s\n", resolved.Name, attachSessionState(ctx, attacher, resolved))
 		return exitOK
 	}
 	if command == "clear" || command == "compact" {
@@ -283,6 +284,22 @@ func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCo
 		return statusError(stderr, collectErr)
 	}
 	return exitOK
+}
+
+// attachSessionState renders what agentctl observed about the session after
+// control mode ended. The probe is advisory and never changes the exit code:
+// the attachment itself completed, and a failed probe is reported as an
+// unverified state rather than as an absence.
+func attachSessionState(ctx context.Context, attacher sessionAttacher, target tmuxx.Session) string {
+	present, err := attacher.StillRunning(ctx, target)
+	switch {
+	case err != nil:
+		return fmt.Sprintf("could not verify whether session %s is still running: %v", target.ID, err)
+	case present:
+		return fmt.Sprintf("session %s is still running; inspect it with: agentctl status --session %s", target.ID, target.Name)
+	default:
+		return fmt.Sprintf("session %s is no longer present", target.ID)
+	}
 }
 
 func attachError(stderr io.Writer, err error) int {

@@ -4,6 +4,7 @@ package attach
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
@@ -12,10 +13,12 @@ import (
 // LookupEnv is compatible with os.LookupEnv.
 type LookupEnv func(string) (string, bool)
 
-// Client is the tmux surface required to validate and attach a session.
+// Client is the tmux surface required to validate, attach, and afterwards
+// observe a session.
 type Client interface {
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
 	AttachSession(context.Context, tmuxx.SessionID) error
+	ListSessions(context.Context) ([]tmuxx.Session, error)
 }
 
 // EnvironmentError reports a local terminal environment where iTerm2 control
@@ -83,8 +86,10 @@ func (e Executor) CheckEnvironment() error {
 }
 
 // Execute requires the current managed/version markers, then attaches by the
-// resolved session ID.
-func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
+// resolved session ID. The notice is written to out only once the ownership
+// gate has passed and immediately before control mode starts, so it never
+// announces an attachment a refusal prevented.
+func (e Executor) Execute(ctx context.Context, target tmuxx.Session, out io.Writer) error {
 	managed, err := e.client.ShowSessionOption(ctx, target.ID, "@agentctl_managed")
 	if err != nil {
 		return tmuxx.ClassifyError(err)
@@ -101,8 +106,41 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
 		return &RefusalError{Session: target, Option: "@agentctl_version", Value: version}
 	}
 
+	writeNotice(out, target)
+
 	if err := e.client.AttachSession(ctx, target.ID); err != nil {
 		return tmuxx.ClassifyError(err)
 	}
 	return nil
+}
+
+// StillRunning reports whether the attached session is still present once
+// control mode has ended. It compares the resolved session ID, so a session
+// recreated under the same name is not reported as the one just attached. The
+// probe is advisory: its own failure is returned rather than rendered as an
+// absence, so the caller can state what it could not verify (§1.1).
+func (e Executor) StillRunning(ctx context.Context, target tmuxx.Session) (bool, error) {
+	sessions, err := e.client.ListSessions(ctx)
+	if err != nil {
+		return false, tmuxx.ClassifyError(err)
+	}
+	for _, candidate := range sessions {
+		if candidate.ID == target.ID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// writeNotice states what the keys in the iTerm2 command menu that follows do,
+// and which of them agentctl owns: none. Every claim here is about agentctl or
+// about a clean tmux detach; what actually became of the session is reported
+// from observation once control mode ends.
+func writeNotice(out io.Writer, target tmuxx.Session) {
+	if out == nil {
+		return
+	}
+	fmt.Fprintf(out, "agentctl: attaching session %q (%s) in iTerm2 tmux control mode; the command menu printed next comes from iTerm2, not from agentctl.\n", target.Name, target.ID)
+	fmt.Fprint(out, "agentctl: in that menu, esc detaches and leaves the fleet running; X (uppercase) force-quits iTerm2's tmux mode without a clean detach.\n")
+	fmt.Fprintf(out, "agentctl: agentctl never stops a fleet on detach; only agentctl kill --session %s does.\n", target.Name)
 }
