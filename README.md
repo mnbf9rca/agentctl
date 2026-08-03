@@ -241,7 +241,8 @@ agentctl: control-mode attachment to session "epic123" ended (tmux exit 0); coul
 ```
 
 That final probe is advisory: it never changes the exit code, and a probe failure is reported as an unverified state
-rather than as an absence.
+rather than as an absence. If the killed session was the last one, tmux takes its server down too, so the probe reports
+the unverified form with tmux's own reason instead of the `no longer present` form.
 
 An ownership-gate refusal gives the direct-tmux escape hatch. For session `epic123`, the exact forms are:
 
