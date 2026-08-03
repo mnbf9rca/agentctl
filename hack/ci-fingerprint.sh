@@ -87,7 +87,16 @@ fingerprint() {
   fi
 
   print_command "golangci-lint" golangci-lint golangci-lint version
-  print_first_line "goreleaser" goreleaser goreleaser --version
+  if command -v goreleaser >/dev/null 2>&1; then
+    local goreleaser_version
+    if goreleaser_version="$(goreleaser --version 2>/dev/null | awk '/^GitVersion:/ {print $2; exit}')"; then
+      printf 'goreleaser: %s\n' "${goreleaser_version:-unknown}"
+    else
+      printf '%s\n' "goreleaser: probe failed"
+    fi
+  else
+    printf '%s\n' "goreleaser: not installed"
+  fi
   print_first_line "brew" brew brew --version
 }
 

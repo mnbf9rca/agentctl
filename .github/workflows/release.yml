@@ -147,7 +147,8 @@ jobs:
     needs: release
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
-    permissions: {}
+    permissions:
+      contents: read
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
@@ -172,7 +173,8 @@ jobs:
     needs: [release, verify-install]
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Check out fingerprint script
         uses: actions/checkout@v7
