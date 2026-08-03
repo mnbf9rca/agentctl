@@ -272,6 +272,7 @@ func TestRelaunchRefusesDefectiveRoster(t *testing.T) {
 		{name: "absent", roster: "", message: "managed session has no @agentctl_roles roster"},
 		{name: "empty entry", roster: "planner,,reviewer", message: `managed session has invalid @agentctl_roles roster "planner,,reviewer"`},
 		{name: "trailing comma", roster: "planner,", message: `managed session has invalid @agentctl_roles roster "planner,"`},
+		{name: "duplicate role", roster: "planner,planner", message: `managed session has invalid @agentctl_roles roster "planner,planner": duplicate role "planner"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(
@@ -337,6 +338,10 @@ func TestRelaunchRefusesDefectiveFleetMetadata(t *testing.T) {
 		{
 			name: "roster order differs", roster: "planner,reviewer", fleetValue: "reviewer:codex:,planner:claude:", directory: "/repo",
 			message: `managed session "epic123" has @agentctl_fleet "reviewer:codex:,planner:claude:" whose roles do not match @agentctl_roles "planner,reviewer"`,
+		},
+		{
+			name: "duplicate role", roster: "planner,reviewer", fleetValue: "planner:claude:,planner:codex:", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude:,planner:codex:": entry 2 "planner:codex:" repeats role "planner"`,
 		},
 		{
 			name: "entry is not a triple", roster: "planner", fleetValue: "planner:claude", directory: "/repo",

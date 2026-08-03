@@ -72,12 +72,16 @@ func (e *SessionGateError) Error() string {
 
 // RosterError reports absent or structurally invalid role roster metadata.
 type RosterError struct {
-	Session tmuxx.Session
-	Roster  string
+	Session   tmuxx.Session
+	Roster    string
+	Duplicate string
 }
 
 func (e *RosterError) Error() string {
 	if e.Roster != "" {
+		if e.Duplicate != "" {
+			return fmt.Sprintf("managed session has invalid @agentctl_roles roster %q: duplicate role %q", e.Roster, e.Duplicate)
+		}
 		return fmt.Sprintf("managed session has invalid @agentctl_roles roster %q", e.Roster)
 	}
 	return "managed session has no @agentctl_roles roster"
@@ -498,10 +502,15 @@ func parseRoster(session tmuxx.Session, roster string) ([]string, error) {
 		return nil, &RosterError{Session: session}
 	}
 	roles := strings.Split(roster, ",")
+	seen := make(map[string]struct{}, len(roles))
 	for _, role := range roles {
 		if role == "" {
 			return nil, &RosterError{Session: session, Roster: roster}
 		}
+		if _, exists := seen[role]; exists {
+			return nil, &RosterError{Session: session, Roster: roster, Duplicate: role}
+		}
+		seen[role] = struct{}{}
 	}
 	return roles, nil
 }
@@ -511,6 +520,7 @@ func parseRoster(session tmuxx.Session, roster string) ([]string, error) {
 func decodeFleet(value string) ([]config.RoleConfig, error) {
 	entries := strings.Split(value, ",")
 	roles := make([]config.RoleConfig, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 	for index, entry := range entries {
 		fields := strings.SplitN(entry, ":", 3)
 		if len(fields) != 3 {
@@ -519,6 +529,10 @@ func decodeFleet(value string) ([]config.RoleConfig, error) {
 		if err := config.ValidateRoleName(fields[0]); err != nil {
 			return nil, fmt.Errorf("entry %d %q names invalid role %q", index+1, entry, fields[0])
 		}
+		if _, exists := seen[fields[0]]; exists {
+			return nil, fmt.Errorf("entry %d %q repeats role %q", index+1, entry, fields[0])
+		}
+		seen[fields[0]] = struct{}{}
 		harness, err := config.ParseHarness(fields[1])
 		if err != nil {
 			return nil, fmt.Errorf("entry %d %q names unknown harness %q", index+1, entry, fields[1])
