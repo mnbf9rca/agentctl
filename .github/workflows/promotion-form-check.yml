@@ -1,0 +1,34 @@
+name: Promotion PR form check
+
+# Runs only on pull requests targeting `release` (issue #93). The
+# `branches: [release]` filter means this workflow never even triggers for
+# PRs targeting `main` — zero noise on normal development (AC5).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promotion-form-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  promotion-form:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          # hack/next-version.sh needs full tag history to compute the next
+          # version.
+          fetch-depth: 0
+      - name: Write PR body to file
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+      - name: Check promotion PR form
+        run: ./hack/check-promotion-form.sh "$RUNNER_TEMP/pr-body.md"
