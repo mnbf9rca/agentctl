@@ -21,9 +21,18 @@ jobs:
         run: go test ./...
       - name: Vet
         run: go vet ./...
+      - name: Install shellcheck (pinned)
+        run: |
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz | tar -xJ
+          sudo mv shellcheck-v0.11.0/shellcheck /usr/local/bin/shellcheck
+          actual="$(shellcheck --version | awk '/^version:/ {print $2}')"
+          if [ "$actual" != "0.11.0" ]; then
+            echo "shellcheck is $actual; the hack/ directives were verified against 0.11.0." >&2
+            echo "Re-run shellcheck locally and review new findings before changing this pin." >&2
+            exit 1
+          fi
       - name: ShellCheck
         run: |
-          command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
           shellcheck hack/*.sh
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
