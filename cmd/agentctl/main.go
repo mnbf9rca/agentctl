@@ -138,10 +138,6 @@ func runWithControlDependencies(ctx context.Context, arguments []string, stdout,
 	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, controller, nil)
 }
 
-func runWithAttachDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, attacher sessionAttacher) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, launchDependencies{}, resolver, nil, nil, nil, attacher)
-}
-
 func runWith(arguments []string, stdout, stderr io.Writer, dependencies launchDependencies) int {
 	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies, nil, nil, nil, nil, nil)
 }
