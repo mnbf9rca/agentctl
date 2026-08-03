@@ -44,6 +44,7 @@ ASK_ANSWER=''
 ask() {
   local question=$1
   local answer
+  ASK_ANSWER=''
   while true; do
     answer=''
     if ! IFS= read -r -p "$question [y/n]: " answer; then
@@ -62,6 +63,32 @@ ask() {
         ;;
     esac
   done
+}
+
+STATUS_EXIT=0
+session_absent() {
+  local session_name=$1
+  local stdout_file=$2
+  local stderr_file=$3
+
+  if ./bin/agentctl status --session "$session_name" >"$stdout_file" 2>"$stderr_file"; then
+    STATUS_EXIT=0
+    return 1
+  else
+    STATUS_EXIT=$?
+  fi
+
+  case "$STATUS_EXIT" in
+    3)
+      grep -qF "session \"$session_name\" not found" "$stderr_file" || return 2
+      ;;
+    6)
+      grep -qF 'no server running' "$stderr_file" || return 2
+      ;;
+    *)
+      return 2
+      ;;
+  esac
 }
 
 render_results() {
@@ -359,17 +386,29 @@ else
   CODEX_CLEAR_ATTESTATION=''
   COMPACT_ATTESTATION=''
   TEARDOWN_CHECK=FAIL
+  STATUS_STDOUT="$ARTIFACT_DIR/status.stdout"
+  STATUS_STDERR="$ARTIFACT_DIR/status.stderr"
 
-  # Keep teardown armed across every command and attestation. The explicit
-  # teardown below disarms this only after kill and both absence checks run.
-  trap './bin/agentctl kill --session relverify >/dev/null 2>&1 || true' EXIT
+  if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
+    :
+  else
+    absence_status=$?
+    if [ "$absence_status" -eq 1 ]; then
+      die "session $LIVE_SESSION already exists; refusing to use or kill it"
+    fi
+    cat "$STATUS_STDERR" >&2
+    die "could not prove session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
+  fi
 
   echo 'Running:'
   echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex'
   if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex; then
-    echo 'LIVE VERIFY FAIL (launch failed)'
-    LIVE_STATUS=1
+    die 'live release verification launch failed'
   fi
+
+  # This run owns relverify only after launch succeeds. Keep teardown armed
+  # across every later command and attestation; explicit teardown disarms it.
+  trap './bin/agentctl kill --session relverify >/dev/null 2>&1 || true' EXIT
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
@@ -402,7 +441,6 @@ else
         LIVE_STATUS=1
       fi
     else
-      CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
     fi
   fi
@@ -426,7 +464,6 @@ else
         LIVE_STATUS=1
       fi
     else
-      CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
     fi
   fi
@@ -450,7 +487,6 @@ else
         LIVE_STATUS=1
       fi
     else
-      COMPACT_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
     fi
   fi
@@ -459,28 +495,49 @@ else
   echo '== Automated teardown =='
   echo 'Running:'
   echo '  ./bin/agentctl kill --session relverify'
+  TEARDOWN_STATUS=0
   if ! ./bin/agentctl kill --session "$LIVE_SESSION"; then
     echo 'TEARDOWN FAIL (kill failed)'
-    LIVE_STATUS=1
+    TEARDOWN_STATUS=1
   fi
 
-  if ./bin/agentctl status --session "$LIVE_SESSION" >/dev/null 2>&1; then
-    echo 'TEARDOWN FAIL (agentctl status still finds relverify)'
-    LIVE_STATUS=1
+  if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
+    echo 'TEARDOWN PASS (agentctl status proves relverify is absent)'
   else
-    echo 'TEARDOWN PASS (agentctl status no longer finds relverify)'
+    absence_status=$?
+    if [ "$absence_status" -eq 1 ]; then
+      echo 'TEARDOWN FAIL (agentctl status still finds relverify)'
+    else
+      printf 'TEARDOWN FAIL (agentctl status exited %s unexpectedly):\n' "$STATUS_EXIT"
+      cat "$STATUS_STDERR"
+    fi
+    TEARDOWN_STATUS=1
   fi
 
-  if surviving_tmux=$(pgrep -fl '[t]mux.*relverify'); then
-    printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
-    LIVE_STATUS=1
+  if surviving_tmux=$(pgrep -fl '[t]mux.*relverify' 2>&1); then
+    pgrep_status=0
   else
-    echo 'TEARDOWN PASS (no relverify tmux process remains)'
+    pgrep_status=$?
   fi
+  case "$pgrep_status" in
+    0)
+      printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
+      TEARDOWN_STATUS=1
+      ;;
+    1)
+      echo 'TEARDOWN PASS (no relverify tmux process remains)'
+      ;;
+    *)
+      printf 'TEARDOWN FAIL (pgrep exited %s):\n%s\n' "$pgrep_status" "$surviving_tmux"
+      TEARDOWN_STATUS=1
+      ;;
+  esac
 
   trap - EXIT
-  if [ "$LIVE_STATUS" -eq 0 ]; then
+  if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
+  else
+    LIVE_STATUS=1
   fi
 
   {
@@ -512,24 +569,39 @@ fi
 echo
 echo '== Results =='
 NOTES_FILE="$TOP/docs/release-verification-notes.md"
-BLOCK=$(render_results "$VERSIONS_FILE" "$ARTIFACT_DIR")
+BLOCK_FILE=$(mktemp) || die 'could not create evidence block file'
+if ! render_results "$VERSIONS_FILE" "$ARTIFACT_DIR" >"$BLOCK_FILE"; then
+  rm -f "$BLOCK_FILE"
+  die 'could not render evidence block'
+fi
 
-printf '%s\n' "$BLOCK"
+cat "$BLOCK_FILE"
 
 marker='## Results history'
 if ! grep -qF "$marker" "$NOTES_FILE"; then
+  rm -f "$BLOCK_FILE"
   die "marker not found in $NOTES_FILE: $marker"
 fi
 
-TMP_NOTES=$(mktemp) || die 'could not create temp file'
-awk -v marker="$marker" -v block="$BLOCK" '
+TMP_NOTES=$(mktemp) || {
+  rm -f "$BLOCK_FILE"
+  die 'could not create temp file'
+}
+if ! awk -v marker="$marker" -v block_file="$BLOCK_FILE" '
   { print }
   index($0, marker) == 1 && !done {
     print ""
-    print block
+    while ((getline block_line < block_file) > 0) {
+      print block_line
+    }
+    close(block_file)
     done = 1
   }
-' "$NOTES_FILE" >"$TMP_NOTES"
+' "$NOTES_FILE" >"$TMP_NOTES"; then
+  rm -f "$BLOCK_FILE" "$TMP_NOTES"
+  die 'could not append evidence block'
+fi
 mv "$TMP_NOTES" "$NOTES_FILE"
+rm -f "$BLOCK_FILE"
 
 echo 'ALL VERIFIED — evidence appended; commit docs/release-verification-notes.md'
