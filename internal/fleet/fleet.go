@@ -181,7 +181,7 @@ func (l Launcher) newSession(ctx context.Context, session string, role config.Ro
 	if err != nil {
 		return tmuxx.CreatedSession{}, err
 	}
-	return l.tmux.NewSession(ctx, session, role.Name, directory, command)
+	return l.tmux.NewSession(ctx, session, role.Name, directory, command, identityEnvironment(session, role.Name))
 }
 
 func (l Launcher) newWindow(ctx context.Context, sessionID tmuxx.SessionID, session string, role config.RoleConfig, directory string) (tmuxx.CreatedWindow, error) {
@@ -189,7 +189,23 @@ func (l Launcher) newWindow(ctx context.Context, sessionID tmuxx.SessionID, sess
 	if err != nil {
 		return tmuxx.CreatedWindow{}, err
 	}
-	return l.tmux.NewWindow(ctx, sessionID, role.Name, directory, command)
+	return l.tmux.NewWindow(ctx, sessionID, role.Name, directory, command, identityEnvironment(session, role.Name))
+}
+
+// identityEnvironment names the fleet and role a window belongs to, so an agent
+// (or human) in that pane can read its own identity. Session and role have
+// already passed config validation by the time a window is created.
+//
+// The variables are informational. agentctl never reads them back when deciding
+// what to control, kill, or report on: that stays with the @agentctl_* tmux
+// options and the fail-closed target chain, because a same-user process can
+// forge either (see SECURITY.md).
+func identityEnvironment(session, role string) []tmuxx.EnvVar {
+	return []tmuxx.EnvVar{
+		{Name: "AGENTCTL_SESSION", Value: session},
+		{Name: "AGENTCTL_ROLE", Value: role},
+		{Name: "AGENTCTL_MANAGED", Value: "1"},
+	}
 }
 
 func agentCommand(session string, role config.RoleConfig) (string, error) {

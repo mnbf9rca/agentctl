@@ -308,6 +308,34 @@ future truncated payload could still select another harness command. Therefore:
 
 Read [SECURITY.md](SECURITY.md) for the threat model, accepted residuals, and measured evidence.
 
+## Agent identity in launched windows
+
+Every window `agentctl launch` creates is given three environment variables, passed to tmux as separate `-e NAME=value`
+arguments when the window is created:
+
+| Variable | Value |
+| --- | --- |
+| `AGENTCTL_SESSION` | the validated session name the window belongs to |
+| `AGENTCTL_ROLE` | the validated role name of that window |
+| `AGENTCTL_MANAGED` | always `1` |
+
+They exist so that whoever is in the pane — an agent or a human — can read its own identity:
+
+```text
+printenv AGENTCTL_SESSION AGENTCTL_ROLE AGENTCTL_MANAGED
+```
+
+**Guidance for agents: check `AGENTCTL_*`, `AM_*`, and `TMUX` before reasoning about fleet topology** — the fleet you
+are looking at may be the one you are running inside, and killing or reusing it would end your own session.
+
+These variables are advisory. They are set only on windows agentctl creates, so a session started before this feature,
+or one an operator built by hand, will not carry them; existing sessions are never retrofitted. Any same-user process
+can export the same names, so their presence is a hint, not proof. agentctl itself never reads them back when deciding
+what to control, kill, or report on: that decision rests on the `@agentctl_*` tmux options and the fail-closed target
+chain described in [SECURITY.md](SECURITY.md). The one place `AGENTCTL_SESSION` does matter to agentctl is session
+selection above, so an `agentctl status`, `clear`, `compact`, or `kill` run inside a launched pane defaults to that
+pane's own fleet; the resulting target is still validated the same way.
+
 ## Troubleshooting tmux environment staleness
 
 A tmux server keeps an environment that may be older than the shell running agentctl. Credentials or configuration

@@ -124,6 +124,49 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	}
 }
 
+func TestIntegrationLaunchExportsIdentityEnvironmentIntoEveryPane(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-identity-env",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want silent success", result)
+	}
+
+	// planner comes from the new-session path and coder from new-window, so
+	// both creation paths are observed from inside a real pane.
+	want := map[string]stubEnvironment{
+		"planner": {Session: "integration-identity-env", Role: "planner", Managed: "1"},
+		"coder":   {Session: "integration-identity-env", Role: "coder", Managed: "1"},
+	}
+	invocations := fixture.waitStubInvocations(2)
+	if len(invocations) != 2 {
+		t.Fatalf("stub invocations = %#v, want two", invocations)
+	}
+	seen := make(map[string]bool, len(want))
+	for _, invocation := range invocations {
+		wantEnvironment, ok := want[invocation.Role]
+		if !ok {
+			t.Fatalf("unexpected stub invocation %#v", invocation)
+		}
+		if seen[invocation.Role] {
+			t.Fatalf("duplicate stub invocation for role %q: %#v", invocation.Role, invocations)
+		}
+		seen[invocation.Role] = true
+		if invocation.Environment != wantEnvironment {
+			t.Errorf("role %q pane environment = %#v, want %#v", invocation.Role, invocation.Environment, wantEnvironment)
+		}
+	}
+	for role := range want {
+		if !seen[role] {
+			t.Errorf("missing stub invocation for role %q", role)
+		}
+	}
+}
+
 func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	fixture.createSentinelSession("integration-existing")
