@@ -4,7 +4,12 @@
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
-file_version="$(tr -d '[:space:]' < "$root/VERSION")"
+version_file="$root/VERSION"
+if [[ ! -f "$version_file" ]]; then
+  echo "next-version: no VERSION file at $version_file" >&2
+  exit 1
+fi
+file_version="$(tr -d '[:space:]' < "$version_file")"
 if ! [[ "$file_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "next-version: VERSION file is not X.Y.Z: '$file_version'" >&2
   exit 1
