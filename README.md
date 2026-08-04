@@ -225,13 +225,18 @@ immediately before control mode starts. For session `epic123` with three windows
 agentctl: attaching session "epic123" (3 windows) in iTerm2…
 agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.
 agentctl:   esc  detach: the tabs close and the fleet keeps running.
-agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.
+agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not
+agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.
 agentctl: detaching never stops the fleet; to stop it: agentctl kill --session epic123
 ```
 
 If the window-count read fails, the first line omits `(3 windows)` and the attach continues; agentctl never guesses a
 count. The `Command Menu` that follows (`esc`, `X`, `L`, `C`) belongs to iTerm2's tmux integration. agentctl neither
 prints it nor controls its keys, so their case sensitivity is iTerm2's behaviour, not agentctl's: press uppercase `X`.
+
+If `X` wedges the `tmux -CC` client, killing the session or sending that client `SIGTERM` does not release the
+terminal. Terminate the client with `kill -9 PID`; agentctl then reports `agentctl: tmux attach session: signal: killed`
+and exits. See [design spec §3.4 (PR #107)](https://github.com/mnbf9rca/agentctl/pull/107) for the dated verified contract.
 
 When control mode ends, `attach` lists sessions once more and reports the state it observed, by session ID, so a
 session recreated under the same name is not reported as the one you attached. Exit code 0 in all three cases — the

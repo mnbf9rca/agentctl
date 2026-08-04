@@ -124,7 +124,8 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 	want := "agentctl: attaching session \"fleet\" (3 windows) in iTerm2…\n" +
 		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
 		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-		"agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n" +
+		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
 		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
 	if notice.String() != want {
 		t.Fatalf("notice = %q, want %q", notice.String(), want)
@@ -159,7 +160,8 @@ func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
 	want := "agentctl: attaching session \"fleet\" in iTerm2…\n" +
 		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
 		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-		"agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n" +
+		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
 		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
 	if narration.String() != want {
 		t.Fatalf("narration = %q, want %q", narration.String(), want)

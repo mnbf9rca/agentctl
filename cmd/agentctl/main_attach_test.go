@@ -189,13 +189,15 @@ func TestRunAttachRefusesEveryFailedOwnershipGateWithEscapeHatch(t *testing.T) {
 const attachNotice = "agentctl: attaching session \"fleet\" (3 windows) in iTerm2…\n" +
 	"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
 	"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-	"agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n" +
+	"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+	"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
 	"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
 
 const attachNoticeWithoutCount = "agentctl: attaching session \"fleet\" in iTerm2…\n" +
 	"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
 	"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-	"agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n" +
+	"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+	"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
 	"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
 
 const attachWindows = "@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n" +

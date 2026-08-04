@@ -155,6 +155,7 @@ func writeNarration(out io.Writer, target tmuxx.Session, windowCount int) {
 	}
 	fmt.Fprint(out, "agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n")
 	fmt.Fprint(out, "agentctl:   esc  detach: the tabs close and the fleet keeps running.\n")
-	fmt.Fprint(out, "agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n")
+	fmt.Fprint(out, "agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n")
+	fmt.Fprint(out, "agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n")
 	fmt.Fprintf(out, "agentctl: detaching never stops the fleet; to stop it: agentctl kill --session %s\n", target.Name)
 }
