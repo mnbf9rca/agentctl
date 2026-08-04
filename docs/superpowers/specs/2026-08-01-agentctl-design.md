@@ -120,6 +120,19 @@ agentctl kill    [--session S]
 
 Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected.
 
+**`status` never narrows silently.** Bare `agentctl status` reports **every** session on the tmux server (§6.3.1).
+Ambient context — `AGENTCTL_SESSION`, or the tmux session the caller happens to be sitting in — does not select a
+target for `status` and never reduces its output to one fleet; it may only *mark* which session the caller is in.
+Only an explicit `--session S` narrows the report to one session, because only that is the operator saying which fleet
+they mean.
+
+There is no `--all` flag. It existed to make the listing reachable from inside tmux, where the current-tmux source
+always resolved; a bare `status` that always lists makes it redundant, and a flag that changes nothing invites the
+reader to believe it changes something.
+
+`clear`, `compact`, `kill` and `attach` are unaffected: each acts on exactly one target, so each still resolves one
+through the full §4.1 chain.
+
 ### 4.1 Session resolution
 
 Precedence for non-launch commands: explicit `--session` > `AGENTCTL_SESSION` > the current tmux session. `launch`
@@ -148,6 +161,14 @@ matrix — every source, every form it can take, and the resulting code:
 Session-name candidates are validated by `config.ValidateSessionName` — one validator, so the rule cannot drift between
 sources. `TMUX_PANE` is the exception in *what* is checked, not in how it is classified: it carries a pane ID rather
 than a session name, so it is validated as one, and an invalid value is still an invalid source the user set.
+
+**`status` does not consult the ambient sources at all.** The matrix above governs `clear`, `compact`, `kill` and
+`attach` — commands that must end up holding exactly one target. `status` describes rather than acts, so it takes only
+an explicit `--session`; `AGENTCTL_SESSION` and the current tmux session neither select for it nor fail it. When no
+`--session` is given it reports the listing (§6.3.1), whatever the environment says.
+
+The current-session **marker** in that listing is a separate, advisory read and is specified in §6.3.1. It is not a
+resolution: nothing is targeted by it, so nothing is at risk if it cannot be determined.
 
 **Exit 6 requires that a tmux command actually ran** (§1.1). Every invalid-source case above is decided before any command is
 issued, so none of them may report a tmux failure. Exit 6 is reserved for a `Runner` or parse failure on row 1 or row
@@ -240,7 +261,8 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 ### 6.3 status
 
 `status` reports objective facts and refuses as little as possible. It is the one command that renders an unmanaged
-session rather than rejecting it (§12.6).
+session rather than rejecting it (§12.6). This section governs one named session; §6.3.1 covers the listing, which
+applies every rule here to each session it reports.
 
 **Reads are an allowlist.** Only §13.2 rows 6 (read session option), 8 (list windows), 9 (list panes) and 14 (process
 identity) may be issued. Row 7 (read window option) is permitted by the table but unused, because row 8's format string
@@ -307,6 +329,133 @@ observed pane ID when trivially known, else `''`, process `''`.
 Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`,
 not `dead` — documented in `--help` and the README. JSON uses the brief's versioned schema (`"schema": 1`); `state` is a
 string field, so the states added here are not a schema change (§13.5). Human output is the brief's table.
+
+### 6.3.1 status listing (bare `status`)
+
+`status` renders a **listing** whenever no explicit `--session` was supplied. That is the whole rule: there is no
+environment in which bare `status` describes one fleet and hides the rest. Everything in §6.3 continues to govern each
+session in the listing; this section adds only what is true of the set.
+
+**Why the ambient sources do not narrow it.** `AGENTCTL_SESSION` is exported into every window `launch` creates, and
+the current-tmux source resolves for anyone sitting in a session, so a `status` that honoured them would answer a
+different question depending on where it was run — and would answer it silently. An operator or agent inside one fleet
+would be shown that fleet and given no indication that others existed, which is the completeness lie this section
+already refuses for unmanaged and defective sessions, arriving by a different route. The caller's own session is a fact
+worth *showing* (below), never a reason to withhold the others.
+
+**Discovery is row 1.** Sessions are enumerated with §13.2 row 1 and its canonical format string. The listing's read
+allowlist is therefore §6.3's rows 6, 8, 9 and 14 — unchanged argv, once per session — plus row 1 for discovery and row
+12 for the marker below, and nothing else. Naming the whole set here means a future read has to argue with this
+paragraph rather than slip in. The listing is the single-session command applied N times: no second discovery,
+validation, or state path exists, so the two modes cannot drift.
+
+**The caller's session is marked, not selected.** When the caller is inside tmux, `status` resolves the current session
+with §13.2 row 12 and marks that session in the listing. The marker is derived **only** from row 12, never from
+`AGENTCTL_SESSION`: row 12 observes where the caller actually is, while the environment variable is a value any process
+can export and one a moved window can carry from a session it no longer belongs to (§6.5). Marking from the variable
+would assert "you are here" on evidence that does not establish it.
+
+The marker is advisory in the strict sense: it targets nothing, so nothing is at risk if it cannot be determined. A
+caller outside tmux, or a row-12 read that fails, produces a listing with no marker and no complaint — and, because an
+absent marker could otherwise be read as "you are in no managed session", the absence is documented as meaning only
+that agentctl did not determine one.
+
+- **Human table:** a leading column, empty in its header, carrying `*` on every row of the marked session and blank
+  elsewhere. It is a column rather than a decoration on the session name so that the name field still contains exactly
+  the session name.
+- **JSON:** `"current": true` on the marked session's report, omitted entirely otherwise. Additive on the same footing
+  as `defect` above: it introduces a key rather than altering one a consumer already reads.
+
+**Worked examples.** One server carries every case this section defines: `epic123` managed with two roles, `shell`
+unmanaged, and `future` claiming management with a version agentctl cannot interpret. The two runs differ only in where
+`status` was invoked from.
+
+Run from **inside** `epic123`:
+
+```text
+   SESSION  ROLE     HARNESS  MODEL    EFFORT  PANE  PROCESS  STATE
+*  epic123  planner  claude   fable    max     %12   claude   running
+*  epic123  codex1   codex    default  high    %13   codex    running
+   shell                                                      unmanaged
+   future                                                     session "future" was created by a different agentctl version "2"
+```
+
+```json
+{"schema":1,"sessions":[{"schema":1,"session":"epic123","managed":true,"agents":[{"role":"planner","harness":"claude","model":"fable","effort":"max","window":"planner","pane_id":"%12","process":"claude","state":"running"},{"role":"codex1","harness":"codex","model":"","effort":"high","window":"codex1","pane_id":"%13","process":"codex","state":"running"}],"current":true},{"schema":1,"session":"shell","managed":false,"agents":[]},{"schema":1,"session":"future","managed":true,"agents":[],"defect":"session \"future\" was created by a different agentctl version \"2\""}]}
+```
+
+Run from **outside tmux** — same server, same sessions, no marker:
+
+```text
+  SESSION  ROLE     HARNESS  MODEL    EFFORT  PANE  PROCESS  STATE
+  epic123  planner  claude   fable    max     %12   claude   running
+  epic123  codex1   codex    default  high    %13   codex    running
+  shell                                                      unmanaged
+  future                                                     session "future" was created by a different agentctl version "2"
+```
+
+```json
+{"schema":1,"sessions":[{"schema":1,"session":"epic123","managed":true,"agents":[{"role":"planner","harness":"claude","model":"fable","effort":"max","window":"planner","pane_id":"%12","process":"claude","state":"running"},{"role":"codex1","harness":"codex","model":"","effort":"high","window":"codex1","pane_id":"%13","process":"codex","state":"running"}]},{"schema":1,"session":"shell","managed":false,"agents":[]},{"schema":1,"session":"future","managed":true,"agents":[],"defect":"session \"future\" was created by a different agentctl version \"2\""}]}
+```
+
+Four things these pin that prose does not:
+
+1. **The absence of a marker is not a claim.** The second listing is what a caller outside tmux sees, and it is also
+   what an inside caller sees if the row-12 read fails. Nothing in the output distinguishes them, which is why §6.3.1
+   says an absent marker means only that agentctl did not determine a current session.
+2. **The marker column's width follows its content.** With nothing marked it is two spaces, with something marked it is
+   three, so the whole table shifts by one column between the two runs. That is `tabwriter` doing its job, not a second
+   layout.
+3. **`current` is per-session and absent when false** — `shell` and `future` carry no key at all, exactly like `defect`
+   on a healthy session.
+4. **The defect text occupies the state cell** of an agentless row, so a long message runs past the nominal column
+   width rather than being truncated. Truncating it would withhold the reason.
+
+These were produced by the real `text/tabwriter` settings (`0, 8, 2, ' ', 0`) and the real JSON encoder rather than
+transcribed by hand, so they may be pinned as fixtures. They are shown with the `EFFORT` column #101 introduces; if this
+section lands first, that column is simply absent and nothing else about the rendering changes.
+
+**Order is tmux's order.** The listing does not sort. Re-ordering would assert a ranking agentctl does not have.
+
+**Every session on the server is rendered.** A session whose `@agentctl_managed` is missing or ≠ `1` appears as
+`{"schema": 1, "session": S, "managed": false, "agents": []}` — the rendering §6.3 already defines for an unmanaged
+session named directly. Omitting it would make the listing claim a completeness it does not have, and an unmanaged
+session is frequently the exact fact the operator is looking for: it is what "agentctl cannot see my fleet" looks like
+from the outside. `status` is the one command that describes rather than refuses (§6.3), and that does not stop being
+true when it describes more than one.
+
+**A session with no agents still occupies a row.** The human table renders one row per *agent*, so an unmanaged or
+otherwise agentless session would contribute nothing and be invisible in the table while present in the JSON. It gets
+one row naming the session and its session-level state, with per-agent fields empty. The table and the JSON must agree
+about which sessions exist.
+
+**One defective session does not blank the listing.** A session that claims management but carries metadata agentctl
+cannot interpret — a foreign `@agentctl_version`, an absent version marker, or a malformed `@agentctl_roles` roster
+(§6.3) — is rendered in place with the defect named, the listing continues, and the **command still exits 3**. Skipping
+it silently would be the completeness lie above; aborting the whole listing would be its mirror image, withholding
+every fact agentctl did observe because one session was unreadable. Reporting everything observed *and* failing is the
+only combination that is true on both axes (§1.1): the operator gets the topology, and the exit code still says
+something is wrong. Directing them to `--session` instead would be worse than useless — it asks for names that the
+listing they just ran was going to supply.
+
+**The defect is named in every rendering, not only the human one.** A defective session's agent list is empty because
+agentctl could not read its roster — not because the session has no agents — so a document that carries `"agents": []`
+and nothing else asserts an absence that was never observed, which is the same error as skipping the session, made
+quieter. The defect therefore appears as a field on that session's report (absent on healthy sessions), and the human
+table renders it in the state column of the session's row. Both renderings state what is wrong, and neither leaves the
+empty agent list to be read as a finding. An exit code and a line on stderr are not a substitute: they describe the
+run, while the document describes the fleet.
+
+**JSON shape.** `{"schema": 1, "sessions": [<schema-1 session report>, ...]}`. Each element is a complete, unchanged
+§6.3 document — plus the defect field above where one applies — so a consumer that already parses one session parses
+these. Adding that field is not a schema change: it introduces a key rather than altering one a consumer already reads
+(§13.5's precedent for the states it added). An empty server is `{"schema": 1, "sessions": []}`, not an error.
+
+**No tmux server is still exit 6.** §6.7's scope note stands for the listing: a row-1 failure exits 6 carrying tmux's
+own message, which on a machine with no server reads `no server running on <path>` and answers the question directly.
+The alternative — treating any enumeration failure as "no fleets" — would render a tool failure as an observed absence,
+and distinguishing the two would require the stderr matching §6.7 rejected on evidence. Noted here explicitly because
+§6.7 was written when `status` addressed a fleet that must already exist, which the listing does not.
 
 ### 6.4 attach / kill
 
