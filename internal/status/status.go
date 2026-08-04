@@ -19,6 +19,7 @@ type Report struct {
 	Session string  `json:"session"`
 	Managed bool    `json:"managed"`
 	Agents  []Agent `json:"agents"`
+	Current bool    `json:"current,omitempty"`
 	Defect  string  `json:"defect,omitempty"`
 }
 

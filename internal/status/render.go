@@ -9,27 +9,44 @@ import (
 
 // WriteTable writes the human-readable fleet status table.
 func WriteTable(output io.Writer, report Report) error {
-	return writeTable(output, []Report{report})
+	return writeTable(output, []Report{report}, false)
 }
 
 // WriteSessionsTable writes one human-readable table covering every session,
 // under a single header.
 func WriteSessionsTable(output io.Writer, report SessionsReport) error {
-	return writeTable(output, report.Sessions)
+	return writeTable(output, report.Sessions, true)
 }
 
-func writeTable(output io.Writer, reports []Report) error {
+func writeTable(output io.Writer, reports []Report, currentColumn bool) error {
 	table := tabwriter.NewWriter(output, 0, 8, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "SESSION\tROLE\tHARNESS\tMODEL\tEFFORT\tPANE\tPROCESS\tSTATE"); err != nil {
+	header := "SESSION\tROLE\tHARNESS\tMODEL\tEFFORT\tPANE\tPROCESS\tSTATE"
+	if currentColumn {
+		header = "\t" + header
+	}
+	if _, err := fmt.Fprintln(table, header); err != nil {
 		return err
 	}
 	for _, report := range reports {
+		marker := ""
+		if report.Current {
+			marker = "*"
+		}
 		if len(report.Agents) == 0 {
-			state := StateUnmanaged
-			if report.Defect != "" {
-				state = State(report.Defect)
+			state := "managed"
+			if !report.Managed {
+				state = string(StateUnmanaged)
 			}
-			if _, err := fmt.Fprintf(table, "%s\t\t\t\t\t\t\t%s\n", report.Session, state); err != nil {
+			if report.Defect != "" {
+				state = report.Defect
+			}
+			format := "%s\t\t\t\t\t\t\t%s\n"
+			arguments := []any{report.Session, state}
+			if currentColumn {
+				format = "%s\t" + format
+				arguments = append([]any{marker}, arguments...)
+			}
+			if _, err := fmt.Fprintf(table, format, arguments...); err != nil {
 				return err
 			}
 			continue
@@ -43,7 +60,8 @@ func writeTable(output io.Writer, reports []Report) error {
 			if effort == "" {
 				effort = "default"
 			}
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			format := "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n"
+			arguments := []any{
 				report.Session,
 				agent.Role,
 				agent.Harness,
@@ -52,7 +70,12 @@ func writeTable(output io.Writer, reports []Report) error {
 				agent.PaneID,
 				agent.Process,
 				agent.State,
-			); err != nil {
+			}
+			if currentColumn {
+				format = "%s\t" + format
+				arguments = append([]any{marker}, arguments...)
+			}
+			if _, err := fmt.Fprintf(table, format, arguments...); err != nil {
 				return err
 			}
 		}
