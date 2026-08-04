@@ -11,6 +11,7 @@ Usage:
   hack/release-verify.sh [--measure]
   hack/release-verify.sh --render-results VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --process-check VERSIONS_FILE ARTIFACT_DIR
+  hack/release-verify.sh --assert-probe PROBE_NAME OUTPUT_FILE
 
 Runs preflight and the four hack/probe-*.sh contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
@@ -27,6 +28,9 @@ for measure mode, results.tsv. No append; testable.
 row in ARTIFACT_DIR/results.tsv must be PASS and its process= value must
 match the expected pane process (codex: "codex"; claude: the version token
 from VERSIONS_FILE's claude_version= line). No append; testable.
+
+--assert-probe validates captured OUTPUT_FILE against the explicit contract
+for PROBE_NAME. It exits 1 and names the missing observation on failure.
 EOF
 }
 
@@ -188,7 +192,83 @@ process_check() {
   printf 'PROCESS CHECK PASS (claude=%s, codex=codex)\n' "$claude_expected"
 }
 
-# --render-results and --process-check are pure, testable subcommands:
+require_probe_text() {
+  local probe_name=$1
+  local expected=$2
+  case "$PROBE_OUTPUT" in
+    *"$expected"*) ;;
+    *)
+      printf 'PROBE ASSERT FAIL (%s): missing expected output: %s\n' "$probe_name" "$expected" >&2
+      return 1
+      ;;
+  esac
+}
+
+assert_probe_output() {
+  local probe_name=$1
+  local PROBE_OUTPUT=$2
+
+  case "$probe_name" in
+    probe-1-argv.sh)
+      require_probe_text "$probe_name" 'OK exit=0' &&
+        require_probe_text "$probe_name" 'empty-value set OK' &&
+        require_probe_text "$probe_name" 'read role:  role1' &&
+        require_probe_text "$probe_name" "  -v read:   'two words'" &&
+        require_probe_text "$probe_name" 'name=role1 role=role1 proc=2.1.220' &&
+        require_probe_text "$probe_name" "after killing =foo, has-session -t '=foobar': exit0 (foobar survived)" &&
+        require_probe_text "$probe_name" "list-panes -t 'probe:rev' resolves to: rev" &&
+        require_probe_text "$probe_name" "list-panes -t 'probe:=rev' resolves to: rev" &&
+        require_probe_text "$probe_name" 'literal send OK' &&
+        require_probe_text "$probe_name" 'Enter OK' &&
+        require_probe_text "$probe_name" "captured: '/clear'"
+      ;;
+    probe-2-targeting.sh)
+      require_probe_text "$probe_name" "set-option -t '=alpha':  no such session: =alpha" &&
+        require_probe_text "$probe_name" 'set-option -t alpha:     OK' &&
+        require_probe_text "$probe_name" "show-options -qv -t alpha @k: 'v'" &&
+        require_probe_text "$probe_name" 'set-option -t alph @k2 v: OK <- PREFIX MATCHED (bad)' &&
+        require_probe_text "$probe_name" 'has-session -t betab (unique prefix): exit=0 (0 = prefix matched)' &&
+        require_probe_text "$probe_name" "has-session -t '=betab':             can't find session: betab
+exit=1" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:rev'  -> reviewer" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:=rev' -> can't find window: rev
+   exit=1" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:dup' picks: can't find window: dup" &&
+        require_probe_text "$probe_name" "set:   '1' exit=0" &&
+        require_probe_text "$probe_name" "unset: '' exit=0" &&
+        require_probe_text "$probe_name" "unset no -q: 'invalid option: @agentctl_absent' exit=1" &&
+        require_probe_text "$probe_name" "display-message -p -t \$PANE_ID '#{session_name}': alpha"
+      ;;
+    probe-3-ids.sh)
+      require_probe_text "$probe_name" "created session id = '\$0'" &&
+        require_probe_text "$probe_name" "set-option -t \$SESSION_ID:  OK" &&
+        require_probe_text "$probe_name" "show-options -qv -t \$SESSION_ID @agentctl_managed: '1'" &&
+        require_probe_text "$probe_name" "decoy 'alphabet' contaminated? managed=''" &&
+        require_probe_text "$probe_name" "list-windows -t \$SESSION_ID: alpha" &&
+        require_probe_text "$probe_name" "has-session  -t \$SESSION_ID: exit=0" &&
+        require_probe_text "$probe_name" "new-window   -t \$SESSION_ID: @2 %2" &&
+        require_probe_text "$probe_name" "model set-to-empty via -F: ''" &&
+        require_probe_text "$probe_name" "never-set option via -F:   ''" &&
+        require_probe_text "$probe_name" "stdout='@4'" &&
+        require_probe_text "$probe_name" 'killed by id OK' &&
+        require_probe_text "$probe_name" "remaining:
+  alphabet"
+      ;;
+    probe-4-attach.sh)
+      require_probe_text "$probe_name" "sid=\$0" &&
+        require_probe_text "$probe_name" "attach-session -t \$SESSION_ID     : open terminal failed: not a terminal" &&
+        require_probe_text "$probe_name" "attach-session -t '=alpha'  : open terminal failed: not a terminal" &&
+        require_probe_text "$probe_name" "attach-session -t '=nope'   : can't find session: nope" &&
+        require_probe_text "$probe_name" "-CC attach-session -t \$SESSION_ID : tcgetattr failed: Operation not supported by device"
+      ;;
+    *)
+      printf 'PROBE ASSERT FAIL (%s): no assertion defined\n' "$probe_name" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Pure, testable subcommands are handled before the live-environment flow.
 # handle them before any of the interactive/live-environment flow below.
 if [ "${1:-}" = '--render-results' ]; then
   [ "$#" -eq 3 ] || die '--render-results requires VERSIONS_FILE ARTIFACT_DIR'
@@ -200,6 +280,13 @@ if [ "${1:-}" = '--process-check' ]; then
   [ "$#" -eq 3 ] || die '--process-check requires VERSIONS_FILE ARTIFACT_DIR'
   token=$(claude_version_token "$2")
   process_check "$3/results.tsv" "$token" && exit 0 || exit 1
+fi
+
+if [ "${1:-}" = '--assert-probe' ]; then
+  [ "$#" -eq 3 ] || die '--assert-probe requires PROBE_NAME OUTPUT_FILE'
+  [ -r "$3" ] || die "cannot read probe output: $3"
+  probe_out=$(cat "$3")
+  assert_probe_output "$2" "$probe_out" && exit 0 || exit 1
 fi
 
 if [ "${1:-}" = '--help' ] || [ "${1:-}" = '-h' ]; then
@@ -257,43 +344,19 @@ printf 'codex:    %s\n' "$CODEX_VERSION"
 # 2. Probes (fully automated)
 # ---------------------------------------------------------------------------
 
-# Each probe's final marker line, read from its own source (hack/probe-*.sh):
-#   probe-1-argv.sh:      final `echo 'done'` after `echo "== cleanup =="`
-#   probe-2-targeting.sh: final `echo cleanup-done`
-#   probe-3-ids.sh:       final `echo cleanup-done`
-#   probe-4-attach.sh:    has no "done"-style marker; its last statement is
-#                         `echo -n "-CC attach-session -t \$SESSION_ID : "`
-#                         followed by the (variable) attach output, so the
-#                         fixed literal prefix "-CC attach-session -t " is
-#                         the only reliable proof it ran to completion.
-probe_marker() {
-  case "$1" in
-    probe-1-argv.sh) printf 'done' ;;
-    probe-2-targeting.sh) printf 'cleanup-done' ;;
-    probe-3-ids.sh) printf 'cleanup-done' ;;
-    probe-4-attach.sh) printf -- '-CC attach-session -t ' ;;
-    *) die "no known marker for probe: $1" ;;
-  esac
-}
-
 echo
 echo '== Probes =='
 for probe in "$TOP"/hack/probe-*.sh; do
   probe_name=$(basename "$probe")
-  marker=$(probe_marker "$probe_name")
   echo "-- $probe_name --"
-  if ! probe_out=$(bash "$probe" </dev/null); then
-    echo "PROBES FAIL ($probe_name)"
+  probe_status=0
+  probe_out=$(bash "$probe" </dev/null 2>&1) || probe_status=$?
+  printf '%s\n' "$probe_out"
+  if [ "$probe_status" -ne 0 ]; then
+    echo "PROBES FAIL ($probe_name: exit $probe_status)"
     exit 1
   fi
-  printf '%s\n' "$probe_out"
-  case "$probe_out" in
-    *"$marker"*) ;;
-    *)
-      echo "PROBES FAIL ($probe_name: did not reach marker '$marker')"
-      exit 1
-      ;;
-  esac
+  assert_probe_output "$probe_name" "$probe_out" || exit 1
 done
 
 if pgrep -fl '[t]mux.*agentctl-probe-' >/dev/null 2>&1; then

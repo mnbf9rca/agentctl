@@ -130,7 +130,17 @@ func TestNextVersionRejectsMalformed(t *testing.T) {
 }
 
 func TestNextVersionRejectsMissingVersionFile(t *testing.T) {
-	if _, err := nextVersion(t, initRepoNoVersionFile(t, nil)); err == nil {
+	dir := initRepoNoVersionFile(t, nil)
+	stderr, err := nextVersionStderr(t, dir)
+	if err == nil {
 		t.Fatal("expected failure with no VERSION file")
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "next-version: no VERSION file at " + filepath.Join(resolvedDir, "VERSION") + "\n"
+	if stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}
 }

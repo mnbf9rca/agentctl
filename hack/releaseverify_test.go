@@ -69,6 +69,91 @@ func processCheck(t *testing.T, versions, artifactDir string) (string, error) {
 	return string(out), err
 }
 
+var requiredProbeEvidence = map[string][]string{
+	"probe-1-argv.sh": {
+		"OK exit=0",
+		"empty-value set OK",
+		"read role:  role1",
+		"  -v read:   'two words'",
+		"name=role1 role=role1 proc=2.1.220",
+		"after killing =foo, has-session -t '=foobar': exit0 (foobar survived)",
+		"list-panes -t 'probe:rev' resolves to: rev",
+		"list-panes -t 'probe:=rev' resolves to: rev",
+		"literal send OK",
+		"Enter OK",
+		"captured: '/clear'",
+	},
+	"probe-2-targeting.sh": {
+		"set-option -t '=alpha':  no such session: =alpha",
+		"set-option -t alpha:     OK",
+		"show-options -qv -t alpha @k: 'v'",
+		"set-option -t alph @k2 v: OK <- PREFIX MATCHED (bad)",
+		"has-session -t betab (unique prefix): exit=0 (0 = prefix matched)",
+		"has-session -t '=betab':             can't find session: betab\nexit=1",
+		"list-panes -t 'alpha:rev'  -> reviewer",
+		"list-panes -t 'alpha:=rev' -> can't find window: rev\n   exit=1",
+		"list-panes -t 'alpha:dup' picks: can't find window: dup",
+		"set:   '1' exit=0",
+		"unset: '' exit=0",
+		"unset no -q: 'invalid option: @agentctl_absent' exit=1",
+		"display-message -p -t $PANE_ID '#{session_name}': alpha",
+	},
+	"probe-3-ids.sh": {
+		"created session id = '$0'",
+		"set-option -t $SESSION_ID:  OK",
+		"show-options -qv -t $SESSION_ID @agentctl_managed: '1'",
+		"decoy 'alphabet' contaminated? managed=''",
+		"list-windows -t $SESSION_ID: alpha",
+		"has-session  -t $SESSION_ID: exit=0",
+		"new-window   -t $SESSION_ID: @2 %2",
+		"model set-to-empty via -F: ''",
+		"never-set option via -F:   ''",
+		"stdout='@4'",
+		"killed by id OK",
+		"remaining:\n  alphabet",
+	},
+	"probe-4-attach.sh": {
+		"sid=$0",
+		"attach-session -t $SESSION_ID     : open terminal failed: not a terminal",
+		"attach-session -t '=alpha'  : open terminal failed: not a terminal",
+		"attach-session -t '=nope'   : can't find session: nope",
+		"-CC attach-session -t $SESSION_ID : tcgetattr failed: Operation not supported by device",
+	},
+}
+
+func probeAssertion(t *testing.T, probeName, output string) (string, error) {
+	t.Helper()
+	outputFile := filepath.Join(t.TempDir(), "probe.out")
+	writeTestFile(t, outputFile, []byte(output), 0o644)
+	command := exec.Command("./release-verify.sh", "--assert-probe", probeName, outputFile)
+	result, err := command.CombinedOutput()
+	return string(result), err
+}
+
+func TestProbeAssertionsRequireEveryExpectedObservation(t *testing.T) {
+	for probeName, evidence := range requiredProbeEvidence {
+		probeName, evidence := probeName, evidence
+		t.Run(probeName, func(t *testing.T) {
+			validOutput := strings.Join(evidence, "\n") + "\n"
+			if output, err := probeAssertion(t, probeName, validOutput); err != nil {
+				t.Fatalf("valid probe output rejected: %v\n%s", err, output)
+			}
+
+			for index, missing := range evidence {
+				incomplete := append([]string(nil), evidence[:index]...)
+				incomplete = append(incomplete, evidence[index+1:]...)
+				output, err := probeAssertion(t, probeName, strings.Join(incomplete, "\n")+"\n")
+				if err == nil {
+					t.Fatalf("probe output passed without %q", missing)
+				}
+				if !strings.Contains(output, "PROBE ASSERT FAIL ("+probeName+")") {
+					t.Fatalf("missing assertion diagnostic for %q:\n%s", missing, output)
+				}
+			}
+		})
+	}
+}
+
 func TestProcessCheckPasses(t *testing.T) {
 	got, err := processCheck(t, "testdata/release-verify-versions.txt", "testdata/release-verify-artifact")
 	if err != nil {
@@ -119,14 +204,8 @@ func newLiveFixture(t *testing.T) liveFixture {
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(dir, "hack/release-verify.sh"), script, 0o755)
-	probeMarkers := map[string]string{
-		"probe-1-argv.sh":      "done",
-		"probe-2-targeting.sh": "cleanup-done",
-		"probe-3-ids.sh":       "cleanup-done",
-		"probe-4-attach.sh":    "-CC attach-session -t test",
-	}
-	for name, marker := range probeMarkers {
-		body := "#!/usr/bin/env bash\nif IFS= read -r _; then echo 'stdin was not severed' >&2; exit 9; fi\nprintf '%s\\n' '" + marker + "'\n"
+	for name, evidence := range requiredProbeEvidence {
+		body := "#!/usr/bin/env bash\nif IFS= read -r _; then echo 'stdin was not severed' >&2; exit 9; fi\ncat <<'PROBE_OUTPUT'\n" + strings.Join(evidence, "\n") + "\nPROBE_OUTPUT\n"
 		writeTestFile(t, filepath.Join(dir, "hack", name), []byte(body), 0o755)
 	}
 	writeTestFile(t, filepath.Join(dir, "Makefile"), []byte("build:\n\t@true\n"), 0o644)
@@ -285,6 +364,25 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 	}
 	if got := fixture.calls(t); strings.Join(got, "\n") != strings.Join(wantCalls, "\n") {
 		t.Fatalf("agentctl calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantCalls, "\n"))
+	}
+}
+
+func TestLiveVerificationPrintsProbeDiagnosticsOnAssertionFailure(t *testing.T) {
+	fixture := newLiveFixture(t)
+	writeTestFile(t, filepath.Join(fixture.dir, "hack/probe-1-argv.sh"), []byte("#!/usr/bin/env bash\necho 'tmux diagnostic: observed broken behavior'\n"), 0o755)
+	runCommand(t, fixture.dir, "git", "add", "hack/probe-1-argv.sh")
+	runCommand(t, fixture.dir, "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "broken probe")
+	output, err := fixture.run(t, "")
+	if err == nil {
+		t.Fatalf("release verification passed without required probe evidence:\n%s", output)
+	}
+	for _, want := range []string{
+		"tmux diagnostic: observed broken behavior",
+		"PROBE ASSERT FAIL (probe-1-argv.sh)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 
