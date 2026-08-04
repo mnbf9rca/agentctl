@@ -4,6 +4,7 @@ name: Promotion PR form check
 # `branches: [release]` filter means this workflow never even triggers for
 # PRs targeting `main` — zero noise on normal development (AC5).
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches: [release]
@@ -12,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: promotion-form-check-${{ github.event.pull_request.number }}
+  group: promotion-form-check-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -22,13 +23,24 @@ jobs:
       - name: Check out PR head
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # hack/next-version.sh needs full tag history to compute the next
           # version.
           fetch-depth: 0
       - name: Write PR body to file
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PR_BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$(./hack/next-version.sh)"
+            printf '%s\r\n' \
+              '- [ ] **Checklist run.**' \
+              '- [x] **Checklist not required.**' \
+              '' \
+              "Version: $version" > "$RUNNER_TEMP/pr-body.md"
+          else
+            printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          fi
       - name: Check promotion PR form
         run: ./hack/check-promotion-form.sh "$RUNNER_TEMP/pr-body.md"
