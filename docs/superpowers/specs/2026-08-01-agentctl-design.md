@@ -75,6 +75,26 @@ Consequences:
 - Typing a slash command opens an autocomplete popup in both TUIs; Enter selects the highlighted entry. With the full command typed, the exact match was highlighted in both. Residual risk (user-defined commands outranking an exact match) is documented in SECURITY.md.
 - Process names cannot be pattern-matched against harness names (Claude Code reports `2.1.220`), and `#{pane_current_command}` tracks the *foreground job*, so it flaps to child commands (`bash`, `python`, …) whenever an agent runs a tool. Both problems are solved by the launch-time baseline policy in §8.
 
+### 3.4 iTerm2 force-quit of tmux control mode (2026-08-04)
+
+Observed live against a throwaway single-role fleet — tmux 3.7b, iTerm2 3.6.11, agentctl v0.1.0 (Homebrew) with `main`.
+Recorded because §6.4's narration previously declined to say what force-quit leaves behind, on the correct grounds that
+it had not been measured. It has now been measured, so §1.1's second half applies: state it.
+
+| # | Observation |
+|---|---|
+| 1 | **The fleet survives.** `agentctl status` reported the role still running after force-quit. |
+| 2 | **The client does not exit.** The `tmux -CC attach-session` process persisted and the session still reported `attached=1`. iTerm2's own exit text — "tmux client may still be running" — is literally true. |
+| 3 | **The client is hard to remove.** After `agentctl kill --session`, it printed raw control-protocol lines (`%sessions-changed`, `%exit`) into the terminal, still did not exit, ignored `SIGTERM`, and ended only on `SIGKILL`. |
+
+Consequence for agentctl, mechanical rather than separately observed: `attach` blocks on that client, and the state
+report is written only after it returns. Observation 2 is therefore sufficient to establish that **the report is
+unreachable on the force-quit path** — the process was seen not to return, and everything after it is sequential.
+
+This is what turns "prefer `esc`" from a preference into a statement with a reason behind it: `esc` detaches cleanly and
+agentctl reports; force-quit leaves the fleet running but wedges the client, so the terminal stays occupied and nothing
+further is printed.
+
 ## 4. CLI surface
 
 ```
@@ -284,7 +304,67 @@ string field, so the states added here are not a schema change (§13.5). Human o
 … ; to attach anyway, run: tmux -CC attach-session -t '=SESSION'
 ```
 
-That suggested command uses tmux's `=` exact-match prefix rather than an ID, and it is **not** a contradiction of §13.1: §13.1 governs argv that *agentctl* constructs, where a resolved ID is always available. The escape hatch is a human typing tmux directly, with no resolution step to draw an ID from, so `=` is the correct idiom there — and it is the operator's own decision, not ours. `kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
+That suggested command uses tmux's `=` exact-match prefix rather than an ID, and it is **not** a contradiction of §13.1: §13.1 governs argv that *agentctl* constructs, where a resolved ID is always available. The escape hatch is a human typing tmux directly, with no resolution step to draw an ID from, so `=` is the correct idiom there — and it is the operator's own decision, not ours.
+
+**`attach` stays interactive control mode, and narrates instead of apologising.** The `Command Menu` an operator sees
+(`esc`, `X`, `L`, `C`) is printed by iTerm2's tmux integration, not by agentctl, which runs row 13 and nothing else and
+therefore cannot change those keys, their meaning, or their case sensitivity. Removing the menu was considered and
+**rejected** (#105): native tabs exist only while a `tmux -CC` client lives, so agentctl could exit with tabs still open
+only if iTerm2 owned that client — and iTerm2 renders a client it owns as a gateway window containing the same menu.
+Verified against iTerm2 3.6.11: its scripting dictionary has no tmux vocabulary at all, and its only lever is "run a
+shell command in a new window", so the menu would be *relocated*, not removed, at the price of a permission prompt, a
+second shell-composition site (§12.1) and a dependency on a scripting dictionary we do not version. agentctl therefore
+explains the menu rather than fighting it. No flag switches this off; there is one attach.
+
+*The narration* is written once the environment and ownership gates have passed and before `attach-session`, so it
+never announces an attachment a refusal prevented — a refused attach writes nothing to stdout. It states that the
+session is being attached in iTerm2 and how many windows it has; that the menu about to appear is iTerm2's; that `esc`
+detaches, ending the client and whatever iTerm2 was rendering, while the fleet keeps running; that `X` is uppercase and
+force-quits; and that only `kill` stops a fleet. It deliberately does **not** say what force-quitting leaves behind —
+that is iTerm2's path, unobserved here, and §1.1 forbids asserting an outcome we have not measured however confident
+the inference. It also never asserts that windows *are* rendered as native tabs: that depends on an iTerm2 preference
+agentctl can neither set nor read.
+
+*The window count* is the one new fact the narration carries, read once after the ownership gate with §13.2 row 8. That
+completes attach's read set: row 6 for the ownership gate, row 8 for the count, row 13 to attach, row 1 for the
+post-exit probe — no other read, and no new argv shape. A failed row-8 read **omits the count and says nothing else
+about it**; a guessed or defaulted number would be a claim about a fleet agentctl did not manage to observe.
+
+*The state report* is one line written **if and when the control-mode client exits**, naming what agentctl observed:
+the session is still running, is no longer present, or its state could not be verified and why. Presence is decided by
+comparing the resolved session **ID**, never the name, so a session recreated under the same name is not reported as
+the one that was attached. The probe reuses row 1 and adds no argv shape. The line states the observation and nothing
+else — any suggested command belongs in the block below, so a fact and an instruction are never mixed in one sentence.
+
+**The report is best-effort, and one verified path never reaches it.** `attach` blocks on the control-mode client, so
+everything after it — probe, state line, next-steps block — is contingent on that client exiting. Force-quitting from
+iTerm2's menu does **not** end it (§3.4), so on that path `attach` never returns and prints nothing further. The spec
+says so rather than describing a report that cannot happen: a contract that quietly omits its one unreachable case is
+the same failure as a message that overclaims.
+
+**No timeout, deliberately.** Bounding the wait would require agentctl to decide when an attachment has gone on too
+long, and it cannot distinguish a wedged client from an operator who is simply still working — the two are identical
+from outside. A deadline would therefore be a guess dressed as a policy, and detaching a live session on that guess is
+worse than the hang it prevents. The wedge is documented, including its recovery, and left to the operator.
+
+*The next-steps block* follows the state line and its contents are governed by the state observed, because a suggestion
+is itself a claim that the suggested action is available:
+
+| Observed state | Block |
+|---|---|
+| still running | re-attach, check status, and stop it — all three, each copy-pasteable and naming the session as the operator typed it |
+| not verifiable | check status only: agentctl does not know whether there is anything to re-attach or to stop |
+| no longer present | no block at all: proposing actions on a session observed to be absent would assert it is still there |
+
+*The probe is advisory.* The exit code is unchanged in all three outcomes, because what succeeded — the attachment —
+succeeded regardless of what the probe could see afterwards, and a probe failure is reported as an unverified state
+rather than an absence. One consequence is worth stating rather than leaving to be discovered: killing the attached
+session when it is the last one takes the tmux server with it, so row 1 fails and the operator gets the unverified form
+carrying tmux's own reason. That is the §6.7 trade again — separating the two would need the stderr matching this
+design rejected on evidence — and `TmuxError` still surfaces tmux's `no server running` text, so the fact reaches the
+operator even though agentctl declines to classify it.
+
+`kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
 `kill-session` (§13.2 row 11). Both address the resolved session ID, never a name (§13.1).
 
 ### 6.5 Metadata
