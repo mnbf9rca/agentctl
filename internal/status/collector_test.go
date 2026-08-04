@@ -421,7 +421,7 @@ func TestCollectorCollectAllListsEverySessionInServerOrder(t *testing.T) {
 			}},
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
 	}
 
@@ -447,6 +447,59 @@ func TestCollectorCollectAllListsEverySessionInServerOrder(t *testing.T) {
 	}
 }
 
+func TestCollectorCollectAllMarksOnlyTheSessionContainingTheCallerPane(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tfleet\n$5\tshell\n")},
+		tmuxx.Response{Stdout: []byte("fleet\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("planner\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
+		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
+
+	collector := NewCollector(tmuxx.New(runner)).WithLookupEnv(statusLookup(map[string]string{
+		"AGENTCTL_SESSION": "shell",
+		"TMUX_PANE":        "%9",
+	}))
+	got, err := collector.CollectAll(context.Background())
+	if err != nil {
+		t.Fatalf("CollectAll() error = %v", err)
+	}
+	if !got.Sessions[0].Current || got.Sessions[1].Current {
+		t.Fatalf("CollectAll() sessions = %#v, want only fleet current", got.Sessions)
+	}
+	wantCall := tmuxx.Call{Executable: "tmux", Args: []string{"display-message", "-p", "-t", "%9", "#{session_name}"}}
+	if !reflect.DeepEqual(runner.Calls[1], wantCall) {
+		t.Fatalf("current-session call = %#v, want %#v", runner.Calls[1], wantCall)
+	}
+}
+
+func TestCollectorCollectAllSilentlyOmitsMarkerWhenCurrentSessionReadFails(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$5\tshell\n")},
+		tmuxx.Response{Err: errors.New("lost caller pane")},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
+
+	collector := NewCollector(tmuxx.New(runner)).WithLookupEnv(statusLookup(map[string]string{"TMUX_PANE": "%9"}))
+	got, err := collector.CollectAll(context.Background())
+	if err != nil {
+		t.Fatalf("CollectAll() error = %v, want nil", err)
+	}
+	if got.Sessions[0].Current {
+		t.Fatalf("CollectAll() sessions = %#v, want no current marker", got.Sessions)
+	}
+}
+
 func TestCollectorCollectAllReportsUnmanagedSessions(t *testing.T) {
 	t.Parallel()
 
@@ -461,7 +514,7 @@ func TestCollectorCollectAllReportsUnmanagedSessions(t *testing.T) {
 		t.Fatalf("CollectAll() error = %v", err)
 	}
 	want := SessionsReport{Schema: 1, Sessions: []Report{{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}}}}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
 	}
 }
@@ -496,7 +549,7 @@ func TestCollectorCollectAllContinuesAfterUnreadableSessionMetadata(t *testing.T
 		{Schema: 1, Session: "future", Managed: true, Agents: []Agent{}, Defect: "session \"future\" was created by a different agentctl version \"2\""},
 		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
 	}}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
 	}
 }
@@ -525,7 +578,7 @@ func TestCollectorCollectAllNamesRosterDefectAndContinues(t *testing.T) {
 		{Schema: 1, Session: "broken", Managed: true, Agents: []Agent{}, Defect: `session "broken": managed session has no @agentctl_roles roster`},
 		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
 	}}
-	if !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
 	}
 }
@@ -539,8 +592,8 @@ func TestCollectorCollectAllReturnsRowOneFailureWithoutReport(t *testing.T) {
 	if !errors.As(err, &tmuxError) {
 		t.Fatalf("CollectAll() error = %T %v, want *tmuxx.TmuxError", err, err)
 	}
-	if !reflect.DeepEqual(got, SessionsReport{}) {
-		t.Fatalf("CollectAll() = %#v, want zero report", got)
+	if got != nil {
+		t.Fatalf("CollectAll() = %#v, want nil report", got)
 	}
 }
 
@@ -557,6 +610,13 @@ type processExitError int
 
 func (e processExitError) Error() string { return "process exited" }
 func (e processExitError) ExitCode() int { return int(e) }
+
+func statusLookup(values map[string]string) LookupEnv {
+	return func(name string) (string, bool) {
+		value, ok := values[name]
+		return value, ok
+	}
+}
 
 func assertStatusCallAllowlist(t *testing.T, calls []tmuxx.Call) int {
 	t.Helper()

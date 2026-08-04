@@ -11,11 +11,15 @@ import (
 
 type tmuxClient interface {
 	ListSessions(context.Context) ([]tmuxx.Session, error)
+	DisplayMessage(context.Context, tmuxx.PaneID) (string, error)
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
 	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	ListPanes(context.Context, tmuxx.WindowID) ([]tmuxx.Pane, error)
 	ProcessName(context.Context, int) (string, error)
 }
+
+// LookupEnv is compatible with os.LookupEnv.
+type LookupEnv func(string) (string, bool)
 
 // VersionError reports a managed session with an absent or unsupported
 // agentctl version marker.
@@ -46,7 +50,8 @@ func (e *RosterError) Error() string {
 
 // Collector gathers one objective snapshot using the typed tmux boundary.
 type Collector struct {
-	client tmuxClient
+	client    tmuxClient
+	lookupEnv LookupEnv
 }
 
 // NewCollector constructs a status collector.
@@ -54,12 +59,24 @@ func NewCollector(client tmuxClient) Collector {
 	return Collector{client: client}
 }
 
+// WithLookupEnv enables the advisory current-session marker for listings.
+func (c Collector) WithLookupEnv(lookupEnv LookupEnv) Collector {
+	c.lookupEnv = lookupEnv
+	return c
+}
+
 // CollectAll gathers status for every session on the tmux server, in the order
 // tmux lists them.
-func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
+func (c Collector) CollectAll(ctx context.Context) (*SessionsReport, error) {
 	sessions, err := c.client.ListSessions(ctx)
 	if err != nil {
-		return SessionsReport{}, tmuxx.ClassifyError(err)
+		return nil, tmuxx.ClassifyError(err)
+	}
+	currentSession := ""
+	if c.lookupEnv != nil {
+		if pane, insideTmux := c.lookupEnv("TMUX_PANE"); insideTmux {
+			currentSession, _ = c.client.DisplayMessage(ctx, tmuxx.PaneID(pane))
+		}
 	}
 
 	all := SessionsReport{Schema: 1, Sessions: []Report{}}
@@ -70,7 +87,7 @@ func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
 			var versionError *VersionError
 			var rosterError *RosterError
 			if !errors.As(err, &versionError) && !errors.As(err, &rosterError) {
-				return SessionsReport{}, err
+				return nil, err
 			}
 			defect := err
 			if rosterError != nil || versionError.Version == "" {
@@ -79,9 +96,10 @@ func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
 			report = Report{Schema: 1, Session: listed.Name, Managed: true, Agents: []Agent{}, Defect: defect.Error()}
 			defects = append(defects, defect)
 		}
+		report.Current = listed.Name == currentSession
 		all.Sessions = append(all.Sessions, report)
 	}
-	return all, errors.Join(defects...)
+	return &all, errors.Join(defects...)
 }
 
 // Collect gathers status for one already-resolved session ID.
