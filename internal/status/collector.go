@@ -76,7 +76,7 @@ func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
 			if rosterError != nil || versionError.Version == "" {
 				defect = fmt.Errorf("session %q: %w", listed.Name, err)
 			}
-			report = Report{Schema: 1, Session: listed.Name, Managed: true, Agents: []Agent{}, defect: defect.Error()}
+			report = Report{Schema: 1, Session: listed.Name, Managed: true, Agents: []Agent{}, Defect: defect.Error()}
 			defects = append(defects, defect)
 		}
 		all.Sessions = append(all.Sessions, report)

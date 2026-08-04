@@ -26,8 +26,8 @@ func writeTable(output io.Writer, reports []Report) error {
 	for _, report := range reports {
 		if len(report.Agents) == 0 {
 			state := StateUnmanaged
-			if report.defect != "" {
-				state = State(report.defect)
+			if report.Defect != "" {
+				state = State(report.Defect)
 			}
 			if _, err := fmt.Fprintf(table, "%s\t\t\t\t\t\t%s\n", report.Session, state); err != nil {
 				return err

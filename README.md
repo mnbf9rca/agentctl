@@ -259,7 +259,8 @@ unmanaged sessions use `managed: false` with an empty agent list:
 
 A session that claims agentctl management but carries metadata agentctl cannot interpret — a foreign
 `@agentctl_version`, an absent version marker, or a malformed role roster — is rendered in place with the defect named.
-The listing continues so the remaining topology stays visible, and the command still exits 3.
+The JSON session report includes a `defect` field, so its empty agent list is not presented as an observed absence. The
+listing continues so the remaining topology stays visible, and the command still exits 3.
 
 If no tmux server is running, the listing exits 6 and carries tmux's own message. It does not infer an empty server by
 matching stderr text.

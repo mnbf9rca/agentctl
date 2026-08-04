@@ -19,7 +19,7 @@ type Report struct {
 	Session string  `json:"session"`
 	Managed bool    `json:"managed"`
 	Agents  []Agent `json:"agents"`
-	defect  string
+	Defect  string  `json:"defect,omitempty"`
 }
 
 // SessionsReport is the versioned status document for every session on the

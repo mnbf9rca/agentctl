@@ -493,7 +493,7 @@ func TestCollectorCollectAllContinuesAfterUnreadableSessionMetadata(t *testing.T
 	}
 	want := SessionsReport{Schema: 1, Sessions: []Report{
 		{Schema: 1, Session: "fleet", Managed: true, Agents: []Agent{{Role: "planner", Harness: "claude", Window: "planner", PaneID: "%12", Process: "claude", State: StateRunning}}},
-		{Schema: 1, Session: "future", Managed: true, Agents: []Agent{}, defect: "session \"future\" was created by a different agentctl version \"2\""},
+		{Schema: 1, Session: "future", Managed: true, Agents: []Agent{}, Defect: "session \"future\" was created by a different agentctl version \"2\""},
 		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
 	}}
 	if !reflect.DeepEqual(got, want) {
@@ -522,7 +522,7 @@ func TestCollectorCollectAllNamesRosterDefectAndContinues(t *testing.T) {
 		t.Fatalf("CollectAll() error = %q, want broken session name", err)
 	}
 	want := SessionsReport{Schema: 1, Sessions: []Report{
-		{Schema: 1, Session: "broken", Managed: true, Agents: []Agent{}, defect: `session "broken": managed session has no @agentctl_roles roster`},
+		{Schema: 1, Session: "broken", Managed: true, Agents: []Agent{}, Defect: `session "broken": managed session has no @agentctl_roles roster`},
 		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
 	}}
 	if !reflect.DeepEqual(got, want) {

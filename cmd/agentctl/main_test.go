@@ -575,7 +575,8 @@ func TestRunStatusAllJSONKeepsEverySessionWhenMetadataIsDefective(t *testing.T) 
 	if code != exitSession {
 		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
 	}
-	want := "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"future\",\"managed\":true,\"agents\":[]}," +
+	want := "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"future\",\"managed\":true,\"agents\":[]," +
+		"\"defect\":\"session \\\"future\\\" was created by a different agentctl version \\\"2\\\"\"}," +
 		"{\"schema\":1,\"session\":\"shell\",\"managed\":false,\"agents\":[]}]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
