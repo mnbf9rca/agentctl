@@ -1,8 +1,10 @@
 package attach
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,19 +107,173 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte(
+			"@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n" +
+				"@8\tcoder\t1\t1\tcoder\tcodex\t\tcodex\n" +
+				"@9\treviewer\t1\t1\treviewer\tclaude\t\tclaude\n",
+		)},
 		tmuxx.Response{},
 	)
+	var notice bytes.Buffer
 
-	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, &notice)
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
+	want := "agentctl: attaching session \"fleet\" (3 windows) in iTerm2…\n" +
+		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
+		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
+		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
+		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+	if notice.String() != want {
+		t.Fatalf("notice = %q, want %q", notice.String(), want)
+	}
 	assertCalls(t, runner,
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{
+			"list-windows", "-t", "$4", "-F",
+			"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
 	)
+}
+
+func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Err: errors.New("count failed")},
+		tmuxx.Response{},
+	)
+	var narration bytes.Buffer
+
+	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, &narration)
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	want := "agentctl: attaching session \"fleet\" in iTerm2…\n" +
+		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
+		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
+		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
+		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
+		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+	if narration.String() != want {
+		t.Fatalf("narration = %q, want %q", narration.String(), want)
+	}
+	assertCalls(t, runner,
+		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{
+			"list-windows", "-t", "$4", "-F",
+			"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+		}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
+	)
+}
+
+func TestExecuteNarratesASingleObservedWindowGrammatically(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{},
+	)
+	var narration bytes.Buffer
+
+	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, &narration)
+
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if firstLine := strings.SplitN(narration.String(), "\n", 2)[0]; firstLine != "agentctl: attaching session \"fleet\" (1 window) in iTerm2…" {
+		t.Fatalf("first narration line = %q, want singular window", firstLine)
+	}
+}
+
+func TestExecuteWritesNoNoticeWhenTheOwnershipGateRefuses(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("0\n")})
+	var notice bytes.Buffer
+
+	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, &notice)
+
+	var refusal *RefusalError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("Execute() error = %T %v, want *RefusalError", err, err)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice = %q, want empty; a refused attach must not announce one", notice.String())
+	}
+}
+
+func TestStillRunningReportsPresenceOfTheAttachedSessionID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		sessions    string
+		wantPresent bool
+	}{
+		{name: "present", sessions: "$4\tfleet\n$7\tother\n", wantPresent: true},
+		{name: "absent", sessions: "$7\tother\n"},
+		{name: "same name different id", sessions: "$9\tfleet\n"},
+		{name: "no sessions", sessions: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte(tt.sessions)})
+
+			present, err := New(tmuxx.New(runner), nil).StillRunning(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+
+			if err != nil {
+				t.Fatalf("StillRunning() error = %v", err)
+			}
+			if present != tt.wantPresent {
+				t.Fatalf("StillRunning() = %v, want %v", present, tt.wantPresent)
+			}
+			assertCalls(t, runner, tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}})
+		})
+	}
+}
+
+func TestStillRunningReportsItsOwnFailureInsteadOfAnAbsence(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("tmux failed")
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: wantErr})
+
+	present, err := New(tmuxx.New(runner), nil).StillRunning(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+
+	if present {
+		t.Fatalf("StillRunning() = %v, want false", present)
+	}
+	var tmuxFailure *tmuxx.TmuxError
+	if !errors.As(err, &tmuxFailure) {
+		t.Fatalf("StillRunning() error = %T %v, want *tmuxx.TmuxError", err, err)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StillRunning() error = %v, want wrapped runner error", err)
+	}
+}
+
+func TestStillRunningPreservesContextErrors(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: context.Canceled})
+
+	if _, err := New(tmuxx.New(runner), nil).StillRunning(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}); err != context.Canceled {
+		t.Fatalf("StillRunning() error = %T %v, want context.Canceled", err, err)
+	}
 }
 
 func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
@@ -165,7 +321,7 @@ func TestExecuteRefusesEveryFailedOwnershipGateWithoutAttaching(t *testing.T) {
 			t.Parallel()
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 
-			err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+			err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, io.Discard)
 
 			var refusal *RefusalError
 			if !errors.As(err, &refusal) {
@@ -206,10 +362,14 @@ func TestExecuteClassifiesTmuxFailuresAndStopsAtFailedOperation(t *testing.T) {
 		},
 		{
 			name:      "control-mode attach",
-			responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: []byte("1\n")}, {Err: wantErr}},
+			responses: []tmuxx.Response{{Stdout: []byte("1\n")}, {Stdout: []byte("1\n")}, {}, {Err: wantErr}},
 			wantCalls: []tmuxx.Call{
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				{Executable: "tmux", Args: []string{
+					"list-windows", "-t", "$4", "-F",
+					"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+				}},
 				{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
 			},
 		},
@@ -219,7 +379,7 @@ func TestExecuteClassifiesTmuxFailuresAndStopsAtFailedOperation(t *testing.T) {
 			t.Parallel()
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 
-			err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+			err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, io.Discard)
 
 			var tmuxFailure *tmuxx.TmuxError
 			if !errors.As(err, &tmuxFailure) {
@@ -237,7 +397,7 @@ func TestExecutePreservesContextErrors(t *testing.T) {
 	t.Parallel()
 
 	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: context.Canceled})
-	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"})
+	err := New(tmuxx.New(runner), nil).Execute(context.Background(), tmuxx.Session{ID: "$4", Name: "fleet"}, io.Discard)
 	if err != context.Canceled {
 		t.Fatalf("Execute() error = %T %v, want context.Canceled", err, err)
 	}
