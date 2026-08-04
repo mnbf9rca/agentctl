@@ -30,6 +30,7 @@ type RelaunchRequest struct {
 	Role      string
 	Harness   *string
 	Model     *string
+	Effort    *string
 	Directory *string
 }
 
@@ -40,12 +41,14 @@ type RelaunchResult struct {
 	Session   string
 	Harness   string
 	Model     string
+	Effort    string
 	Directory string
 	WindowID  tmuxx.WindowID
 	PaneID    tmuxx.PaneID
 
 	HarnessFrom   Provenance
 	ModelFrom     Provenance
+	EffortFrom    Provenance
 	DirectoryFrom Provenance
 
 	// StoredDirectory is the session's recorded launch directory, set only when
@@ -118,7 +121,7 @@ type LegacySessionError struct {
 
 func (e *LegacySessionError) Error() string {
 	return "session records no per-role configuration; it was launched before agentctl recorded " +
-		optionFleet + " and " + optionDirectory + "; supply --harness [--model] --dir"
+		optionFleet + " and " + optionDirectory + "; supply --harness [--model] [--effort] --dir"
 }
 
 // ObservedWindow is one existing window blocking a relaunch, with the state
@@ -218,6 +221,15 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 			return RelaunchResult{}, err
 		}
 	}
+	if request.Effort != nil {
+		harness := config.HarnessClaude
+		if request.Harness != nil {
+			harness, _ = config.ParseHarness(*request.Harness)
+		}
+		if err := config.ValidateEffort(harness, *request.Effort); err != nil {
+			return RelaunchResult{}, err
+		}
+	}
 
 	if err := l.checkOwnership(ctx, session); err != nil {
 		return RelaunchResult{}, err
@@ -258,11 +270,13 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 		Session:       session.Name,
 		Harness:       string(role.Harness),
 		Model:         role.Model,
+		Effort:        role.Effort,
 		Directory:     directory,
 		WindowID:      created.WindowID,
 		PaneID:        created.PaneID,
 		HarnessFrom:   provenance.harness,
 		ModelFrom:     provenance.model,
+		EffortFrom:    provenance.effort,
 		DirectoryFrom: provenance.directory,
 	}
 	if provenance.directory == ProvenanceOverride && provenance.storedDirectory != directory {
@@ -276,13 +290,14 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 type sources struct {
 	harness         Provenance
 	model           Provenance
+	effort          Provenance
 	directory       Provenance
 	storedRoles     []config.RoleConfig
 	storedDirectory string
 }
 
 func (s sources) rewritesFleet() bool {
-	return s.storedRoles != nil && (s.harness == ProvenanceOverride || s.model == ProvenanceOverride)
+	return s.storedRoles != nil && (s.harness == ProvenanceOverride || s.model == ProvenanceOverride || s.effort == ProvenanceOverride)
 }
 
 func (l Launcher) checkOwnership(ctx context.Context, session tmuxx.Session) error {
@@ -357,6 +372,7 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 	provenance := sources{
 		harness:         ProvenanceStored,
 		model:           ProvenanceStored,
+		effort:          ProvenanceStored,
 		directory:       ProvenanceStored,
 		storedRoles:     storedRoles,
 		storedDirectory: directoryValue,
@@ -371,6 +387,10 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 	if request.Model != nil {
 		role.Model = *request.Model
 		provenance.model = ProvenanceOverride
+	}
+	if request.Effort != nil {
+		role.Effort = *request.Effort
+		provenance.effort = ProvenanceOverride
 	}
 	if request.Directory != nil {
 		directory = *request.Directory
@@ -395,9 +415,13 @@ func legacyConfiguration(session tmuxx.Session, request RelaunchRequest) (config
 	if request.Model != nil {
 		role.Model = *request.Model
 	}
+	if request.Effort != nil {
+		role.Effort = *request.Effort
+	}
 	return role, *request.Directory, sources{
 		harness:   ProvenanceFlags,
 		model:     ProvenanceFlags,
+		effort:    ProvenanceFlags,
 		directory: ProvenanceFlags,
 	}, nil
 }
@@ -522,9 +546,9 @@ func decodeFleet(value string) ([]config.RoleConfig, error) {
 	roles := make([]config.RoleConfig, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	for index, entry := range entries {
-		fields := strings.SplitN(entry, ":", 3)
-		if len(fields) != 3 {
-			return nil, fmt.Errorf("entry %d %q is not role:harness:model", index+1, entry)
+		fields := strings.SplitN(entry, ":", 4)
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("entry %d %q is not role:harness:model:effort", index+1, entry)
 		}
 		if err := config.ValidateRoleName(fields[0]); err != nil {
 			return nil, fmt.Errorf("entry %d %q names invalid role %q", index+1, entry, fields[0])
@@ -542,7 +566,12 @@ func decodeFleet(value string) ([]config.RoleConfig, error) {
 				return nil, fmt.Errorf("entry %d %q has invalid model %q", index+1, entry, fields[2])
 			}
 		}
-		roles = append(roles, config.RoleConfig{Name: fields[0], Harness: harness, Model: fields[2]})
+		if fields[3] != "" {
+			if err := config.ValidateEffort(harness, fields[3]); err != nil {
+				return nil, fmt.Errorf("entry %d %q has invalid effort %q", index+1, entry, fields[3])
+			}
+		}
+		roles = append(roles, config.RoleConfig{Name: fields[0], Harness: harness, Model: fields[2], Effort: fields[3]})
 	}
 	return roles, nil
 }

@@ -50,7 +50,7 @@ Commands:
 
 var commandUsage = map[string]string{
 	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
-	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--dir PATH] ROLE\n\n" +
+	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE\n\n" +
 		"Recreates a role window that is absent. It refuses whenever the role's window still exists,\n" +
 		"including a dead one, and reports whether the configuration came from the session or from flags.\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
@@ -213,6 +213,7 @@ func runWithAllDependencies(
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
+		deps.launch.fleet.Stderr = stderr
 		err = fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
 		return launchResult(stderr, err, usage)
 	}
@@ -294,6 +295,7 @@ func runWithAllDependencies(
 			Role:      options.role,
 			Harness:   options.harness,
 			Model:     options.model,
+			Effort:    options.effort,
 			Directory: options.directory,
 		})
 		if err != nil {
@@ -471,6 +473,7 @@ type commandOptions struct {
 	role       string
 	harness    *string
 	model      *string
+	effort     *string
 	directory  *string
 }
 
@@ -479,7 +482,7 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	sessionValue := flags.String("session", "", "session name")
 
 	var roles, models *string
-	var harness, model, directory *string
+	var harness, model, effort, directory *string
 	var jsonOutput *bool
 	switch command {
 	case "launch":
@@ -491,6 +494,7 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	case "relaunch":
 		harness = flags.String("harness", "", "harness override")
 		model = flags.String("model", "", "model override")
+		effort = flags.String("effort", "", "effort override")
 		directory = flags.String("dir", "", "working directory override")
 	}
 
@@ -504,6 +508,7 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	if command == "relaunch" {
 		options.harness = suppliedValue(flags, "harness", harness)
 		options.model = suppliedValue(flags, "model", model)
+		options.effort = suppliedValue(flags, "effort", effort)
 		options.directory = suppliedValue(flags, "dir", directory)
 	}
 
@@ -566,20 +571,37 @@ func validateRelaunchOverrides(options commandOptions) error {
 			return err
 		}
 	}
+	if options.effort != nil {
+		harness := config.HarnessClaude
+		if options.harness != nil {
+			harness, _ = config.ParseHarness(*options.harness)
+		}
+		if err := config.ValidateEffort(harness, *options.effort); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func writeRelaunchResult(stdout io.Writer, result fleet.RelaunchResult) {
-	fmt.Fprintf(stdout, "agentctl: relaunched %s in %s: window %s, pane %s, harness %s (%s), model %s (%s), dir %s (%s)\n",
+	fmt.Fprintf(stdout, "agentctl: relaunched %s in %s: window %s, pane %s, harness %s (%s), model %s (%s), effort %s (%s), dir %s (%s)\n",
 		result.Role, result.Session, result.WindowID, result.PaneID,
 		result.Harness, result.HarnessFrom,
 		renderModel(result.Model), result.ModelFrom,
+		renderEffort(result.Effort), result.EffortFrom,
 		result.Directory, result.DirectoryFrom,
 	)
 	if result.StoredDirectory != "" {
 		fmt.Fprintf(stdout, "agentctl: %s now runs in %s; the fleet's recorded directory %s is unchanged\n",
 			result.Role, result.Directory, result.StoredDirectory)
 	}
+}
+
+func renderEffort(effort string) string {
+	if effort == "" {
+		return "default"
+	}
+	return effort
 }
 
 // renderModel applies the human-output rule for a defaulted model; metadata and

@@ -56,6 +56,20 @@ func EffortLevels(harness Harness) []string {
 	return append([]string(nil), levels...)
 }
 
+// ValidateEffort checks one effort against the harness's closed set.
+func ValidateEffort(harness Harness, effort string) error {
+	if supportsEffort(harness, effort) {
+		return nil
+	}
+	return &ValidationError{
+		Option:     "effort",
+		Value:      effort,
+		EntryIndex: -1,
+		Reason: fmt.Sprintf("harness %q does not support effort %q; supported levels are %s",
+			harness, effort, strings.Join(effortLevels[harness], ", ")),
+	}
+}
+
 // FleetConfig is an ordered, validated fleet declaration.
 type FleetConfig struct {
 	Roles []RoleConfig

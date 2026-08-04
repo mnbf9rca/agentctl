@@ -256,6 +256,19 @@ func TestSessionOptionWrappersOwnScopeAndPreserveValues(t *testing.T) {
 	)
 }
 
+func TestClearSessionEnvironmentUsesResolvedIDAndUnsetArgv(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	client := New(runner)
+	if err := client.ClearSessionEnvironment(context.Background(), "$4", "AGENTCTL_ROLE"); err != nil {
+		t.Fatalf("ClearSessionEnvironment() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"set-environment", "-t", "$4", "-u", "AGENTCTL_ROLE",
+	}})
+}
+
 func TestWindowOptionWrappersOwnScopeAndAllowEmptyValue(t *testing.T) {
 	t.Parallel()
 
@@ -290,6 +303,9 @@ func TestTypedTargetsRejectNamesBeforeRunningTmux(t *testing.T) {
 		}},
 		{name: "session option", run: func(client Client) error {
 			return client.SetSessionOption(context.Background(), "epic123", "@k", "v")
+		}},
+		{name: "session environment", run: func(client Client) error {
+			return client.ClearSessionEnvironment(context.Background(), "epic123", "NAME")
 		}},
 		{name: "window option", run: func(client Client) error {
 			return client.SetWindowOption(context.Background(), "worker", "@k", "v")

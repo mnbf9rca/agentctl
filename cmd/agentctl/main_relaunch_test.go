@@ -40,48 +40,48 @@ func TestRunRelaunchReportsWhatItCreatedAndEveryFieldsProvenance(t *testing.T) {
 		{
 			name: "stored configuration",
 			result: fleet.RelaunchResult{
-				Role: "planner", Session: "epic123", Harness: "claude", Model: "fable",
+				Role: "planner", Session: "epic123", Harness: "claude", Model: "fable", Effort: "max",
 				Directory: "/repo", WindowID: "@71", PaneID: "%88",
-				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceStored,
+				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, EffortFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceStored,
 			},
-			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), dir /repo (stored)\n",
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), effort max (stored), dir /repo (stored)\n",
 		},
 		{
 			name: "defaulted model renders as default",
 			result: fleet.RelaunchResult{
 				Role: "planner", Session: "epic123", Harness: "codex", Model: "",
 				Directory: "/repo", WindowID: "@71", PaneID: "%88",
-				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceStored,
+				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, EffortFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceStored,
 			},
-			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness codex (stored), model default (stored), dir /repo (stored)\n",
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness codex (stored), model default (stored), effort default (stored), dir /repo (stored)\n",
 		},
 		{
 			name: "flag overrides are reported as overrides",
 			result: fleet.RelaunchResult{
-				Role: "planner", Session: "epic123", Harness: "codex", Model: "gpt-5.6",
+				Role: "planner", Session: "epic123", Harness: "codex", Model: "gpt-5.6", Effort: "high",
 				Directory: "/repo", WindowID: "@71", PaneID: "%88",
-				HarnessFrom: fleet.ProvenanceOverride, ModelFrom: fleet.ProvenanceOverride, DirectoryFrom: fleet.ProvenanceStored,
+				HarnessFrom: fleet.ProvenanceOverride, ModelFrom: fleet.ProvenanceOverride, EffortFrom: fleet.ProvenanceOverride, DirectoryFrom: fleet.ProvenanceStored,
 			},
-			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness codex (flag override), model gpt-5.6 (flag override), dir /repo (stored)\n",
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness codex (flag override), model gpt-5.6 (flag override), effort high (flag override), dir /repo (stored)\n",
 		},
 		{
 			name: "legacy session reports flags",
 			result: fleet.RelaunchResult{
 				Role: "planner", Session: "epic123", Harness: "claude", Model: "",
 				Directory: "/repo", WindowID: "@71", PaneID: "%88",
-				HarnessFrom: fleet.ProvenanceFlags, ModelFrom: fleet.ProvenanceFlags, DirectoryFrom: fleet.ProvenanceFlags,
+				HarnessFrom: fleet.ProvenanceFlags, ModelFrom: fleet.ProvenanceFlags, EffortFrom: fleet.ProvenanceFlags, DirectoryFrom: fleet.ProvenanceFlags,
 			},
-			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (flags), model default (flags), dir /repo (flags)\n",
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (flags), model default (flags), effort default (flags), dir /repo (flags)\n",
 		},
 		{
 			name: "directory override states the divergence",
 			result: fleet.RelaunchResult{
 				Role: "planner", Session: "epic123", Harness: "claude", Model: "fable",
 				Directory: "/elsewhere", WindowID: "@71", PaneID: "%88",
-				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceOverride,
+				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, EffortFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceOverride,
 				StoredDirectory: "/repo",
 			},
-			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), dir /elsewhere (flag override)\n" +
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), effort default (stored), dir /elsewhere (flag override)\n" +
 				"agentctl: planner now runs in /elsewhere; the fleet's recorded directory /repo is unchanged\n",
 		},
 	} {
@@ -119,8 +119,8 @@ func TestRunRelaunchPassesOnlySuppliedOptionsAsOverrides(t *testing.T) {
 		},
 		{
 			name: "every override",
-			args: []string{"relaunch", "--session", "epic123", "--harness", "codex", "--model", "gpt-5.6", "--dir", "/elsewhere", "planner"},
-			want: fleet.RelaunchRequest{Role: "planner", Harness: strPtr("codex"), Model: strPtr("gpt-5.6"), Directory: strPtr("/elsewhere")},
+			args: []string{"relaunch", "--session", "epic123", "--harness", "codex", "--model", "gpt-5.6", "--effort", "high", "--dir", "/elsewhere", "planner"},
+			want: fleet.RelaunchRequest{Role: "planner", Harness: strPtr("codex"), Model: strPtr("gpt-5.6"), Effort: strPtr("high"), Directory: strPtr("/elsewhere")},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -155,7 +155,10 @@ func TestRunRelaunchRejectsInvalidInvocationsBeforeAnyDependency(t *testing.T) {
 		{name: "empty harness", args: []string{"relaunch", "--session", "epic123", "--harness=", "planner"}},
 		{name: "smuggled model", args: []string{"relaunch", "--session", "epic123", "--model", "--dangerously-bypass-approvals-and-sandbox", "planner"}},
 		{name: "empty model", args: []string{"relaunch", "--session", "epic123", "--model=", "planner"}},
+		{name: "unknown effort", args: []string{"relaunch", "--session", "epic123", "--effort", "turbo", "planner"}},
+		{name: "empty effort", args: []string{"relaunch", "--session", "epic123", "--effort=", "planner"}},
 		{name: "duplicate harness", args: []string{"relaunch", "--session", "epic123", "--harness", "claude", "--harness", "codex", "planner"}},
+		{name: "duplicate effort", args: []string{"relaunch", "--session", "epic123", "--effort", "high", "--effort", "low", "planner"}},
 		{name: "duplicate dir", args: []string{"relaunch", "--session", "epic123", "--dir", "/a", "--dir", "/b", "planner"}},
 		{name: "roles option", args: []string{"relaunch", "--session", "epic123", "--roles", "planner:claude", "planner"}},
 		{name: "text option", args: []string{"relaunch", "--session", "epic123", "--text", "hello", "planner"}},
@@ -236,7 +239,7 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 			name: "legacy session",
 			err:  &fleet.LegacySessionError{Session: session, Role: "planner"},
 			code: exitSession,
-			want: "agentctl: refusing to relaunch planner; session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] --dir\n",
+			want: "agentctl: refusing to relaunch planner; session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] [--effort] --dir\n",
 		},
 		{
 			name: "window still exists",
@@ -338,11 +341,11 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner,reviewer\n")},
-		tmuxx.Response{Stdout: []byte("planner:claude:fable,reviewer:codex:\n")},
+		tmuxx.Response{Stdout: []byte("planner:claude:fable:max,reviewer:codex::\n")},
 		tmuxx.Response{Stdout: []byte("/fleet workspace\n")},
-		tmuxx.Response{Stdout: []byte("@65\treviewer\t1\t1\treviewer\tcodex\t\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
@@ -356,7 +359,7 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("runWithAllDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
-	want := "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), dir /fleet workspace (stored)\n"
+	want := "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), effort max (stored), dir /fleet workspace (stored)\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -367,16 +370,18 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_fleet"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_dir"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/fleet workspace",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
-			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable'",
+			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "fable"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "max"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
 	)

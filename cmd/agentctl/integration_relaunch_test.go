@@ -26,7 +26,7 @@ func TestIntegrationRelaunchRecreatesOnlyTheAbsentRole(t *testing.T) {
 	fixture.waitRoleMarkers("planner", "coder")
 
 	session := fixture.sessions()[0]
-	if want := "planner:claude:,coder:codex:gpt-5.6"; session.Fleet != want {
+	if want := "planner:claude::,coder:codex:gpt-5.6:"; session.Fleet != want {
 		t.Fatalf("@agentctl_fleet = %q, want %q", session.Fleet, want)
 	}
 	workingDirectory, err := os.Getwd()

@@ -15,7 +15,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-const windowListFormat = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
+const windowListFormat = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
 
 func relaunchSession() tmuxx.Session { return tmuxx.Session{ID: "$4", Name: "epic123"} }
 
@@ -61,13 +61,13 @@ func metadataReadCalls() []tmuxx.Call {
 func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T) {
 	responses := storedMetadataResponses(
 		"planner,reviewer",
-		"planner:claude:fable,reviewer:codex:",
+		"planner:claude:fable:max,reviewer:codex::",
 		"/fleet workspace",
-		"@65\treviewer\t1\t1\treviewer\tcodex\t\tcodex\n",
+		"@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n",
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
@@ -83,11 +83,13 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 		Session:       "epic123",
 		Harness:       "claude",
 		Model:         "fable",
+		Effort:        "max",
 		Directory:     "/fleet workspace",
 		WindowID:      "@71",
 		PaneID:        "%88",
 		HarnessFrom:   ProvenanceStored,
 		ModelFrom:     ProvenanceStored,
+		EffortFrom:    ProvenanceStored,
 		DirectoryFrom: ProvenanceStored,
 	}
 	if !reflect.DeepEqual(result, want) {
@@ -96,23 +98,25 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 	assertCalls(t, runner, append(metadataReadCalls(),
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/fleet workspace",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
-			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable'",
+			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "fable"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "max"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
 	)...)
 }
 
 func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
-	responses := storedMetadataResponses("planner", "planner:claude:", "/repo", "")
+	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
 	)
@@ -124,6 +128,7 @@ func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 	creation := runner.Calls[6]
 	want := tmuxx.Call{Executable: "tmux", Args: []string{
 		"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/repo",
+		"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 		"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude'",
 	}}
@@ -142,13 +147,13 @@ func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T) {
 	responses := storedMetadataResponses(
 		"planner,reviewer",
-		"planner:claude:fable,reviewer:codex:",
+		"planner:claude:fable:max,reviewer:codex::",
 		"/repo",
-		"@65\treviewer\t1\t1\treviewer\tcodex\t\tcodex\n",
+		"@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n",
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{},
 		tmuxx.Response{},
@@ -159,19 +164,20 @@ func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T)
 		Role:    "planner",
 		Harness: stringPtr("codex"),
 		Model:   stringPtr("gpt-5.6"),
+		Effort:  stringPtr("high"),
 	})
 	if err != nil {
 		t.Fatalf("Relaunch() error = %v", err)
 	}
-	if result.Harness != "codex" || result.Model != "gpt-5.6" {
-		t.Fatalf("result configuration = %q/%q, want codex/gpt-5.6", result.Harness, result.Model)
+	if result.Harness != "codex" || result.Model != "gpt-5.6" || result.Effort != "high" {
+		t.Fatalf("result configuration = %q/%q/%q, want codex/gpt-5.6/high", result.Harness, result.Model, result.Effort)
 	}
-	if result.HarnessFrom != ProvenanceOverride || result.ModelFrom != ProvenanceOverride || result.DirectoryFrom != ProvenanceStored {
-		t.Fatalf("result provenance = %#v, want harness and model overridden with a stored directory", result)
+	if result.HarnessFrom != ProvenanceOverride || result.ModelFrom != ProvenanceOverride || result.EffortFrom != ProvenanceOverride || result.DirectoryFrom != ProvenanceStored {
+		t.Fatalf("result provenance = %#v, want harness, model, and effort overridden with a stored directory", result)
 	}
 	last := runner.Calls[len(runner.Calls)-1]
 	want := tmuxx.Call{Executable: "tmux", Args: []string{
-		"set-option", "-t", "$4", "@agentctl_fleet", "planner:codex:gpt-5.6,reviewer:codex:",
+		"set-option", "-t", "$4", "@agentctl_fleet", "planner:codex:gpt-5.6:high,reviewer:codex::",
 	}}
 	if !reflect.DeepEqual(last, want) {
 		t.Fatalf("last call = %#v, want re-encoded fleet metadata %#v", last, want)
@@ -183,10 +189,10 @@ func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T)
 }
 
 func TestRelaunchDirectoryOverrideLeavesRecordedFleetDirectoryUnchanged(t *testing.T) {
-	responses := storedMetadataResponses("planner", "planner:claude:", "/repo", "")
+	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
 	)
@@ -324,36 +330,40 @@ func TestRelaunchRefusesDefectiveFleetMetadata(t *testing.T) {
 		message    string
 	}{
 		{
-			name: "fleet without directory", roster: "planner", fleetValue: "planner:claude:", directory: "",
-			message: `managed session "epic123" has @agentctl_fleet "planner:claude:" but no @agentctl_dir`,
+			name: "fleet without directory", roster: "planner", fleetValue: "planner:claude::", directory: "",
+			message: `managed session "epic123" has @agentctl_fleet "planner:claude::" but no @agentctl_dir`,
 		},
 		{
 			name: "directory without fleet", roster: "planner", fleetValue: "", directory: "/repo",
 			message: `managed session "epic123" has @agentctl_dir "/repo" but no @agentctl_fleet`,
 		},
 		{
-			name: "roles disagree with roster", roster: "planner,reviewer", fleetValue: "planner:claude:,worker:codex:", directory: "/repo",
-			message: `managed session "epic123" has @agentctl_fleet "planner:claude:,worker:codex:" whose roles do not match @agentctl_roles "planner,reviewer"`,
+			name: "roles disagree with roster", roster: "planner,reviewer", fleetValue: "planner:claude::,worker:codex::", directory: "/repo",
+			message: `managed session "epic123" has @agentctl_fleet "planner:claude::,worker:codex::" whose roles do not match @agentctl_roles "planner,reviewer"`,
 		},
 		{
-			name: "roster order differs", roster: "planner,reviewer", fleetValue: "reviewer:codex:,planner:claude:", directory: "/repo",
-			message: `managed session "epic123" has @agentctl_fleet "reviewer:codex:,planner:claude:" whose roles do not match @agentctl_roles "planner,reviewer"`,
+			name: "roster order differs", roster: "planner,reviewer", fleetValue: "reviewer:codex::,planner:claude::", directory: "/repo",
+			message: `managed session "epic123" has @agentctl_fleet "reviewer:codex::,planner:claude::" whose roles do not match @agentctl_roles "planner,reviewer"`,
 		},
 		{
-			name: "duplicate role", roster: "planner,reviewer", fleetValue: "planner:claude:,planner:codex:", directory: "/repo",
-			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude:,planner:codex:": entry 2 "planner:codex:" repeats role "planner"`,
+			name: "duplicate role", roster: "planner,reviewer", fleetValue: "planner:claude::,planner:codex::", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude::,planner:codex::": entry 2 "planner:codex::" repeats role "planner"`,
 		},
 		{
-			name: "entry is not a triple", roster: "planner", fleetValue: "planner:claude", directory: "/repo",
-			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude": entry 1 "planner:claude" is not role:harness:model`,
+			name: "entry is not a quad", roster: "planner", fleetValue: "planner:claude", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude": entry 1 "planner:claude" is not role:harness:model:effort`,
 		},
 		{
-			name: "unknown harness", roster: "planner", fleetValue: "planner:bash:", directory: "/repo",
-			message: `managed session "epic123" has invalid @agentctl_fleet "planner:bash:": entry 1 "planner:bash:" names unknown harness "bash"`,
+			name: "unknown harness", roster: "planner", fleetValue: "planner:bash::", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:bash::": entry 1 "planner:bash::" names unknown harness "bash"`,
 		},
 		{
-			name: "smuggled model", roster: "planner", fleetValue: "planner:claude:--dangerously", directory: "/repo",
-			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude:--dangerously": entry 1 "planner:claude:--dangerously" has invalid model "--dangerously"`,
+			name: "smuggled model", roster: "planner", fleetValue: "planner:claude:--dangerously:", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude:--dangerously:": entry 1 "planner:claude:--dangerously:" has invalid model "--dangerously"`,
+		},
+		{
+			name: "unknown effort", roster: "planner", fleetValue: "planner:claude::turbo", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude::turbo": entry 1 "planner:claude::turbo" has invalid effort "turbo"`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -380,7 +390,7 @@ func TestRelaunchRefusesDefectiveFleetMetadata(t *testing.T) {
 }
 
 func TestRelaunchRefusesLegacySessionsWithoutSuppliedConfiguration(t *testing.T) {
-	wantMessage := "session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] --dir"
+	wantMessage := "session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] [--effort] --dir"
 	for _, tt := range []struct {
 		name    string
 		request RelaunchRequest
@@ -422,7 +432,7 @@ func TestRelaunchAcceptsLegacySessionWithSuppliedConfigurationAndNeverDefaultsDi
 		{Stdout: []byte("\n")},
 		{Stdout: []byte("")},
 		{Stdout: []byte("@71\t%88\t5150\n")},
-		{}, {}, {}, {},
+		{}, {}, {}, {}, {},
 		{Stdout: []byte("codex\n")},
 		{},
 	}
@@ -436,7 +446,7 @@ func TestRelaunchAcceptsLegacySessionWithSuppliedConfigurationAndNeverDefaultsDi
 	if err != nil {
 		t.Fatalf("Relaunch() error = %v", err)
 	}
-	if result.HarnessFrom != ProvenanceFlags || result.ModelFrom != ProvenanceFlags || result.DirectoryFrom != ProvenanceFlags {
+	if result.HarnessFrom != ProvenanceFlags || result.ModelFrom != ProvenanceFlags || result.EffortFrom != ProvenanceFlags || result.DirectoryFrom != ProvenanceFlags {
 		t.Fatalf("result provenance = %#v, want every field reported as supplied by flags", result)
 	}
 	if result.Model != "" || result.StoredDirectory != "" {
@@ -462,54 +472,54 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 	}{
 		{
 			name:      "running",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("2.1.220\n")}},
 			wantState: status.StateRunning,
 			message:   "role planner already has 1 window in epic123 (@23 running); relaunch creates only absent role windows",
 		},
 		{
 			name:      "dead",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t1\t1\n")}},
 			wantState: status.StateDead,
 			message:   "role planner already has 1 window in epic123 (@23 dead); relaunch creates only absent role windows",
 		},
 		{
 			name:      "unmanaged metadata",
-			windows:   "@23\tplanner\t\t\t\t\t\t\n",
+			windows:   "@23\tplanner\t\t\t\t\t\t\t\n",
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
 		},
 		{
 			name:      "unmanaged pane count",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t2\n%43\t4243\t0\t2\n")}},
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
 		},
 		{
 			name:      "zero panes",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("")}},
 			wantState: status.StateMissing,
 			message:   "role planner already has 1 window in epic123 (@23 missing); relaunch creates only absent role windows",
 		},
 		{
 			name:      "unexpected process",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("bash\n")}},
 			wantState: status.StateUnexpectedProcess,
 			message:   "role planner already has 1 window in epic123 (@23 unexpected-process); relaunch creates only absent role windows",
 		},
 		{
 			name:      "ambiguous",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n@31\tplanner\t1\t1\tplanner\tclaude\tfable\t2.1.220\n",
+			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n@31\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateAmbiguous,
 			message:   "role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch creates only absent role windows",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			responses := storedMetadataResponses("planner", "planner:claude:fable", "/repo", tt.windows)
+			responses := storedMetadataResponses("planner", "planner:claude:fable:", "/repo", tt.windows)
 			responses = append(responses, tt.extra...)
 			runner := tmuxx.NewFakeRunner(responses...)
 
@@ -531,7 +541,7 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 }
 
 func TestRelaunchReportsMissingExecutablesBeforeCreating(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(storedMetadataResponses("planner", "planner:codex:", "/repo", "")...)
+	runner := tmuxx.NewFakeRunner(storedMetadataResponses("planner", "planner:codex::", "/repo", "")...)
 	var lookedUp []string
 	lookPath := func(name string) (string, error) {
 		lookedUp = append(lookedUp, name)
@@ -589,7 +599,7 @@ func TestRelaunchClassifiesAnUnusableDirectoryByProvenance(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner(storedMetadataResponses("planner", "planner:claude:", "/repo", "")...)
+			runner := tmuxx.NewFakeRunner(storedMetadataResponses("planner", "planner:claude::", "/repo", "")...)
 			launcher := New(runner, Dependencies{LookPath: presentExecutable, Stat: tt.stat})
 
 			_, err := launcher.Relaunch(context.Background(), relaunchSession(), tt.request)
@@ -620,7 +630,7 @@ func TestRelaunchClassifiesAnUnusableDirectoryByProvenance(t *testing.T) {
 }
 
 func TestRelaunchMalformedCreationOutputRemovesNothing(t *testing.T) {
-	responses := storedMetadataResponses("planner", "planner:claude:", "/repo", "")
+	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses, tmuxx.Response{Stdout: []byte("not a record\n")})
 	runner := tmuxx.NewFakeRunner(responses...)
 
@@ -650,9 +660,10 @@ func TestRelaunchRollsBackOnlyTheWindowThisInvocationCreated(t *testing.T) {
 		{name: "window role option", index: 8},
 		{name: "window harness option", index: 9},
 		{name: "window model option", index: 10},
-		{name: "process baseline", index: 11},
-		{name: "window process option", index: 12},
-		{name: "fleet metadata rewrite", index: 13},
+		{name: "window effort option", index: 11},
+		{name: "process baseline", index: 12},
+		{name: "window process option", index: 13},
+		{name: "fleet metadata rewrite", index: 14},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			responses := relaunchPrefixResponses(tt.index)
@@ -739,6 +750,7 @@ func TestRelaunchRejectsInvalidValuesBeforeAnyCommand(t *testing.T) {
 		{name: "flag-shaped role", request: RelaunchRequest{Role: "-planner"}},
 		{name: "unknown harness", request: RelaunchRequest{Role: "planner", Harness: stringPtr("bash")}},
 		{name: "smuggled model", request: RelaunchRequest{Role: "planner", Model: stringPtr("--dangerously")}},
+		{name: "unknown effort", request: RelaunchRequest{Role: "planner", Effort: stringPtr("turbo")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner()
@@ -757,10 +769,10 @@ func TestRelaunchRejectsInvalidValuesBeforeAnyCommand(t *testing.T) {
 }
 
 func TestRelaunchedRoleSatisfiesStatusAndControlAgainstTheFreshBaseline(t *testing.T) {
-	responses := storedMetadataResponses("planner", "planner:claude:fable", "/repo", "")
+	responses := storedMetadataResponses("planner", "planner:claude:fable:", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
@@ -782,7 +794,7 @@ func TestRelaunchedRoleSatisfiesStatusAndControlAgainstTheFreshBaseline(t *testi
 	record := strings.Join([]string{
 		string(result.WindowID), result.Role,
 		stamped["@agentctl_managed"], "1", stamped["@agentctl_role"],
-		stamped["@agentctl_harness"], stamped["@agentctl_model"], stamped["@agentctl_process"],
+		stamped["@agentctl_harness"], stamped["@agentctl_model"], stamped["@agentctl_effort"], stamped["@agentctl_process"],
 	}, "\t") + "\n"
 	paneRecord := string(result.PaneID) + "\t5150\t0\t1\n"
 
@@ -826,11 +838,11 @@ func relaunchPrefixResponses(end int) []tmuxx.Response {
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("planner\n")},
-		{Stdout: []byte("planner:claude:fable\n")},
+		{Stdout: []byte("planner:claude:fable:\n")},
 		{Stdout: []byte("/repo\n")},
 		{Stdout: []byte("")},
 		{Stdout: []byte("@71\t%88\t5150\n")},
-		{}, {}, {}, {},
+		{}, {}, {}, {}, {},
 		{Stdout: []byte("2.1.220\n")},
 		{},
 		{},

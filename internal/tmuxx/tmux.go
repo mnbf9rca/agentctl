@@ -214,6 +214,15 @@ func (c Client) SetSessionOption(ctx context.Context, sid SessionID, name, value
 	return err
 }
 
+// ClearSessionEnvironment removes one variable from an exact session ID.
+func (c Client) ClearSessionEnvironment(ctx context.Context, sid SessionID, name string) error {
+	if err := validateID(string(sid), '$'); err != nil {
+		return fmt.Errorf("clear session environment target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "clear session environment", "set-environment", "-t", string(sid), "-u", name)
+	return err
+}
+
 // SetWindowOption sets one option on an exact window ID.
 func (c Client) SetWindowOption(ctx context.Context, wid WindowID, name, value string) error {
 	if err := validateID(string(wid), '@'); err != nil {
