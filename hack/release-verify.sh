@@ -91,6 +91,10 @@ session_absent() {
   esac
 }
 
+# Markdown backticks below are literal; command substitution is deliberately
+# suppressed throughout this function. One function-level directive replaces
+# what would otherwise be a repeated per-line disable comment.
+# shellcheck disable=SC2016
 render_results() {
   versions_file=$1
   artifact_dir=$2
@@ -110,23 +114,11 @@ render_results() {
   date_only=${date_utc%%T*}
 
   printf '### %s\n\n' "$date_only"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- agentctl: `%s`\n' "$agentctl_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- tmux: `%s`\n' "$tmux_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Claude Code: `%s`\n' "$claude_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- codex-cli: `%s`\n' "$codex_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Mode: `%s`; harness: `%s`\n' "$mode" "$harness"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
 
   if [ "$mode" = verify-live ]; then
