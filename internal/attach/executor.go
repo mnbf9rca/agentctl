@@ -17,6 +17,7 @@ type LookupEnv func(string) (string, bool)
 // observe a session.
 type Client interface {
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
+	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	AttachSession(context.Context, tmuxx.SessionID) error
 	ListSessions(context.Context) ([]tmuxx.Session, error)
 }
@@ -86,7 +87,7 @@ func (e Executor) CheckEnvironment() error {
 }
 
 // Execute requires the current managed/version markers, then attaches by the
-// resolved session ID. The notice is written to out only once the ownership
+// resolved session ID. The narration is written to out only once the ownership
 // gate has passed and immediately before control mode starts, so it never
 // announces an attachment a refusal prevented.
 func (e Executor) Execute(ctx context.Context, target tmuxx.Session, out io.Writer) error {
@@ -106,7 +107,11 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session, out io.Writ
 		return &RefusalError{Session: target, Option: "@agentctl_version", Value: version}
 	}
 
-	writeNotice(out, target)
+	windowCount := -1
+	if windows, countErr := e.client.ListWindows(ctx, target.ID); countErr == nil {
+		windowCount = len(windows)
+	}
+	writeNarration(out, target, windowCount)
 
 	if err := e.client.AttachSession(ctx, target.ID); err != nil {
 		return tmuxx.ClassifyError(err)
@@ -132,15 +137,24 @@ func (e Executor) StillRunning(ctx context.Context, target tmuxx.Session) (bool,
 	return false, nil
 }
 
-// writeNotice states what the keys in the iTerm2 command menu that follows do,
-// and which of them agentctl owns: none. Every claim here is about agentctl or
-// about a clean tmux detach; what actually became of the session is reported
-// from observation once control mode ends.
-func writeNotice(out io.Writer, target tmuxx.Session) {
+// writeNarration states what iTerm2 is about to do and what its command-menu
+// keys mean. A negative windowCount means the advisory count read failed, so
+// the count is omitted rather than guessed.
+func writeNarration(out io.Writer, target tmuxx.Session, windowCount int) {
 	if out == nil {
 		return
 	}
-	fmt.Fprintf(out, "agentctl: attaching session %q (%s) in iTerm2 tmux control mode; the command menu printed next comes from iTerm2, not from agentctl.\n", target.Name, target.ID)
-	fmt.Fprint(out, "agentctl: in that menu, esc detaches and leaves the fleet running; X (uppercase) force-quits iTerm2's tmux mode without a clean detach.\n")
-	fmt.Fprintf(out, "agentctl: agentctl never stops a fleet on detach; only agentctl kill --session %s does.\n", target.Name)
+	if windowCount >= 0 {
+		label := "windows"
+		if windowCount == 1 {
+			label = "window"
+		}
+		fmt.Fprintf(out, "agentctl: attaching session %q (%d %s) in iTerm2…\n", target.Name, windowCount, label)
+	} else {
+		fmt.Fprintf(out, "agentctl: attaching session %q in iTerm2…\n", target.Name)
+	}
+	fmt.Fprint(out, "agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n")
+	fmt.Fprint(out, "agentctl:   esc  detach: the tabs close and the fleet keeps running.\n")
+	fmt.Fprint(out, "agentctl:   X    (uppercase) force-quit iTerm2's tmux mode — prefer esc.\n")
+	fmt.Fprintf(out, "agentctl: detaching never stops the fleet; to stop it: agentctl kill --session %s\n", target.Name)
 }

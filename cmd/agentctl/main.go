@@ -249,7 +249,9 @@ func runWithAllDependencies(
 		if err := attacher.Execute(ctx, resolved, stdout); err != nil {
 			return attachError(stderr, err)
 		}
-		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0); %s\n", resolved.Name, attachSessionState(ctx, attacher, resolved))
+		observation, state := attachSessionState(ctx, attacher, resolved)
+		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0); %s\n", resolved.Name, state)
+		writeAttachNextSteps(stdout, observation, resolved)
 		return exitOK
 	}
 	if command == "clear" || command == "compact" {
@@ -290,15 +292,35 @@ func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCo
 // control mode ended. The probe is advisory and never changes the exit code:
 // the attachment itself completed, and a failed probe is reported as an
 // unverified state rather than as an absence.
-func attachSessionState(ctx context.Context, attacher sessionAttacher, target tmuxx.Session) string {
+type attachObservation uint8
+
+const (
+	attachUnverifiable attachObservation = iota
+	attachStillRunning
+	attachNoLongerPresent
+)
+
+func attachSessionState(ctx context.Context, attacher sessionAttacher, target tmuxx.Session) (attachObservation, string) {
 	present, err := attacher.StillRunning(ctx, target)
 	switch {
 	case err != nil:
-		return fmt.Sprintf("could not verify whether session %s is still running: %v", target.ID, err)
+		return attachUnverifiable, fmt.Sprintf("could not verify whether session %s is still running: %v", target.ID, err)
 	case present:
-		return fmt.Sprintf("session %s is still running; inspect it with: agentctl status --session %s", target.ID, target.Name)
+		return attachStillRunning, fmt.Sprintf("session %s is still running", target.ID)
 	default:
-		return fmt.Sprintf("session %s is no longer present", target.ID)
+		return attachNoLongerPresent, fmt.Sprintf("session %s is no longer present", target.ID)
+	}
+}
+
+func writeAttachNextSteps(out io.Writer, observation attachObservation, target tmuxx.Session) {
+	switch observation {
+	case attachStillRunning:
+		fmt.Fprintf(out, "agentctl: session %q is still running.\n", target.Name)
+		fmt.Fprintf(out, "agentctl:   re-attach:     agentctl attach --session %s\n", target.Name)
+		fmt.Fprintf(out, "agentctl:   check status:  agentctl status --session %s\n", target.Name)
+		fmt.Fprintf(out, "agentctl:   stop it:       agentctl kill --session %s\n", target.Name)
+	case attachUnverifiable:
+		fmt.Fprintf(out, "agentctl:   check status:  agentctl status --session %s\n", target.Name)
 	}
 }
 
