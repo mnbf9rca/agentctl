@@ -102,7 +102,7 @@ func TestValidateRoleNameRejectsInvalidNames(t *testing.T) {
 func TestParseFleetPreservesRoleDeclarationOrder(t *testing.T) {
 	t.Parallel()
 
-	got, err := ParseFleet("planner:claude,codex1:codex,codex-r:codex", nil)
+	got, err := ParseFleet("planner:claude,codex1:codex,codex-r:codex", nil, nil)
 	if err != nil {
 		t.Fatalf("ParseFleet() error = %v", err)
 	}
@@ -154,7 +154,7 @@ func TestParseFleetRejectsInvalidRoleLists(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := ParseFleet(test.roles, nil)
+			_, err := ParseFleet(test.roles, nil, nil)
 			assertValidationError(t, err, "roles", test.roles, test.entryIndex, test.entry, test.reason, test.message)
 		})
 	}
@@ -164,7 +164,7 @@ func TestParseFleetAppliesModelsWithoutChangingRoleOrder(t *testing.T) {
 	t.Parallel()
 
 	models := "a1:Fable_1.2-x"
-	got, err := ParseFleet("a1:claude,b-2:codex", &models)
+	got, err := ParseFleet("a1:claude,b-2:codex", &models, nil)
 	if err != nil {
 		t.Fatalf("ParseFleet() error = %v", err)
 	}
@@ -182,7 +182,7 @@ func TestParseFleetAcceptsEightRoleExample(t *testing.T) {
 
 	roles := "planner:claude,codex1:codex,codex2:codex,codex3:codex,codex4:codex,reviewer-opus:claude,reviewer-codex:codex,designer:claude"
 	models := "planner:fable,reviewer-opus:opus-4.8,reviewer-codex:gpt5.6-sol-xhigh"
-	got, err := ParseFleet(roles, &models)
+	got, err := ParseFleet(roles, &models, nil)
 	if err != nil {
 		t.Fatalf("ParseFleet() error = %v", err)
 	}
@@ -241,8 +241,131 @@ func TestParseFleetRejectsInvalidModelLists(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := ParseFleet(test.roles, &test.models)
+			_, err := ParseFleet(test.roles, &test.models, nil)
 			assertValidationError(t, err, "models", test.models, test.entryIndex, test.entry, test.reason, test.message)
+		})
+	}
+}
+
+func TestParseFleetAppliesEffortsWithoutChangingRoleOrder(t *testing.T) {
+	t.Parallel()
+
+	models := "a1:fable"
+	efforts := "b-2:xhigh,a1:max"
+	got, err := ParseFleet("a1:claude,b-2:codex", &models, &efforts)
+	if err != nil {
+		t.Fatalf("ParseFleet() error = %v", err)
+	}
+	want := FleetConfig{Roles: []RoleConfig{
+		{Name: "a1", Harness: HarnessClaude, Model: "fable", Effort: "max"},
+		{Name: "b-2", Harness: HarnessCodex, Effort: "xhigh"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseFleet() = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseFleetOmittedEffortsLeaveEveryRoleUnset(t *testing.T) {
+	t.Parallel()
+
+	got, err := ParseFleet("a1:claude,b-2:codex", nil, nil)
+	if err != nil {
+		t.Fatalf("ParseFleet() error = %v", err)
+	}
+	for _, role := range got.Roles {
+		if role.Effort != "" {
+			t.Fatalf("role %q effort = %q, want %q", role.Name, role.Effort, "")
+		}
+	}
+}
+
+func TestParseFleetAcceptsEveryDocumentedEffortLevelOnEveryHarness(t *testing.T) {
+	t.Parallel()
+
+	for _, harnessName := range []Harness{HarnessClaude, HarnessCodex} {
+		for _, level := range EffortLevels(harnessName) {
+			t.Run(string(harnessName)+"/"+level, func(t *testing.T) {
+				t.Parallel()
+
+				efforts := "p:" + level
+				got, err := ParseFleet("p:"+string(harnessName), nil, &efforts)
+				if err != nil {
+					t.Fatalf("ParseFleet() error = %v", err)
+				}
+				want := FleetConfig{Roles: []RoleConfig{{Name: "p", Harness: harnessName, Effort: level}}}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("ParseFleet() = %#v, want %#v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestEffortLevelsAreTheDocumentedSet(t *testing.T) {
+	t.Parallel()
+
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	for _, harnessName := range []Harness{HarnessClaude, HarnessCodex} {
+		if got := EffortLevels(harnessName); !reflect.DeepEqual(got, want) {
+			t.Fatalf("EffortLevels(%q) = %#v, want %#v", harnessName, got, want)
+		}
+	}
+	if got := EffortLevels("rust"); got != nil {
+		t.Fatalf("EffortLevels(rust) = %#v, want nil", got)
+	}
+}
+
+func TestEffortLevelsCannotBeMutatedThroughTheReturnedSlice(t *testing.T) {
+	first := EffortLevels(HarnessClaude)
+	first[0] = "changed"
+
+	second := EffortLevels(HarnessClaude)
+	if second[0] != "low" {
+		t.Fatalf("EffortLevels(claude)[0] = %q after caller mutation, want %q", second[0], "low")
+	}
+}
+
+func TestParseFleetRejectsInvalidEffortLists(t *testing.T) {
+	t.Parallel()
+
+	const supported = "supported levels are low, medium, high, xhigh, max"
+
+	tests := []struct {
+		name       string
+		roles      string
+		efforts    string
+		entryIndex int
+		entry      string
+		reason     string
+		message    string
+	}{
+		{name: "explicit empty efforts", roles: "p:claude", efforts: "", entryIndex: -1, reason: "must not be empty", message: "invalid --efforts value \"\": must not be empty"},
+		{name: "duplicate effort same value", roles: "p:claude", efforts: "p:high,p:high", entryIndex: 2, entry: "p:high", reason: "duplicate effort entry for role \"p\"", message: "invalid --efforts entry 2 \"p:high\": duplicate effort entry for role \"p\""},
+		{name: "duplicate effort different value", roles: "p:claude", efforts: "p:high,p:low", entryIndex: 2, entry: "p:low", reason: "duplicate effort entry for role \"p\"", message: "invalid --efforts entry 2 \"p:low\": duplicate effort entry for role \"p\""},
+		{name: "undefined role", roles: "p:claude", efforts: "q:high", entryIndex: 1, entry: "q:high", reason: "effort references undefined role \"q\"", message: "invalid --efforts entry 1 \"q:high\": effort references undefined role \"q\""},
+		{name: "missing role", roles: "p:claude", efforts: ":high", entryIndex: 1, entry: ":high", reason: "role is empty", message: "invalid --efforts entry 1 \":high\": role is empty"},
+		{name: "missing effort", roles: "p:claude", efforts: "p:", entryIndex: 1, entry: "p:", reason: "effort is empty", message: "invalid --efforts entry 1 \"p:\": effort is empty"},
+		{name: "missing separator", roles: "p:claude", efforts: "p", entryIndex: 1, entry: "p", reason: "must contain exactly one ':' separator", message: "invalid --efforts entry 1 \"p\": must contain exactly one ':' separator"},
+		{name: "extra separator", roles: "p:claude", efforts: "p:high:extra", entryIndex: 1, entry: "p:high:extra", reason: "must contain exactly one ':' separator", message: "invalid --efforts entry 1 \"p:high:extra\": must contain exactly one ':' separator"},
+		{name: "trailing comma", roles: "p:claude", efforts: "p:high,", entryIndex: 2, reason: "entry is empty", message: "invalid --efforts value \"p:high,\": entry 2 is empty"},
+		{name: "leading comma", roles: "p:claude", efforts: ",p:high", entryIndex: 1, reason: "entry is empty", message: "invalid --efforts value \",p:high\": entry 1 is empty"},
+		{name: "consecutive commas", roles: "p:claude,q:codex", efforts: "p:high,,q:low", entryIndex: 2, reason: "entry is empty", message: "invalid --efforts value \"p:high,,q:low\": entry 2 is empty"},
+		{name: "invalid effort role", roles: "p:claude", efforts: "P:high", entryIndex: 1, entry: "P:high", reason: "role \"P\" must match ^[a-z0-9][a-z0-9_-]*$", message: "invalid --efforts entry 1 \"P:high\": role \"P\" must match ^[a-z0-9][a-z0-9_-]*$"},
+		{name: "unknown level", roles: "p:claude", efforts: "p:turbo", entryIndex: 1, entry: "p:turbo", reason: "harness \"claude\" does not support effort \"turbo\"; " + supported, message: "invalid --efforts entry 1 \"p:turbo\": harness \"claude\" does not support effort \"turbo\"; " + supported},
+		{name: "uppercase level", roles: "p:claude", efforts: "p:HIGH", entryIndex: 1, entry: "p:HIGH", reason: "harness \"claude\" does not support effort \"HIGH\"; " + supported, message: "invalid --efforts entry 1 \"p:HIGH\": harness \"claude\" does not support effort \"HIGH\"; " + supported},
+		{name: "whitespace level", roles: "p:claude", efforts: "p:hi gh", entryIndex: 1, entry: "p:hi gh", reason: "harness \"claude\" does not support effort \"hi gh\"; " + supported, message: "invalid --efforts entry 1 \"p:hi gh\": harness \"claude\" does not support effort \"hi gh\"; " + supported},
+		{name: "trailing newline level", roles: "p:claude", efforts: "p:high\n", entryIndex: 1, entry: "p:high\n", reason: "harness \"claude\" does not support effort \"high\\n\"; " + supported, message: "invalid --efforts entry 1 \"p:high\\n\": harness \"claude\" does not support effort \"high\\n\"; " + supported},
+		{name: "flag smuggling", roles: "p:claude", efforts: "p:--dangerously-bypass-approvals-and-sandbox", entryIndex: 1, entry: "p:--dangerously-bypass-approvals-and-sandbox", reason: "harness \"claude\" does not support effort \"--dangerously-bypass-approvals-and-sandbox\"; " + supported, message: "invalid --efforts entry 1 \"p:--dangerously-bypass-approvals-and-sandbox\": harness \"claude\" does not support effort \"--dangerously-bypass-approvals-and-sandbox\"; " + supported},
+		{name: "toml string escape", roles: "p:codex", efforts: "p:high\"\nmodel=\"evil", entryIndex: 1, entry: "p:high\"\nmodel=\"evil", reason: "harness \"codex\" does not support effort \"high\\\"\\nmodel=\\\"evil\"; " + supported, message: "invalid --efforts entry 1 \"p:high\\\"\\nmodel=\\\"evil\": harness \"codex\" does not support effort \"high\\\"\\nmodel=\\\"evil\"; " + supported},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseFleet(test.roles, nil, &test.efforts)
+			assertValidationError(t, err, "efforts", test.efforts, test.entryIndex, test.entry, test.reason, test.message)
 		})
 	}
 }

@@ -25,11 +25,35 @@ const (
 	HarnessCodex  Harness = "codex"
 )
 
+// effortLevels lists the effort levels each harness accepts, in increasing
+// order. Unlike models, efforts are a closed set: the value names a harness
+// mode rather than an opaque identifier, and the codex rendering embeds it in a
+// configuration expression the harness parses. Levels verified 2026-08-03
+// against Claude Code 2.1.220 (`--effort <level>`: low, medium, high, xhigh,
+// max) and codex-cli 0.146.0 (`model_reasoning_effort`, whose enum also carries
+// none, minimal and ultra — not exposed here because agentctl accepts only
+// levels verified on both harnesses).
+var effortLevels = map[Harness][]string{
+	HarnessClaude: {"low", "medium", "high", "xhigh", "max"},
+	HarnessCodex:  {"low", "medium", "high", "xhigh", "max"},
+}
+
 // RoleConfig is the validated configuration for one fleet role.
 type RoleConfig struct {
 	Name    string
 	Harness Harness
 	Model   string
+	Effort  string
+}
+
+// EffortLevels returns the effort levels a harness accepts, in increasing
+// order, or nil for an unsupported harness.
+func EffortLevels(harness Harness) []string {
+	levels, ok := effortLevels[harness]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), levels...)
 }
 
 // FleetConfig is an ordered, validated fleet declaration.
@@ -86,26 +110,40 @@ func ValidateRoleName(role string) error {
 	return nil
 }
 
-// ParseFleet parses ordered role declarations and optional model assignments.
-// A nil models value means --models was omitted; a non-nil empty value means it
-// was explicitly supplied as empty.
-func ParseFleet(roles string, models *string) (FleetConfig, error) {
+// ParseFleet parses ordered role declarations and optional model and effort
+// assignments. A nil models or efforts value means the option was omitted; a
+// non-nil empty value means it was explicitly supplied as empty.
+func ParseFleet(roles string, models, efforts *string) (FleetConfig, error) {
 	fleet, err := parseRoles(roles)
 	if err != nil {
 		return FleetConfig{}, err
 	}
-	if models == nil {
+	if models != nil {
+		if *models == "" {
+			return FleetConfig{}, &ValidationError{
+				Option:     "models",
+				Value:      *models,
+				EntryIndex: -1,
+				Reason:     "must not be empty",
+			}
+		}
+		fleet, err = applyModels(fleet, *models)
+		if err != nil {
+			return FleetConfig{}, err
+		}
+	}
+	if efforts == nil {
 		return fleet, nil
 	}
-	if *models == "" {
+	if *efforts == "" {
 		return FleetConfig{}, &ValidationError{
-			Option:     "models",
-			Value:      *models,
+			Option:     "efforts",
+			Value:      *efforts,
 			EntryIndex: -1,
 			Reason:     "must not be empty",
 		}
 	}
-	return applyModels(fleet, *models)
+	return applyEfforts(fleet, *efforts)
 }
 
 func parseRoles(roles string) (FleetConfig, error) {
@@ -205,6 +243,63 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 	}
 
 	return fleet, nil
+}
+
+func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
+	roleIndexes := make(map[string]int, len(fleet.Roles))
+	for index, role := range fleet.Roles {
+		roleIndexes[role.Name] = index
+	}
+	effortEntries := strings.Split(efforts, ",")
+	effortRoles := make(map[string]struct{}, len(effortEntries))
+	for index, entry := range effortEntries {
+		entryIndex := index + 1
+		if entry == "" {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "entry is empty")
+		}
+		if strings.Count(entry, ":") != 1 {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "must contain exactly one ':' separator")
+		}
+
+		role, effort, _ := strings.Cut(entry, ":")
+		if role == "" {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "role is empty")
+		}
+		if effort == "" {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "effort is empty")
+		}
+		if !nameExpression.MatchString(role) {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		}
+		if _, duplicate := effortRoles[role]; duplicate {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("duplicate effort entry for role %q", role))
+		}
+		roleIndex, defined := roleIndexes[role]
+		if !defined {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
+		}
+		harness := fleet.Roles[roleIndex].Harness
+		if !supportsEffort(harness, effort) {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf(
+				"harness %q does not support effort %q; supported levels are %s",
+				harness, effort, strings.Join(effortLevels[harness], ", "),
+			))
+		}
+
+		effortRoles[role] = struct{}{}
+		fleet.Roles[roleIndex].Effort = effort
+	}
+
+	return fleet, nil
+}
+
+func supportsEffort(harness Harness, effort string) bool {
+	for _, level := range effortLevels[harness] {
+		if level == effort {
+			return true
+		}
+	}
+	return false
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {

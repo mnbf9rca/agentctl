@@ -20,7 +20,7 @@ func WriteSessionsTable(output io.Writer, report SessionsReport) error {
 
 func writeTable(output io.Writer, reports []Report) error {
 	table := tabwriter.NewWriter(output, 0, 8, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "SESSION\tROLE\tHARNESS\tMODEL\tPANE\tPROCESS\tSTATE"); err != nil {
+	if _, err := fmt.Fprintln(table, "SESSION\tROLE\tHARNESS\tMODEL\tEFFORT\tPANE\tPROCESS\tSTATE"); err != nil {
 		return err
 	}
 	for _, report := range reports {
@@ -29,7 +29,7 @@ func writeTable(output io.Writer, reports []Report) error {
 			if report.Defect != "" {
 				state = State(report.Defect)
 			}
-			if _, err := fmt.Fprintf(table, "%s\t\t\t\t\t\t%s\n", report.Session, state); err != nil {
+			if _, err := fmt.Fprintf(table, "%s\t\t\t\t\t\t\t%s\n", report.Session, state); err != nil {
 				return err
 			}
 			continue
@@ -39,11 +39,16 @@ func writeTable(output io.Writer, reports []Report) error {
 			if model == "" {
 				model = "default"
 			}
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			effort := agent.Effort
+			if effort == "" {
+				effort = "default"
+			}
+			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				report.Session,
 				agent.Role,
 				agent.Harness,
 				model,
+				effort,
 				agent.PaneID,
 				agent.Process,
 				agent.State,

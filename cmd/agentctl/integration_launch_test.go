@@ -36,6 +36,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		"--session", "integration-launch",
 		"--roles", "planner:claude,coder:codex",
 		"--models", "planner:opus,coder:gpt-5",
+		"--efforts", "planner:max,coder:high",
 		"--dir", launchDir,
 	)
 	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
@@ -57,9 +58,10 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	expected := map[string]struct {
 		harness string
 		model   string
+		effort  string
 	}{
-		"planner": {harness: "claude", model: "opus"},
-		"coder":   {harness: "codex", model: "gpt-5"},
+		"planner": {harness: "claude", model: "opus", effort: "max"},
+		"coder":   {harness: "codex", model: "gpt-5", effort: "high"},
 	}
 	seenWindows := make(map[string]bool, len(expected))
 	for _, window := range windows {
@@ -71,7 +73,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate window for role %q: %#v", window.Name, windows)
 		}
 		seenWindows[window.Name] = true
-		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model {
+		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
 			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
 		}
 		gotDirectory, err := os.Stat(window.Directory)
@@ -113,7 +115,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate stub invocation for role %q: %#v", invocation.Role, invocations)
 		}
 		seenInvocations[invocation.Role] = true
-		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model {
+		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model || invocation.Effort != want.effort {
 			t.Errorf("stub invocation = %#v, want launch inputs preserved", invocation)
 		}
 	}

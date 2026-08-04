@@ -124,12 +124,14 @@ cd /path/to/application
 agentctl launch \
   --session epic123 \
   --roles planner:claude,codex1:codex,codex2:codex,codex3:codex,codex4:codex,reviewer-opus:claude,reviewer-codex:codex,designer:claude \
-  --models planner:fable,reviewer-opus:opus-4.8,reviewer-codex:gpt5.6-sol-xhigh
+  --models planner:fable,reviewer-opus:opus-4.8,reviewer-codex:gpt5.6-sol-xhigh \
+  --efforts planner:max,reviewer-codex:high
 ```
 
 The role is the stable fleet identity, tmux window name, and AMQ handle. The harness selects `claude` or `codex`; an
-optional model selects a harness configuration without changing the role. Roles omitted from `--models` use their
-harness default.
+optional model selects a harness configuration without changing the role, and an optional effort selects how much
+reasoning effort that role's harness spends. Roles omitted from `--models` or `--efforts` use their harness default,
+and no corresponding flag is passed to the harness at all.
 
 Check the fleet before acting on it:
 
@@ -201,12 +203,34 @@ with Go instead reports its recorded VCS revision, followed by `+dirty` when Go 
 ### `launch`
 
 ```text
-agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]
+agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]
 ```
 
 Creates a new managed tmux session. `--session` and `--roles` are required. Supported harnesses are `claude` and
-`codex`. `--models` is optional and may name only roles present in `--roles`. `--dir` overrides the invocation working
-directory and must name an existing directory. Launch fails rather than adopting an existing session.
+`codex`. `--models` and `--efforts` are optional and may name only roles present in `--roles`. `--dir` overrides the
+invocation working directory and must name an existing directory. Launch fails rather than adopting an existing
+session.
+
+#### Effort levels
+
+`--efforts` accepts `low`, `medium`, `high`, `xhigh`, and `max` for both harnesses. The level is validated before
+anything is created: an unknown level, a level for an undefined role, a duplicate role entry, or an explicitly empty
+`--efforts=` is a usage error (exit 2) and no tmux command runs. A role with no effort entry is launched with **no**
+effort argument at all, leaving the harness on its own default.
+
+Each harness receives the level in its own syntax, assembled only from these validated levels:
+
+| Harness | Rendered arguments | Verified against |
+| --- | --- | --- |
+| `claude` | `--effort LEVEL` | Claude Code 2.1.220 |
+| `codex` | `--config 'model_reasoning_effort="LEVEL"'` | codex-cli 0.146.0 |
+
+The main codex CLI has no `--effort` flag, so the level is supplied as a configuration override; the `--effort` flag
+that exists for the separate Codex Security CLI is not used. codex's own reasoning-effort enum also carries `none`,
+`minimal`, and `ultra`, which agentctl deliberately does not expose: the accepted set is restricted to the levels
+verified on both harnesses, and anything outside it is rejected rather than forwarded.
+
+The selected level is recorded in window metadata (`@agentctl_effort`) and reported by `status`.
 
 ### `attach`
 
@@ -287,7 +311,8 @@ agentctl status [--session SESSION | --all] [--json]
 ```
 
 Reports objective tmux, metadata, and root-process facts. The default is a human-readable table; `--json` emits the
-versioned machine-readable report.
+versioned machine-readable report. The table renders `default` in the `MODEL` and `EFFORT` columns for a role launched
+without one; metadata and JSON carry the empty string for the same role.
 
 When no session is named — no `--session`, no `AGENTCTL_SESSION`, and no current tmux session — `status` reports every
 tmux session instead of failing. `--all` requests the same listing regardless of those sources; combining it with

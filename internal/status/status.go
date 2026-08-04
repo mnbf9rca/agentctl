@@ -34,6 +34,7 @@ type Agent struct {
 	Role    string `json:"role"`
 	Harness string `json:"harness"`
 	Model   string `json:"model"`
+	Effort  string `json:"effort"`
 	Window  string `json:"window"`
 	PaneID  string `json:"pane_id"`
 	Process string `json:"process"`

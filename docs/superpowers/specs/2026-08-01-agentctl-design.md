@@ -35,6 +35,7 @@ These extend or refine `brief.md`:
 | Agent working directory | Windows start in agentctl's invocation cwd, passed **explicitly** to tmux via `-c` (never relying on tmux server default). Optional `--dir PATH` on `launch` overrides. Rationale: `amq coop exec` roots `AM_ROOT`/`.amqrc` in the pane's cwd, so cwd determines the fleet's AMQ session directory. |
 | Teardown | New command `agentctl kill [--session S]`. Validates the session is agentctl-managed (same gate as control commands) before `tmux kill-session`. Refuses unmanaged sessions. |
 | Model identifier validation | Models are catalogue-free but **not** charset-free: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. The mandatory alphanumeric first character makes flag smuggling (e.g. `--dangerously-bypass-approvals-and-sandbox`) unrepresentable in the model slot. |
+| Effort validation (added 2026-08-03, issue #88) | Efforts are the **opposite** of models: a closed per-harness allowlist (`low`, `medium`, `high`, `xhigh`, `max`), rejected before anything is created. The value names a harness mode rather than an opaque identifier, and the codex rendering embeds it in an expression codex parses as TOML, so a charset rule would be the weaker instrument. Optional everywhere: a role with no effort emits no harness argument at all. |
 | `--if-missing` | Deferred. v1 `launch` always fails when the target session exists. The exact-fleet-comparison metadata is designed in now so `--if-missing` is cheap later; tracked as a deferred backlog issue. |
 | Harness process check | No name pattern-matching. At launch, the observed executable of each pane's root process is recorded as `@agentctl_process` metadata; control and status require exact equality with that baseline (§8). Motivated by the spike finding that Claude Code's process name is its **version string** (e.g. `2.1.220`), not `claude`. |
 | Payload registry policy | The registry is hardcoded and may grow beyond `clear`/`compact`, but only with **argument-free** payloads. Commands that carry caller-supplied text (e.g. `/rename NAME`) are permanently inadmissible. |
@@ -57,6 +58,17 @@ amq coop exec [options] <command> [-- <command-flags>]
 ### 3.2 Harness slash commands (Claude Code 2.1.220, codex-cli 0.146.0)
 
 Both harnesses natively support `/clear` and `/compact`. One payload registry serves both; no per-harness payload map is needed in v1. The registry stays structured per-operation so a per-harness split remains a small change.
+
+### 3.2.1 Harness effort arguments (verified 2026-08-03, this machine)
+
+| Harness | Version | Rendering | Evidence |
+|---|---|---|---|
+| claude | Claude Code 2.1.220 | `--effort LEVEL` | `claude --help`: *"Effort level for the current session (low, medium, high, xhigh, max)"* |
+| codex | codex-cli 0.146.0 | `--config 'model_reasoning_effort="LEVEL"'` | no `--effort` flag on the main CLI (`codex --help`); `-c/--config` documents that the value portion is parsed as TOML |
+
+codex's own reasoning-effort enum additionally carries `none`, `minimal` and `ultra`. agentctl exposes only the five
+levels verified on **both** harnesses, so one accepted set serves both; a per-harness split is already the mechanism
+(`internal/config`'s per-harness table plus `harness.Spec.effortArgs`) and would be a small change if the sets diverge.
 
 ### 3.3 Keystroke-injection spike results
 
@@ -98,7 +110,7 @@ further is printed.
 ## 4. CLI surface
 
 ```
-agentctl launch  --session S --roles R:H,... [--models R:M,...] [--dir PATH]
+agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
 agentctl attach  [--session S]
 agentctl status  [--session S] [--json]
 agentctl clear   [--session S] ROLE
@@ -177,8 +189,8 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 |---|---|
 | `cmd/agentctl` | Subcommand dispatch, exit-code mapping |
 | `internal/cliflags` | Per-subcommand flag parsing, duplicate-option rejection |
-| `internal/config` | `--roles`/`--models` parsing and all validation rules (§7) |
-| `internal/harness` | Harness registry (claude, codex): model-argument rendering, input-clear sequence. (Process identity is *not* harness data — it is the launch-time observed baseline, §8.) |
+| `internal/config` | `--roles`/`--models`/`--efforts` parsing and all validation rules (§7) |
+| `internal/harness` | Harness registry (claude, codex): model- and effort-argument rendering, input-clear sequence. (Process identity is *not* harness data — it is the launch-time observed baseline, §8.) |
 | `internal/shellq` | POSIX single-quote escaping; tiny, table- and fuzz-tested |
 | `internal/tmuxx` | `Runner` interface (real: `os/exec`; fake: records argv for tests) plus typed wrappers, one per §13.2 operation: `ListSessions`, `NewSession`, `NewWindow`, `SetOption`, `ShowOptions`, `ListWindows`, `ListPanes`, `DeliverPayload` (§13.6 — no bare `SendKeys` is exported), `KillSession`, `DisplayMessage`, `AttachSession`, `ProcessName` (§13.7) |
 | `internal/preflight` | Pure executable checker: `LookPathFunc` seam, `MissingExecutableError`, required-set derivation (`[tmux, amq]` + first-occurrence deduped harnesses). No `Runner` dependency — ordering relative to `Runner` calls is proven by `fleet` (§6.1 step 2). |
@@ -204,7 +216,7 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 4. Resolve cwd: `--dir` if given, else invocation cwd; pass via `-c` on every window. `--dir` must name an existing
    **directory**; a path that does not exist and a path that exists as a regular file are both usage errors → exit 2,
    checked before anything is created (§7).
-5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- --model MODEL]`, assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
+5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- MODEL-ARGS EFFORT-ARGS]` (§3.2.1; the `--` separator appears only when at least one of the two is present), assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
    `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
    lookup — until the `amq coop exec → exec(harness)` chain has completed, and store the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
@@ -370,7 +382,7 @@ operator even though agentctl declines to classify it.
 ### 6.5 Metadata
 
 Exactly as the brief, plus one addition: session options `@agentctl_managed=1`, `@agentctl_version=1`,
-`@agentctl_roles`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model` (empty string when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
+`@agentctl_roles`; window options `@agentctl_managed=1`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`, `@agentctl_effort` (both empty strings when defaulted — always set, never omitted, so exact fleet comparison is a straight read), plus `@agentctl_process` (the launch-time observed executable, §8). No metadata database.
 
 Stamping order is **fixed and asserted**, because the fake `Runner` records calls in sequence and a reordering would
 otherwise pass silently. It orders the **option-setting calls**, not creation: `new-session` creates the session *and*
@@ -381,7 +393,7 @@ means before any *window option*, never before any window.
 2. session `@agentctl_version`
 3. session `@agentctl_roles`
 4. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
-   the baseline poll, and finally `@agentctl_process`.
+   `@agentctl_effort`, the baseline poll, and finally `@agentctl_process`.
 
 `@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
 
@@ -488,6 +500,8 @@ Only a command that is about to create a server has standing to proceed without 
 
 - Session and role names: `^[a-z0-9][a-z0-9_-]*$`.
 - Model identifiers: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (catalogue-free; charset-bound).
+- Effort levels: allowlist per harness — `low`, `medium`, `high`, `xhigh`, `max` for both `claude` and `codex` (§3.2.1). Rejection names the harness, the rejected value, and the supported levels.
+- `--efforts` shares every structural rule with `--models`: optional, non-nil-but-empty is a usage error, entries are `ROLE:VALUE`, duplicate role entries and entries for undefined roles are rejected, and empty list entries name the raw list and the entry index.
 - Harnesses: `claude` | `codex` only.
 - All rejection cases from the brief's Validation section: unknown harnesses, duplicate roles, duplicate model entries, models for undefined roles, missing values, empty `--roles`, trailing commas, whitespace in names, names beginning with `-`, duplicate command-line options.
 - `--dir`: must be an existing **directory**. Non-existent path and existing-but-a-regular-file are both exit 2, evaluated before any tmux call (§6.1 step 4).
@@ -540,7 +554,7 @@ Consequently:
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
   renders `unmanaged`; alive-pane-with-unavailable-identity and empty-baseline both render `unexpected-process`; zero
   panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
@@ -604,7 +618,7 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
    | `@agentctl_version` present and ≠ `1` | *has `@agentctl_version="2"`; expected `"1"`* |
 
    An absent marker is **not** "a different version": saying so asserts an event that did not happen (§1.1). A rendered fact cannot lie about causation, which is why the value-rendering shape is the rule rather than one acceptable option among several. This applies to `status`, `control`, `kill`, `attach` and any command added later that reads this gate — the shape is a property of the rule, not of the command that happens to be reporting it. `attach` is included deliberately: it is the only command that hands a human a live keyboard into panes whose metadata semantics we cannot interpret, and "agentctl refused" is recoverable where "operator typed into a misunderstood fleet" is not. Its refusal names the escape hatch (§6.4) — an operator tool should be conservative without pretending to be a boundary. **`status` is carved out** for the *unmanaged* case only: a session with `@agentctl_managed` missing or not `1` is reported, not refused (§6.3). A version present but not `1` remains exit 3 everywhere, `status` included: we can read another version's options but cannot trust their semantics, and reporting them as if they were ours would be a false statement rather than a missing one.
-7. **Defaulted model rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`.
+7. **Defaulted model and effort rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`. `status` gains an `effort` field on each agent and an `EFFORT` column between `MODEL` and `PANE`; the JSON document stays at `"schema": 1` because the addition is a new field on an existing object, not a change to any field a consumer already reads.
 8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
 9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
 
@@ -704,9 +718,9 @@ Notes:
 ### 13.3 Format-string and option-read rules
 
 - **Window collection format** (row 8), fields in this order:
-  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_managed}⟨TAB⟩#{@agentctl_version}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_process}`
-  Parse with `strings.SplitN(line, "\t", 8)`.
-- **Unconstrained values go last.** Every field except `@agentctl_process` is charset-validated. `@agentctl_process`
+  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_managed}⟨TAB⟩#{@agentctl_version}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_effort}⟨TAB⟩#{@agentctl_process}`
+  Parse with `strings.SplitN(line, "\t", 9)`.
+- **Unconstrained values go last.** Every field except `@agentctl_process` is charset-validated or allowlisted. `@agentctl_process`
   comes from `ps -o comm=` and may contain spaces (a value `weird name` was verified to round-trip intact), so it is
   placed last and absorbs any residue — a delimiter inside it cannot shift another field.
 - **Reads always use `-v`.** Verified: `show-options -w` *without* `-v` quotes values containing spaces
@@ -716,7 +730,7 @@ Notes:
   the result is empty output and exit 0.
 - **Unset and set-to-empty are indistinguishable** (both empty, exit 0). This is acceptable and deliberate: the gate
   options `@agentctl_managed`, `@agentctl_version` and `@agentctl_process` are never legitimately empty, so empty means
-  fail closed. `@agentctl_model` is legitimately empty (§12.7) and gates nothing.
+  fail closed. `@agentctl_model` and `@agentctl_effort` are legitimately empty (§12.7) and gate nothing.
 - `#{@name}` user-option interpolation in `-F` is verified working on tmux 3.7b; unset options render empty without error.
 
 ### 13.4 Consequences for tests
@@ -811,4 +825,4 @@ Three consequences bind the implementation:
 
 ## 14. Out of scope
 
-Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
+Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2). The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; per-harness effort allowlist enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.

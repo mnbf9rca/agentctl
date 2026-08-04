@@ -12,7 +12,7 @@ const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
 	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"
 	createdWindowFormat  = "#{window_id}\t#{pane_id}\t#{pane_pid}"
-	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
+	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
 
@@ -77,6 +77,7 @@ type Window struct {
 	Role    string
 	Harness string
 	Model   string
+	Effort  string
 	Process string
 }
 
@@ -262,9 +263,9 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 
 	windows := make([]Window, 0, len(records))
 	for index, record := range records {
-		fields := strings.SplitN(record, "\t", 8)
-		if len(fields) != 8 || fields[1] == "" {
-			return nil, fmt.Errorf("parse tmux window record %d: expected 8 fields and a nonempty name", index+1)
+		fields := strings.SplitN(record, "\t", 9)
+		if len(fields) != 9 || fields[1] == "" {
+			return nil, fmt.Errorf("parse tmux window record %d: expected 9 fields and a nonempty name", index+1)
 		}
 		if err := validateID(fields[0], '@'); err != nil {
 			return nil, fmt.Errorf("parse tmux window record %d: %w", index+1, err)
@@ -277,7 +278,8 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 			Role:    fields[4],
 			Harness: fields[5],
 			Model:   fields[6],
-			Process: fields[7],
+			Effort:  fields[7],
+			Process: fields[8],
 		})
 	}
 	return windows, nil

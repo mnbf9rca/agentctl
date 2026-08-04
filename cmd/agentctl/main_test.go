@@ -126,7 +126,7 @@ func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 }
 
 func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
-	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--dir PATH]\n"
+	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n"
 	const statusUsage = "Usage: agentctl status [--session SESSION | --all] [--json]\n\n" +
 		"When no session is named by --session, AGENTCTL_SESSION, or the current tmux session, status reports every\n" +
 		"session. Use --all to request the same listing even when a session source is present.\n" +
@@ -143,6 +143,8 @@ func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 		{name: "roles equals", args: []string{"launch", "--session", "fleet", "--roles=planner:claude", "--roles=reviewer:codex"}, option: "roles", usage: launchUsage},
 		{name: "models spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", "planner:fable", "--models", "planner:opus"}, option: "models", usage: launchUsage},
 		{name: "models equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models=planner:fable", "--models=planner:opus"}, option: "models", usage: launchUsage},
+		{name: "efforts spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:high", "--efforts", "planner:low"}, option: "efforts", usage: launchUsage},
+		{name: "efforts equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts=planner:high", "--efforts=planner:low"}, option: "efforts", usage: launchUsage},
 		{name: "dir spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir", "/tmp", "--dir", "/var/tmp"}, option: "dir", usage: launchUsage},
 		{name: "dir equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir=/tmp", "--dir=/var/tmp"}, option: "dir", usage: launchUsage},
 		{name: "json spaced", args: []string{"status", "--json", "--json"}, option: "json", usage: statusUsage},
@@ -168,10 +170,12 @@ func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 	}
 }
 
-func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
+func TestRunRejectsExplicitlyEmptyModelsAndEfforts(t *testing.T) {
 	tests := [][]string{
 		{"launch", "--session", "fleet", "--roles", "planner:claude", "--models="},
 		{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", ""},
+		{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts="},
+		{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", ""},
 	}
 
 	for _, arguments := range tests {
@@ -180,7 +184,7 @@ func TestRunRejectsExplicitlyEmptyModels(t *testing.T) {
 			t.Fatalf("run(%q) = %d, want %d", arguments, code, exitUsage)
 		}
 		if !strings.Contains(stderr.String(), "must not be empty") || !strings.Contains(stderr.String(), "Usage:") {
-			t.Fatalf("stderr = %q, want empty-model error and usage", stderr.String())
+			t.Fatalf("stderr = %q, want empty-list error and usage", stderr.String())
 		}
 		if stdout.Len() != 0 {
 			t.Fatalf("stdout = %q, want empty", stdout.String())
@@ -502,7 +506,7 @@ func TestRunStatusAllBypassesNamedSessionSources(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -518,9 +522,9 @@ func TestRunStatusAllBypassesNamedSessionSources(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
-	want := "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
-		"fleet    planner  claude   default  %12   claude   running\n" +
-		"shell                                              unmanaged\n"
+	want := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
+		"fleet    planner  claude   default  default  %12   claude   running\n" +
+		"shell                                                       unmanaged\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
@@ -535,7 +539,7 @@ func TestRunStatusAllRendersMetadataDefectsAndContinuesBeforeExitThree(t *testin
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -617,13 +621,13 @@ func TestRunStatusResolvesSessionAndRendersSelectedFormat(t *testing.T) {
 		{
 			name: "human table",
 			args: []string{"status", "--session", "fleet"},
-			want: "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
-				"fleet    planner  claude   default  %12   claude   running\n",
+			want: "SESSION  ROLE     HARNESS  MODEL    EFFORT  PANE  PROCESS  STATE\n" +
+				"fleet    planner  claude   default  xhigh   %12   claude   running\n",
 		},
 		{
 			name: "json",
 			args: []string{"status", "--session", "fleet", "--json"},
-			want: "{\"schema\":1,\"session\":\"fleet\",\"managed\":true,\"agents\":[{\"role\":\"planner\",\"harness\":\"claude\",\"model\":\"\",\"window\":\"planner\",\"pane_id\":\"%12\",\"process\":\"claude\",\"state\":\"running\"}]}\n",
+			want: "{\"schema\":1,\"session\":\"fleet\",\"managed\":true,\"agents\":[{\"role\":\"planner\",\"harness\":\"claude\",\"model\":\"\",\"effort\":\"xhigh\",\"window\":\"planner\",\"pane_id\":\"%12\",\"process\":\"claude\",\"state\":\"running\"}]}\n",
 		},
 	}
 	for _, tt := range tests {
@@ -646,7 +650,7 @@ func TestRunStatusResolvesSessionAndRendersSelectedFormat(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 			}
@@ -762,15 +766,15 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 		{
 			name: "human table",
 			args: []string{"status"},
-			want: "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
-				"fleet    planner  claude   default  %12   claude   running\n" +
-				"shell                                              unmanaged\n",
+			want: "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
+				"fleet    planner  claude   default  default  %12   claude   running\n" +
+				"shell                                                       unmanaged\n",
 		},
 		{
 			name: "json",
 			args: []string{"status", "--json"},
 			want: "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"fleet\",\"managed\":true," +
-				"\"agents\":[{\"role\":\"planner\",\"harness\":\"claude\",\"model\":\"\",\"window\":\"planner\"," +
+				"\"agents\":[{\"role\":\"planner\",\"harness\":\"claude\",\"model\":\"\",\"effort\":\"\",\"window\":\"planner\"," +
 				"\"pane_id\":\"%12\",\"process\":\"claude\",\"state\":\"running\"}]},{\"schema\":1," +
 				"\"session\":\"shell\",\"managed\":false,\"agents\":[]}]}\n",
 		},
@@ -782,7 +786,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("planner\n")},
-				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
 				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 				tmuxx.Response{Stdout: []byte("claude\n")},
 				tmuxx.Response{Stdout: []byte("0\n")},
@@ -810,7 +814,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
@@ -866,7 +870,7 @@ func TestRunStatusPrefersANamedSessionOverListingEveryManagedSession(t *testing.
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("planner\n")},
-				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
 				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 				tmuxx.Response{Stdout: []byte("claude\n")},
 			)
@@ -878,8 +882,8 @@ func TestRunStatusPrefersANamedSessionOverListingEveryManagedSession(t *testing.
 			if code != exitOK {
 				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 			}
-			want := "SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS  STATE\n" +
-				"fleet    planner  claude   default  %12   claude   running\n"
+			want := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
+				"fleet    planner  claude   default  default  %12   claude   running\n"
 			if stdout.String() != want {
 				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 			}
@@ -898,7 +902,7 @@ func healthyStatusRunner() *tmuxx.FakeRunner {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\txhigh\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)

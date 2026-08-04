@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestWriteTableRendersDefaultModelOnlyForHumans(t *testing.T) {
+func TestWriteTableRendersDefaultModelAndEffortOnlyForHumans(t *testing.T) {
 	t.Parallel()
 
 	report := Report{
@@ -17,6 +17,7 @@ func TestWriteTableRendersDefaultModelOnlyForHumans(t *testing.T) {
 				Role:    "planner",
 				Harness: "claude",
 				Model:   "fable",
+				Effort:  "max",
 				Window:  "planner",
 				PaneID:  "%12",
 				Process: "claude",
@@ -38,15 +39,15 @@ func TestWriteTableRendersDefaultModelOnlyForHumans(t *testing.T) {
 		t.Fatalf("WriteTable() error = %v", err)
 	}
 	want := "" +
-		"SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS   STATE\n" +
-		"epic123  planner  claude   fable    %12   claude    running\n" +
-		"epic123  codex1   codex    default  %13   /bin/zsh  unexpected-process\n"
+		"SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS   STATE\n" +
+		"epic123  planner  claude   fable    max      %12   claude    running\n" +
+		"epic123  codex1   codex    default  default  %13   /bin/zsh  unexpected-process\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteTable() output =\n%q\nwant:\n%q", got, want)
 	}
 }
 
-func TestWriteJSONMatchesVersionedSchemaAndPreservesEmptyModel(t *testing.T) {
+func TestWriteJSONMatchesVersionedSchemaAndPreservesEmptyModelAndEffort(t *testing.T) {
 	t.Parallel()
 
 	report := Report{
@@ -68,7 +69,7 @@ func TestWriteJSONMatchesVersionedSchemaAndPreservesEmptyModel(t *testing.T) {
 	if err := WriteJSON(&output, report); err != nil {
 		t.Fatalf("WriteJSON() error = %v", err)
 	}
-	want := "{\"schema\":1,\"session\":\"epic123\",\"managed\":true,\"agents\":[{\"role\":\"codex1\",\"harness\":\"codex\",\"model\":\"\",\"window\":\"codex1\",\"pane_id\":\"%13\",\"process\":\"codex\",\"state\":\"running\"}]}\n"
+	want := "{\"schema\":1,\"session\":\"epic123\",\"managed\":true,\"agents\":[{\"role\":\"codex1\",\"harness\":\"codex\",\"model\":\"\",\"effort\":\"\",\"window\":\"codex1\",\"pane_id\":\"%13\",\"process\":\"codex\",\"state\":\"running\"}]}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteJSON() output = %q, want %q", got, want)
 	}
@@ -95,10 +96,10 @@ func TestWriteSessionsTableRendersOneHeaderForEverySession(t *testing.T) {
 		t.Fatalf("WriteSessionsTable() error = %v", err)
 	}
 	want := "" +
-		"SESSION  ROLE     HARNESS  MODEL    PANE  PROCESS   STATE\n" +
-		"shell                                               unmanaged\n" +
-		"epic123  planner  claude   fable    %12   claude    running\n" +
-		"fleet    codex1   codex    default  %13   /bin/zsh  unexpected-process\n"
+		"SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS   STATE\n" +
+		"shell                                                        unmanaged\n" +
+		"epic123  planner  claude   fable    default  %12   claude    running\n" +
+		"fleet    codex1   codex    default  default  %13   /bin/zsh  unexpected-process\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteSessionsTable() output =\n%q\nwant:\n%q", got, want)
 	}
@@ -111,7 +112,7 @@ func TestWriteSessionsTableRendersHeaderOnlyWithoutManagedSessions(t *testing.T)
 	if err := WriteSessionsTable(&output, SessionsReport{Schema: 1, Sessions: []Report{}}); err != nil {
 		t.Fatalf("WriteSessionsTable() error = %v", err)
 	}
-	want := "SESSION  ROLE  HARNESS  MODEL  PANE  PROCESS  STATE\n"
+	want := "SESSION  ROLE  HARNESS  MODEL  EFFORT  PANE  PROCESS  STATE\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteSessionsTable() output = %q, want %q", got, want)
 	}
@@ -141,7 +142,7 @@ func TestWriteSessionsJSONMatchesVersionedSchema(t *testing.T) {
 	if err := WriteSessionsJSON(&output, report); err != nil {
 		t.Fatalf("WriteSessionsJSON() error = %v", err)
 	}
-	want := "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"epic123\",\"managed\":true,\"agents\":[{\"role\":\"codex1\",\"harness\":\"codex\",\"model\":\"\",\"window\":\"codex1\",\"pane_id\":\"%13\",\"process\":\"codex\",\"state\":\"running\"}]}]}\n"
+	want := "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"epic123\",\"managed\":true,\"agents\":[{\"role\":\"codex1\",\"harness\":\"codex\",\"model\":\"\",\"effort\":\"\",\"window\":\"codex1\",\"pane_id\":\"%13\",\"process\":\"codex\",\"state\":\"running\"}]}]}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteSessionsJSON() output = %q, want %q", got, want)
 	}
