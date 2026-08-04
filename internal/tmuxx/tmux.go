@@ -39,6 +39,14 @@ type WindowID string
 // PaneID is an exact tmux pane ID such as %9.
 type PaneID string
 
+// EnvVar is one environment variable exported into a window tmux creates. Each
+// variable becomes a separate -e argv pair, so no value is ever concatenated
+// into a shell-interpreted string.
+type EnvVar struct {
+	Name  string
+	Value string
+}
+
 // Session identifies one listed tmux session.
 type Session struct {
 	ID   SessionID
@@ -115,12 +123,13 @@ func (c Client) ListSessions(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
-// NewSession creates the first role and returns the IDs printed by tmux.
-func (c Client) NewSession(ctx context.Context, name, role, dir, command string) (CreatedSession, error) {
-	output, err := c.tmuxOutput(ctx, "create session",
-		"new-session", "-d", "-s", name, "-n", role, "-c", dir,
-		"-P", "-F", createdSessionFormat, "--", command,
-	)
+// NewSession creates the first role and returns the IDs printed by tmux. Each
+// entry of env is exported into the created window's environment.
+func (c Client) NewSession(ctx context.Context, name, role, dir, command string, env []EnvVar) (CreatedSession, error) {
+	arguments := []string{"new-session", "-d", "-s", name, "-n", role, "-c", dir}
+	arguments = append(arguments, environmentArguments(env)...)
+	arguments = append(arguments, "-P", "-F", createdSessionFormat, "--", command)
+	output, err := c.tmuxOutput(ctx, "create session", arguments...)
 	if err != nil {
 		return CreatedSession{}, err
 	}
@@ -150,14 +159,15 @@ func (c Client) NewSession(ctx context.Context, name, role, dir, command string)
 }
 
 // NewWindow creates a later role in sid and returns the IDs printed by tmux.
-func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command string) (CreatedWindow, error) {
+// Each entry of env is exported into the created window's environment.
+func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command string, env []EnvVar) (CreatedWindow, error) {
 	if err := validateID(string(sid), '$'); err != nil {
 		return CreatedWindow{}, fmt.Errorf("new window target: %w", err)
 	}
-	output, err := c.tmuxOutput(ctx, "create window",
-		"new-window", "-d", "-t", string(sid), "-n", role, "-c", dir,
-		"-P", "-F", createdWindowFormat, "--", command,
-	)
+	arguments := []string{"new-window", "-d", "-t", string(sid), "-n", role, "-c", dir}
+	arguments = append(arguments, environmentArguments(env)...)
+	arguments = append(arguments, "-P", "-F", createdWindowFormat, "--", command)
+	output, err := c.tmuxOutput(ctx, "create window", arguments...)
 	if err != nil {
 		return CreatedWindow{}, err
 	}
@@ -176,6 +186,18 @@ func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command
 		return CreatedWindow{}, creationOutputError("parse created pane pid", err)
 	}
 	return CreatedWindow{WindowID: WindowID(fields[0]), PaneID: PaneID(fields[1]), PanePID: panePID}, nil
+}
+
+// environmentArguments renders env as tmux -e argv pairs in declaration order.
+func environmentArguments(env []EnvVar) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	arguments := make([]string, 0, 2*len(env))
+	for _, variable := range env {
+		arguments = append(arguments, "-e", variable.Name+"="+variable.Value)
+	}
+	return arguments
 }
 
 func creationOutputError(operation string, err error) error {

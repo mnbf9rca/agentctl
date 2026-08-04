@@ -47,10 +47,19 @@ type integrationWindow struct {
 }
 
 type stubInvocation struct {
+	Session     string
+	Role        string
+	Harness     string
+	Model       string
+	Environment stubEnvironment
+}
+
+// stubEnvironment is the identity environment the launched pane process itself
+// observes, which is what an agent running there would read.
+type stubEnvironment struct {
 	Session string
 	Role    string
-	Harness string
-	Model   string
+	Managed string
 }
 
 type sentinelSnapshot struct {
@@ -215,7 +224,8 @@ parsedOptions:
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(87)
 	}
-	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\n", session, role, harness, model); err != nil {
+	if _, err := fmt.Fprintf(record, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", session, role, harness, model,
+		os.Getenv("AGENTCTL_SESSION"), os.Getenv("AGENTCTL_ROLE"), os.Getenv("AGENTCTL_MANAGED")); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(88)
 	}
@@ -369,6 +379,14 @@ func (f *integrationFixture) installStubs() {
 	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
 	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
+
+	// Blank the identity variables the test process may itself have been
+	// launched with: the tmux server inherits this environment, so a value
+	// inherited from outside could otherwise pass for one agentctl exported.
+	// Empty is equivalent to absent for session resolution (§4.1).
+	f.t.Setenv("AGENTCTL_SESSION", "")
+	f.t.Setenv("AGENTCTL_ROLE", "")
+	f.t.Setenv("AGENTCTL_MANAGED", "")
 }
 
 func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult {
@@ -612,11 +630,14 @@ func (f *integrationFixture) readStubInvocations() ([]stubInvocation, error) {
 	lines := nonemptyLines(data)
 	invocations := make([]stubInvocation, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 4)
-		if len(fields) != 4 {
+		fields := strings.SplitN(line, "\t", 7)
+		if len(fields) != 7 {
 			return nil, fmt.Errorf("parse stub invocation %q: got %d fields", line, len(fields))
 		}
-		invocations = append(invocations, stubInvocation{Session: fields[0], Role: fields[1], Harness: fields[2], Model: fields[3]})
+		invocations = append(invocations, stubInvocation{
+			Session: fields[0], Role: fields[1], Harness: fields[2], Model: fields[3],
+			Environment: stubEnvironment{Session: fields[4], Role: fields[5], Managed: fields[6]},
+		})
 	}
 	return invocations, nil
 }

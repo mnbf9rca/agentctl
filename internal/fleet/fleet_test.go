@@ -276,6 +276,7 @@ func TestLaunchOneRoleCreatesAndStampsReturnedIDs(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-session", "-d", "-s", "epic123", "-n", "planner", "-c", "/invocation cwd",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable'",
 		}},
@@ -331,6 +332,7 @@ func TestLaunchMultipleRolesUsesCreationIDsAndDeclarationOrder(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-session", "-d", "-s", "epic123", "-n", "planner", "-c", "/fleet workspace",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude'",
 		}},
@@ -345,6 +347,7 @@ func TestLaunchMultipleRolesUsesCreationIDsAndDeclarationOrder(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_process", "claude"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'",
 		}},
@@ -355,6 +358,81 @@ func TestLaunchMultipleRolesUsesCreationIDsAndDeclarationOrder(t *testing.T) {
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_process", "codex"}},
 	)
+}
+
+func TestLaunchExportsIdentityEnvironmentOnBothCreationPaths(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("$17\t@23\t%42\t4242\n")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("claude\n")}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("@65\t%87\t8686\n")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("codex\n")}, tmuxx.Response{},
+	)
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Getwd:    func() (string, error) { return "/repo", nil },
+	})
+	fleet := config.FleetConfig{Roles: []config.RoleConfig{
+		{Name: "planner", Harness: config.HarnessClaude},
+		{Name: "reviewer", Harness: config.HarnessCodex},
+	}}
+
+	if err := launcher.Launch(context.Background(), "epic123", fleet, nil); err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+
+	tests := []struct {
+		command string
+		want    []string
+	}{
+		{
+			command: "new-session",
+			want:    []string{"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1"},
+		},
+		{
+			command: "new-window",
+			want:    []string{"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			got := environmentArgs(t, runner, tt.command)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("%s environment argv = %#v, want %#v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// environmentArgs returns every -e flag and its assignment, in order, from the
+// sole tmux call whose first argument is command.
+func environmentArgs(t *testing.T, runner *tmuxx.FakeRunner, command string) []string {
+	t.Helper()
+	var environment []string
+	matches := 0
+	for _, call := range runner.Calls {
+		if call.Executable != "tmux" || len(call.Args) == 0 || call.Args[0] != command {
+			continue
+		}
+		matches++
+		for index := 0; index < len(call.Args); index++ {
+			if call.Args[index] != "-e" {
+				continue
+			}
+			if index+1 == len(call.Args) {
+				t.Fatalf("%s call ends with a dangling -e: %#v", command, call.Args)
+			}
+			environment = append(environment, call.Args[index], call.Args[index+1])
+			index++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("%s calls = %d, want exactly one", command, matches)
+	}
+	return environment
 }
 
 func presentExecutable(name string) (string, error) { return "/bin/" + name, nil }
@@ -606,6 +684,7 @@ func TestLaunchRollsBackMalformedLaterWindowOutput(t *testing.T) {
 	}
 	if got, want := runner.Calls[11], (tmuxx.Call{Executable: "tmux", Args: []string{
 		"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/repo",
+		"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1",
 		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 		"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'reviewer' 'codex'",
 	}}); !reflect.DeepEqual(got, want) {

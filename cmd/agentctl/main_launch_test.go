@@ -314,7 +314,7 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 	}
 	assertLaunchCalls(t, runner,
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/fleet workspace", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude'"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude'"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_version", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_roles", "planner,reviewer"}},
@@ -324,7 +324,7 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_model", ""}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_process", "claude"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace", "-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_role", "reviewer"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_harness", "codex"}},
