@@ -5,6 +5,11 @@ command delivery. Otherwise tick "Checklist not required" (box 2) on the
 promotion PR below and skip this file. Rationale and results history:
 [docs/release-verification-notes.md](release-verification-notes.md).
 
+Run the checklist from the clean primary checkout's repository root, not from
+a linked worktree. The launched panes inherit the tmux server environment, and
+AMQ auto-discovers the primary checkout's repo-local `.agent-mail`; a linked
+worktree instead needs `AMQ_GLOBAL_ROOT` propagated into that server.
+
 ## Part A — Run the wrapper
 
 ```bash
@@ -20,7 +25,17 @@ From Window 2, run the bare command printed after `Attach from Window 2 with:`:
 ```bash
 ./bin/agentctl attach --session relverify
 ```
+- [ ] The narration starts with `agentctl: attaching session "relverify" (2 windows) in iTerm2…`
+      and warns that the Command Menu belongs to iTerm2
 - [ ] Window 2 shows the claude and codex tabs; answer `y` at the attach prompt
+
+Keep this attachment open through the live checks below. After the last visual
+check, press `esc` to detach cleanly; **do not use uppercase `X`**. The
+[verified §3.4 contract](superpowers/specs/2026-08-01-agentctl-design.md#34-iterm2-force-quit-of-tmux-control-mode-2026-08-04)
+shows that `X` leaves the fleet running but wedges the tmux client, so the
+terminal stays busy and agentctl cannot report. After `esc`, expect the
+post-detach session-state report beginning with
+`agentctl: control-mode attachment to session "relverify" ended (tmux exit 0)`.
 
 ### Claude clear
 
@@ -40,10 +55,25 @@ From Window 2, run the bare command printed after `Attach from Window 2 with:`:
 - [ ] Watch the wrapper run `./bin/agentctl compact --session relverify a`; answer
       `y` only if junk cleared, `/compact` executed, and the conversation compacted
 
+### Relaunch a missing role
+
+This step is staged for the single-role `relaunch` surface. Finalize its exact
+commands and output assertions against the merged implementation before marking
+this runbook ready.
+
+- [ ] The wrapper resolved the codex role's window ID, removed that exact ID,
+      and `./bin/agentctl status --session relverify` reported role `b` missing
+- [ ] The wrapper ran `./bin/agentctl relaunch --session relverify b`, asserted
+      the printed harness/model/directory provenance, and confirmed explicit
+      status restored role `b` to running
+- [ ] In the relaunched codex tab, wait for the TUI to become ready; answer `y`
+      only after observing the ready input surface
+
 ### Automated teardown and evidence
 
-- [ ] The wrapper killed `relverify`, confirmed `agentctl status` fails, confirmed
-      no matching tmux process remains, and printed `ALL VERIFIED — evidence appended`
+- [ ] The wrapper killed `relverify`; `./bin/agentctl status --session relverify`
+      exited `3` (`6` only when no tmux server remained); no matching tmux
+      process remained; and it printed `ALL VERIFIED — evidence appended`
 - [ ] `docs/release-verification-notes.md` committed
 
 Every prompt accepts exactly `y` or `n`. Empty input and other text re-prompt; `n`
