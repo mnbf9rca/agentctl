@@ -138,6 +138,14 @@ agentctl status --session epic123
 agentctl status --session epic123 --json
 ```
 
+With no session named, `status` lists every tmux session on the server. Use `--all` to request the same overview from
+inside tmux or when `AGENTCTL_SESSION` is set:
+
+```bash
+agentctl status
+agentctl status --all
+```
+
 To open the eight role windows as native tabs, first enable this exact setting:
 
 ```text
@@ -225,11 +233,37 @@ is reported instead and does not create a new session.
 ### `status`
 
 ```text
-agentctl status [--session SESSION] [--json]
+agentctl status [--session SESSION | --all] [--json]
 ```
 
 Reports objective tmux, metadata, and root-process facts. The default is a human-readable table; `--json` emits the
 versioned machine-readable report.
+
+When no session is named — no `--session`, no `AGENTCTL_SESSION`, and no current tmux session — `status` reports every
+tmux session instead of failing. `--all` requests the same listing regardless of those sources; combining it with
+`--session` is a usage error (exit 2):
+
+```bash
+agentctl status
+agentctl status --all
+agentctl status --json
+```
+
+The table renders one header and one row per role across all listed sessions. An unmanaged or otherwise agentless
+session still gets one row naming the session and its state. The JSON document wraps the same per-session reports;
+unmanaged sessions use `managed: false` with an empty agent list:
+
+```json
+{"schema": 1, "sessions": [{"schema": 1, "session": "shell", "managed": false, "agents": []}]}
+```
+
+A session that claims agentctl management but carries metadata agentctl cannot interpret — a foreign
+`@agentctl_version`, an absent version marker, or a malformed role roster — is rendered in place with the defect named.
+The JSON session report includes a `defect` field, so its empty agent list is not presented as an observed absence. The
+listing continues so the remaining topology stays visible, and the command still exits 3.
+
+If no tmux server is running, the listing exits 6 and carries tmux's own message. It does not infer an empty server by
+matching stderr text.
 
 ### `clear`
 
@@ -259,15 +293,18 @@ unmanaged sessions.
 
 ### Session selection
 
-`launch` always requires `--session`. `status`, `clear`, `compact`, and `kill` resolve the session in this order:
+`launch` always requires `--session`. Unless `status --all` requests the listing, `status`, `clear`, `compact`, and
+`kill` resolve the session in this order:
 
 1. an explicit `--session SESSION`;
 2. a nonempty `AGENTCTL_SESSION` environment variable;
 3. the current tmux session, when `TMUX_PANE` identifies the caller.
 
 An explicit empty `--session=` is rejected, as is any invalid nonempty explicit or environment value; those sources do
-not silently fall through. An empty `AGENTCTL_SESSION` is instead treated as absent. `attach` accepts the explicit and
-environment sources, but it must run outside tmux, so the current-tmux fallback is not available to that command.
+not silently fall through. An empty `AGENTCTL_SESSION` is instead treated as absent. When no source names a session,
+`clear`, `compact`, and `kill` fail — they act on exactly one target — while `status` reports every session.
+`attach` accepts the explicit and environment sources, but it must run outside tmux, so the current-tmux fallback is
+not available to that command.
 
 ## Understanding status
 

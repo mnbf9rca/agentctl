@@ -10,6 +10,7 @@ import (
 )
 
 type tmuxClient interface {
+	ListSessions(context.Context) ([]tmuxx.Session, error)
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
 	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	ListPanes(context.Context, tmuxx.WindowID) ([]tmuxx.Pane, error)
@@ -51,6 +52,36 @@ type Collector struct {
 // NewCollector constructs a status collector.
 func NewCollector(client tmuxClient) Collector {
 	return Collector{client: client}
+}
+
+// CollectAll gathers status for every session on the tmux server, in the order
+// tmux lists them.
+func (c Collector) CollectAll(ctx context.Context) (SessionsReport, error) {
+	sessions, err := c.client.ListSessions(ctx)
+	if err != nil {
+		return SessionsReport{}, tmuxx.ClassifyError(err)
+	}
+
+	all := SessionsReport{Schema: 1, Sessions: []Report{}}
+	var defects []error
+	for _, listed := range sessions {
+		report, err := c.Collect(ctx, listed.Name, listed.ID)
+		if err != nil {
+			var versionError *VersionError
+			var rosterError *RosterError
+			if !errors.As(err, &versionError) && !errors.As(err, &rosterError) {
+				return SessionsReport{}, err
+			}
+			defect := err
+			if rosterError != nil || versionError.Version == "" {
+				defect = fmt.Errorf("session %q: %w", listed.Name, err)
+			}
+			report = Report{Schema: 1, Session: listed.Name, Managed: true, Agents: []Agent{}, Defect: defect.Error()}
+			defects = append(defects, defect)
+		}
+		all.Sessions = append(all.Sessions, report)
+	}
+	return all, errors.Join(defects...)
 }
 
 // Collect gathers status for one already-resolved session ID.

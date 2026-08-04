@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
@@ -380,6 +381,175 @@ func TestCollectorPropagatesProcessRunnerFailure(t *testing.T) {
 	}
 	if processCalls := assertStatusCallAllowlist(t, runner.Calls); processCalls != 1 {
 		t.Fatalf("recorded %d process calls, want 1", processCalls)
+	}
+}
+
+func TestCollectorCollectAllListsEverySessionInServerOrder(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tfleet\n$5\tshell\n$6\tepic123\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("planner\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
+		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("codex1\n")},
+		tmuxx.Response{Stdout: []byte("@9\tcodex1\t1\t1\tcodex1\tcodex\tgpt\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("%20\t222\t0\t1\n")},
+		tmuxx.Response{Stdout: []byte("codex\n")},
+	)
+
+	got, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background())
+	if err != nil {
+		t.Fatalf("CollectAll() error = %v", err)
+	}
+	want := SessionsReport{
+		Schema: 1,
+		Sessions: []Report{
+			{Schema: 1, Session: "fleet", Managed: true, Agents: []Agent{
+				{Role: "planner", Harness: "claude", Model: "", Window: "planner", PaneID: "%12", Process: "claude", State: StateRunning},
+			}},
+			{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
+			{Schema: 1, Session: "epic123", Managed: true, Agents: []Agent{
+				{Role: "codex1", Harness: "codex", Model: "gpt", Window: "codex1", PaneID: "%20", Process: "codex", State: StateRunning},
+			}},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
+	}
+
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", statusWindowFormat}},
+		{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
+		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_version"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$6", "@agentctl_managed"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$6", "@agentctl_version"}},
+		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$6", "@agentctl_roles"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$6", "-F", statusWindowFormat}},
+		{Executable: "tmux", Args: []string{"list-panes", "-t", "@9", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
+		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "222"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("recorded calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+}
+
+func TestCollectorCollectAllReportsUnmanagedSessions(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$5\tshell\n")},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
+
+	got, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background())
+	if err != nil {
+		t.Fatalf("CollectAll() error = %v", err)
+	}
+	want := SessionsReport{Schema: 1, Sessions: []Report{{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectorCollectAllContinuesAfterUnreadableSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tfleet\n$6\tfuture\n$7\tshell\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("planner\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
+		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("2\n")},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
+
+	got, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background())
+	var versionError *VersionError
+	if !errors.As(err, &versionError) {
+		t.Fatalf("CollectAll() error = %T %v, want *VersionError", err, err)
+	}
+	if versionError.Session != "future" || versionError.Version != "2" {
+		t.Fatalf("VersionError = %#v, want session future and version 2", versionError)
+	}
+	want := SessionsReport{Schema: 1, Sessions: []Report{
+		{Schema: 1, Session: "fleet", Managed: true, Agents: []Agent{{Role: "planner", Harness: "claude", Window: "planner", PaneID: "%12", Process: "claude", State: StateRunning}}},
+		{Schema: 1, Session: "future", Managed: true, Agents: []Agent{}, Defect: "session \"future\" was created by a different agentctl version \"2\""},
+		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectorCollectAllNamesRosterDefectAndContinues(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tbroken\n$5\tshell\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("0\n")},
+		tmuxx.Response{},
+	)
+
+	got, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background())
+	var rosterError *RosterError
+	if !errors.As(err, &rosterError) {
+		t.Fatalf("CollectAll() error = %T %v, want *RosterError", err, err)
+	}
+	if !strings.Contains(err.Error(), `session "broken"`) {
+		t.Fatalf("CollectAll() error = %q, want broken session name", err)
+	}
+	want := SessionsReport{Schema: 1, Sessions: []Report{
+		{Schema: 1, Session: "broken", Managed: true, Agents: []Agent{}, Defect: `session "broken": managed session has no @agentctl_roles roster`},
+		{Schema: 1, Session: "shell", Managed: false, Agents: []Agent{}},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CollectAll() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectorCollectAllReturnsRowOneFailureWithoutReport(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: errors.New("no server running")})
+	got, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background())
+	var tmuxError *tmuxx.TmuxError
+	if !errors.As(err, &tmuxError) {
+		t.Fatalf("CollectAll() error = %T %v, want *tmuxx.TmuxError", err, err)
+	}
+	if !reflect.DeepEqual(got, SessionsReport{}) {
+		t.Fatalf("CollectAll() = %#v, want zero report", got)
+	}
+}
+
+func TestCollectorCollectAllPreservesContextErrors(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: context.Canceled})
+	if _, err := NewCollector(tmuxx.New(runner)).CollectAll(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CollectAll() error = %T %v, want preserved %v", err, err, context.Canceled)
 	}
 }
 
