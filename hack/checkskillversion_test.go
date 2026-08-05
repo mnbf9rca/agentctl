@@ -94,8 +94,8 @@ func TestCheckSkillVersionIgnoresNestedMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected direct metadata.version mismatch to fail")
 	}
-	if !strings.Contains(stderr, "0.2.0") || !strings.Contains(stderr, "0.3.0") {
-		t.Fatalf("stderr must compare the direct metadata.version, got %q", stderr)
+	if !strings.Contains(stderr, "unsupported nesting") {
+		t.Fatalf("stderr must reject nested metadata, got %q", stderr)
 	}
 }
 
@@ -105,8 +105,41 @@ func TestCheckSkillVersionIgnoresNestedVersion(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected direct metadata.version mismatch to fail")
 	}
-	if !strings.Contains(stderr, "0.2.0") || !strings.Contains(stderr, "0.3.0") {
-		t.Fatalf("stderr must compare the direct metadata.version, got %q", stderr)
+	if !strings.Contains(stderr, "unsupported nesting") {
+		t.Fatalf("stderr must reject nested version mappings, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsMissingMappingSeparator(t *testing.T) {
+	skill := "---\nmetadata:\n  version:\"0.3.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected version without a mapping separator to fail")
+	}
+	if !strings.Contains(stderr, "is not a mapping") {
+		t.Fatalf("stderr must identify the malformed mapping, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsInlineMetadataOverride(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\nmetadata: { version: \"0.2.0\" }\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected inline metadata override to fail")
+	}
+	if !strings.Contains(stderr, "metadata") {
+		t.Fatalf("stderr must identify the invalid metadata mapping, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsMalformedMetadataContent(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n  malformed\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected malformed metadata content to fail")
+	}
+	if !strings.Contains(stderr, "is not a mapping") {
+		t.Fatalf("stderr must identify the malformed mapping, got %q", stderr)
 	}
 }
 

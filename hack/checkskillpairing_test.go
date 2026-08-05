@@ -132,6 +132,16 @@ func TestCheckSkillPairing(t *testing.T) {
 			},
 		},
 		{
+			name:       "unusual command surface filename fails",
+			wantExit:   1,
+			wantOutput: "command surface changed without skills/agentctl/",
+			setup: func(t *testing.T, r *pairingRepo, initial string) (string, string) {
+				r.git(t, "switch", "-qc", "feature")
+				r.write(t, "cmd/agentctl/odd\nname.go", []byte("package main\n"), 0o644)
+				return initial, r.commit(t, "change unusual command surface path")
+			},
+		},
+		{
 			name:       "config surface change without skill fails",
 			wantExit:   1,
 			wantOutput: "command surface changed without skills/agentctl/",
