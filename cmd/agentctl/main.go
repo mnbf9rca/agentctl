@@ -81,8 +81,10 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 }
 
 type launchDependencies struct {
-	runner tmuxx.Runner
-	fleet  fleet.Dependencies
+	runner       tmuxx.Runner
+	fleet        fleet.Dependencies
+	skillHome    func() (string, error)
+	skillVersion func() string
 }
 
 type sessionResolver interface {
@@ -140,7 +142,11 @@ func runWithRunner(
 	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
 	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
 	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{
-		launch:     launchDependencies{runner: runner},
+		launch: launchDependencies{
+			runner:       runner,
+			skillHome:    os.UserHomeDir,
+			skillVersion: skillBinaryVersion,
+		},
 		resolver:   resolver,
 		collector:  collector,
 		killer:     kill.New(client),
@@ -234,7 +240,9 @@ func runWithAllDependencies(
 		if code := launchResult(stderr, err, usage); code != exitOK {
 			return code
 		}
-		return confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
+		code := confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
+		writeSkillLaunchNotices(stderr, deps.launch.skillHome, deps.launch.skillVersion)
+		return code
 	}
 
 	options, err := parseCommand(command, arguments[1:])
@@ -380,6 +388,36 @@ func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
 
 func skillBinaryVersion() string {
 	return strings.TrimPrefix(buildinfo.Current(), "v")
+}
+
+func writeSkillLaunchNotices(stderr io.Writer, userHomeDir func() (string, error), currentVersion func() string) {
+	if userHomeDir == nil || currentVersion == nil {
+		return
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "skill: home directory could not be resolved: %v\n", err)
+		return
+	}
+	version := currentVersion()
+	for _, target := range skillinstall.Targets(home) {
+		manifest, ok, err := skillinstall.ReadManifest(target.Dir)
+		display := skillTargetDisplay(target)
+		if err != nil {
+			fmt.Fprintf(stderr, "skill: %s manifest could not be read: %v\n", display, err)
+			continue
+		}
+		if ok && manifest.Version != version {
+			fmt.Fprintf(stderr, "skill: %s is %s; this binary is %s — run 'agentctl skill install'\n", display, manifest.Version, version)
+		}
+	}
+}
+
+func skillTargetDisplay(target skillinstall.Target) string {
+	if target.Harness == "claude" {
+		return "~/.claude/skills/agentctl"
+	}
+	return "~/.agents/skills/agentctl"
 }
 
 func parseSkill(arguments []string) (string, bool, error) {
