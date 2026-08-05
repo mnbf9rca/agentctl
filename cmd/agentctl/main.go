@@ -667,6 +667,17 @@ func relaunchError(stderr io.Writer, role, usage string, err error) int {
 	}
 	var relaunchFailure *fleet.RelaunchError
 	if errors.As(err, &relaunchFailure) {
+		var conflict *fleet.PostCreateWindowConflictError
+		if errors.As(err, &conflict) {
+			if relaunchFailure.CleanupErr != nil {
+				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; failed to remove window %s: %v\n",
+					role, conflict, relaunchFailure.WindowID, relaunchFailure.CleanupErr)
+			} else {
+				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; removed window %s\n",
+					role, conflict, relaunchFailure.WindowID)
+			}
+			return exitLaunch
+		}
 		fmt.Fprintf(stderr, "agentctl: %v\n", err)
 		return exitLaunch
 	}
