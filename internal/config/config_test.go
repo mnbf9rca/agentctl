@@ -370,6 +370,61 @@ func TestParseFleetRejectsInvalidEffortLists(t *testing.T) {
 	}
 }
 
+func TestValidateModelNameEnforcesCharsetIncludingEmptyAndFlagSmuggling(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"fable", "gpt-5.6", "Opus_4", "a"} {
+		if err := ValidateModelName(model); err != nil {
+			t.Fatalf("ValidateModelName(%q) error = %v, want nil", model, err)
+		}
+	}
+	for _, tt := range []struct {
+		model   string
+		message string
+	}{
+		{model: "", message: `invalid --model value "": must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`},
+		{model: "--dangerously-bypass-approvals-and-sandbox", message: `invalid --model value "--dangerously-bypass-approvals-and-sandbox": must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`},
+		{model: "gpt 5", message: `invalid --model value "gpt 5": must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`},
+		{model: "with:colon", message: `invalid --model value "with:colon": must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`},
+		{model: "with,comma", message: `invalid --model value "with,comma": must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`},
+	} {
+		err := ValidateModelName(tt.model)
+		if err == nil {
+			t.Fatalf("ValidateModelName(%q) error = nil, want rejection", tt.model)
+		}
+		if got := err.Error(); got != tt.message {
+			t.Fatalf("ValidateModelName(%q) error = %q, want %q", tt.model, got, tt.message)
+		}
+	}
+}
+
+func TestParseHarnessAcceptsOnlyRegisteredHarnesses(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		want Harness
+	}{
+		{name: "claude", want: HarnessClaude},
+		{name: "codex", want: HarnessCodex},
+	} {
+		got, err := ParseHarness(tt.name)
+		if err != nil || got != tt.want {
+			t.Fatalf("ParseHarness(%q) = %q, %v, want %q, nil", tt.name, got, err, tt.want)
+		}
+	}
+	for _, name := range []string{"", "bash", "Claude", "claude ", "sh -c"} {
+		got, err := ParseHarness(name)
+		if err == nil {
+			t.Fatalf("ParseHarness(%q) = %q, nil, want rejection", name, got)
+		}
+		want := `invalid --harness value "` + name + `": must be claude or codex`
+		if err.Error() != want {
+			t.Fatalf("ParseHarness(%q) error = %q, want %q", name, err.Error(), want)
+		}
+	}
+}
+
 func assertValidationError(t *testing.T, err error, option, value string, entryIndex int, entry, reason, message string) {
 	t.Helper()
 

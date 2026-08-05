@@ -53,13 +53,14 @@ func TestRunRejectsVersionArguments(t *testing.T) {
 	const globalVersionUsage = `Usage: agentctl COMMAND [OPTIONS]
 
 Commands:
-  launch   create an agent fleet
-  attach   attach an agent fleet in iTerm2
-  status   report fleet status
-  clear    deliver /clear to a role
-  compact  deliver /compact to a role
-  kill     terminate a managed fleet
-  version  report this binary's build identity
+  launch    create an agent fleet
+  relaunch  recreate one absent role window in a managed fleet
+  attach    attach an agent fleet in iTerm2
+  status    report fleet status
+  clear     deliver /clear to a role
+  compact   deliver /compact to a role
+  kill      terminate a managed fleet
+  version   report this binary's build identity
 `
 	tests := []struct {
 		arguments []string
@@ -461,7 +462,7 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(launchOneRoleResponses("")...)
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, launchTestDependencies(runner), resolver, nil, nil, nil, nil)
+			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{launch: launchTestDependencies(runner), resolver: resolver})
 			if code != tt.wantCode {
 				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
 			}

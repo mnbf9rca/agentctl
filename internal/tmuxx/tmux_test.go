@@ -256,6 +256,19 @@ func TestSessionOptionWrappersOwnScopeAndPreserveValues(t *testing.T) {
 	)
 }
 
+func TestClearSessionEnvironmentUsesResolvedIDAndUnsetArgv(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	client := New(runner)
+	if err := client.ClearSessionEnvironment(context.Background(), "$4", "AGENTCTL_ROLE"); err != nil {
+		t.Fatalf("ClearSessionEnvironment() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"set-environment", "-t", "$4", "-u", "AGENTCTL_ROLE",
+	}})
+}
+
 func TestWindowOptionWrappersOwnScopeAndAllowEmptyValue(t *testing.T) {
 	t.Parallel()
 
@@ -291,11 +304,17 @@ func TestTypedTargetsRejectNamesBeforeRunningTmux(t *testing.T) {
 		{name: "session option", run: func(client Client) error {
 			return client.SetSessionOption(context.Background(), "epic123", "@k", "v")
 		}},
+		{name: "session environment", run: func(client Client) error {
+			return client.ClearSessionEnvironment(context.Background(), "epic123", "NAME")
+		}},
 		{name: "window option", run: func(client Client) error {
 			return client.SetWindowOption(context.Background(), "worker", "@k", "v")
 		}},
 		{name: "kill", run: func(client Client) error {
 			return client.KillSession(context.Background(), "epic123")
+		}},
+		{name: "kill window", run: func(client Client) error {
+			return client.KillWindow(context.Background(), "worker")
 		}},
 		{name: "display", run: func(client Client) error {
 			_, err := client.DisplayMessage(context.Background(), "pane")
@@ -327,6 +346,16 @@ func TestKillSessionUsesResolvedID(t *testing.T) {
 		t.Fatalf("KillSession() error = %v", err)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-session", "-t", "$4"}})
+}
+
+func TestKillWindowUsesResolvedID(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	if err := New(runner).KillWindow(context.Background(), "@9"); err != nil {
+		t.Fatalf("KillWindow() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@9"}})
 }
 
 func TestDisplayMessageTargetsCurrentPaneID(t *testing.T) {

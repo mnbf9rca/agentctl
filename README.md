@@ -15,7 +15,7 @@ The responsibility split is deliberate:
 | AMQ | Durable agent communication and workflow protocols |
 | tmux | Process hosting, persistence, and terminal input |
 | iTerm2 | Native visual interface for tmux windows |
-| agentctl | Fleet launch, metadata, status, predefined controls, and managed teardown |
+| agentctl | Fleet launch, single-role relaunch, metadata, status, predefined controls, and managed teardown |
 
 ```
 +----------+
@@ -180,6 +180,13 @@ agentctl clear --session epic123 codex2
 agentctl compact --session epic123 reviewer-codex
 ```
 
+If one role's window disappears — status reports it `missing` — bring that role back on its own, without disturbing the
+other seven:
+
+```bash
+agentctl relaunch --session epic123 codex2
+```
+
 When the fleet is no longer needed, terminate the managed tmux session:
 
 ```bash
@@ -231,6 +238,63 @@ that exists for the separate Codex Security CLI is not used. codex's own reasoni
 verified on both harnesses, and anything outside it is rejected rather than forwarded.
 
 The selected level is recorded in window metadata (`@agentctl_effort`) and reported by `status`.
+
+Launch records the fleet's configuration on the session so a single role can be recreated later without the operator
+remembering how it was started:
+
+| Session option | Value |
+| --- | --- |
+| `@agentctl_roles` | the declared role names, comma-joined, in declaration order |
+| `@agentctl_fleet` | `role:harness:model:effort` quads, comma-joined, in the same order; defaulted model and effort values are empty (`planner:claude::`) |
+| `@agentctl_dir` | the exact directory passed to tmux `-c`: the `--dir` value, or the invocation working directory |
+
+### `relaunch`
+
+```text
+agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE
+```
+
+Recreates one role's window inside an existing managed session, using the harness, model, effort, and directory recorded when
+the fleet launched. Use it when a single agent's window has gone — closed deliberately to reload a harness, or lost to
+a crash — instead of killing and relaunching the whole fleet.
+
+It creates only what is **absent**. If the role still has a window, relaunch refuses and reports the state it observed,
+using the same vocabulary as `status`:
+
+```text
+agentctl: refusing to relaunch coder; role coder already has 1 window in epic123 (@7 running); relaunch creates only absent role windows
+agentctl: refusing to relaunch coder; role coder already has 2 windows in epic123 (@7 ambiguous, @9 ambiguous); relaunch creates only absent role windows
+```
+
+A `dead` window is refused too. Relaunch is not a restart: a dead pane still exists and may hold the output that
+explains why the agent stopped, so it is never killed and recreated for you. Remove the window yourself once you have
+finished with it, then relaunch.
+
+Success states exactly what was created and where each part of the configuration came from:
+
+```text
+agentctl: relaunched coder in epic123: window @11, pane %24, harness codex (stored), model gpt-5.6 (stored), effort high (stored), dir /work/epic123 (stored)
+```
+
+`--harness`, `--model`, `--effort`, and `--dir` each override one field, and the override is reported as such — a role relaunched
+onto a different harness never reads as an ordinary member of the fleet. `--harness`, `--model`, and `--effort` overrides are
+written back into `@agentctl_fleet`, so the recorded configuration always matches the running fleet. A `--dir`
+override is **not**: `@agentctl_dir` records where the fleet was launched, and the other roles still run there, so the
+divergence is reported instead:
+
+```text
+agentctl: coder now runs in /tmp/scratch; the fleet's recorded directory /work/epic123 is unchanged
+```
+
+A session launched by a version of agentctl that predates `@agentctl_fleet` and `@agentctl_dir` records no per-role
+configuration. Relaunch refuses it rather than guessing, and asks for the configuration explicitly:
+
+```text
+agentctl: refusing to relaunch coder; session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] [--effort] --dir
+```
+
+The working directory is never defaulted to wherever you happen to be standing: a role silently relaunched outside the
+fleet's directory would join a different AMQ session.
 
 ### `attach`
 
@@ -373,7 +437,7 @@ unmanaged sessions.
 ### Session selection
 
 `launch` always requires `--session`. Bare `status` lists every session and consults no ambient source for selection;
-only an explicit `status --session SESSION` narrows its report. `clear`, `compact`, `kill`, and `attach` resolve the
+only an explicit `status --session SESSION` narrows its report. `relaunch`, `clear`, `compact`, `kill`, and `attach` resolve the
 session in this order:
 
 1. an explicit `--session SESSION`;
@@ -382,7 +446,7 @@ session in this order:
 
 An explicit empty `--session=` is rejected. For the acting commands, any invalid nonempty explicit or environment value
 is also rejected rather than silently falling through; an empty `AGENTCTL_SESSION` is treated as absent. When no source
-names a session, `clear`, `compact`, and `kill` fail because they act on exactly one target. `attach` accepts the
+names a session, `relaunch`, `clear`, `compact`, and `kill` fail because they act on exactly one target. `attach` accepts the
 explicit and environment sources, but it must run outside tmux, so the current-tmux fallback is not available to that
 command.
 
@@ -402,7 +466,8 @@ since disappeared. State precedence is fail-closed, so the first applicable stat
 
 Exited agents normally report `missing`, not `dead`. Managed windows do not use tmux `remain-on-exit`, so a window
 normally disappears when its agent exits. `dead` is reserved for the distinct case where a pane still exists and tmux
-reports it dead.
+reports it dead. A `missing` role is the one `relaunch` can bring back; every other state means the window is still
+there and relaunch will refuse it.
 
 Status does not claim that a `running` agent is idle, healthy at the application level, or following the intended
 workflow. It reports only the objective state agentctl can verify without scraping agent output.
@@ -412,7 +477,9 @@ workflow. It reports only the objective state agentctl can verify without scrapi
 agentctl is a single-user accident-prevention tool, not a security boundary against other processes running as the
 same user. It validates identifiers, hardcodes its control payloads, addresses tmux objects by resolved IDs, checks
 management metadata and launch-time process identity, and refuses to target its own pane when invoked from inside
-tmux.
+tmux. Recorded metadata is re-validated when it is read back: `relaunch` applies the same harness, model, and effort rules to
+`@agentctl_fleet` that `launch` applies to `--roles`, `--models`, and `--efforts`, and it removes only a window the same invocation
+created.
 
 These checks reduce wrong-target accidents but cannot make terminal input transactional. Under deliberate CPU
 saturation, verification observed delayed, missing, and doubled input. No wrong command selection was observed, but a
@@ -425,9 +492,9 @@ future truncated payload could still select another harness command. Therefore:
 
 Read [SECURITY.md](SECURITY.md) for the threat model, accepted residuals, and measured evidence.
 
-## Agent identity in launched windows
+## Agent identity in managed windows
 
-Every window `agentctl launch` creates is given three environment variables, passed to tmux as separate `-e NAME=value`
+Every window `agentctl launch` or `agentctl relaunch` creates is given three environment variables, passed to tmux as separate `-e NAME=value`
 arguments when the window is created:
 
 | Variable | Value |
@@ -445,15 +512,16 @@ printenv AGENTCTL_SESSION AGENTCTL_ROLE AGENTCTL_MANAGED
 **Guidance for agents: check `AGENTCTL_*`, `AM_*`, and `TMUX` before reasoning about fleet topology** — the fleet you
 are looking at may be the one you are running inside, and killing or reusing it would end your own session.
 
-These variables are advisory. agentctl sets them on every window it creates, but the first role's values also land in
-the tmux session environment. A window an operator later creates by hand in that session inherits all three, so its
-`AGENTCTL_ROLE` and `AGENTCTL_MANAGED` values wrongly identify it as the first managed role; this is tracked in
-[issue #106](https://github.com/mnbf9rca/agentctl/issues/106). Existing sessions are never retrofitted. Any same-user
+These variables are advisory. `launch` clears all three copies from the tmux session environment immediately after
+the first window is fully stamped, while each managed window retains the values passed directly in its creation argv.
+This prevents a window created later by hand from inheriting the first role's identity. A clear failure is reported but
+does not roll back a working fleet. Existing sessions are never retrofitted. Any same-user
 process can export the same names, so their presence is a hint, not proof. agentctl itself never reads them back when
 deciding what to control, kill, or report on: that decision rests on the `@agentctl_*` tmux options and the fail-closed
 target chain described in [SECURITY.md](SECURITY.md). The one place `AGENTCTL_SESSION` does matter to agentctl is
-session selection above, so an `agentctl status`, `clear`, `compact`, or `kill` run inside a launched pane defaults to
-that pane's own fleet; the resulting target is still validated the same way.
+session selection for acting commands: `relaunch`, `clear`, `compact`, and `kill` default to that pane's own fleet,
+while `attach` can use it only when invoked outside tmux. Bare `status` deliberately ignores ambient selection and
+lists every session; only an explicit `status --session` narrows it. Every selected target is still validated the same way.
 
 ## Troubleshooting tmux environment staleness
 

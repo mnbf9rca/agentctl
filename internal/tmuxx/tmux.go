@@ -214,6 +214,15 @@ func (c Client) SetSessionOption(ctx context.Context, sid SessionID, name, value
 	return err
 }
 
+// ClearSessionEnvironment removes one variable from an exact session ID.
+func (c Client) ClearSessionEnvironment(ctx context.Context, sid SessionID, name string) error {
+	if err := validateID(string(sid), '$'); err != nil {
+		return fmt.Errorf("clear session environment target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "clear session environment", "set-environment", "-t", string(sid), "-u", name)
+	return err
+}
+
 // SetWindowOption sets one option on an exact window ID.
 func (c Client) SetWindowOption(ctx context.Context, wid WindowID, name, value string) error {
 	if err := validateID(string(wid), '@'); err != nil {
@@ -341,6 +350,17 @@ func (c Client) KillSession(ctx context.Context, sid SessionID) error {
 		return fmt.Errorf("kill session target: %w", err)
 	}
 	_, err := c.tmuxOutput(ctx, "kill session", "kill-session", "-t", string(sid))
+	return err
+}
+
+// KillWindow kills an exact window ID. It exists solely so a relaunch can roll
+// back the one window that invocation created; no command removes a window it
+// did not create.
+func (c Client) KillWindow(ctx context.Context, wid WindowID) error {
+	if err := validateID(string(wid), '@'); err != nil {
+		return fmt.Errorf("kill window target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "kill window", "kill-window", "-t", string(wid))
 	return err
 }
 
