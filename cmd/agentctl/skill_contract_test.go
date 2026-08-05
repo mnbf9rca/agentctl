@@ -367,10 +367,14 @@ func sourceConstants(filename string, source []byte, prefix string) ([]sourceCon
 		return nil, err
 	}
 	var constants []sourceConstant
-	for _, declaration := range parsed.Decls {
-		general, ok := declaration.(*ast.GenDecl)
+	var inspectErr error
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		if inspectErr != nil {
+			return false
+		}
+		general, ok := node.(*ast.GenDecl)
 		if !ok || general.Tok != token.CONST {
-			continue
+			return true
 		}
 		for _, specification := range general.Specs {
 			values := specification.(*ast.ValueSpec)
@@ -379,15 +383,21 @@ func sourceConstants(filename string, source []byte, prefix string) ([]sourceCon
 					continue
 				}
 				if index >= len(values.Values) {
-					return nil, fmt.Errorf("%s: %s has no explicit evaluable value", filename, identifier.Name)
+					inspectErr = fmt.Errorf("%s: %s has no explicit evaluable value", filename, identifier.Name)
+					return false
 				}
 				value, err := constantLiteral(values.Values[index])
 				if err != nil {
-					return nil, fmt.Errorf("%s: %s: %w", filename, identifier.Name, err)
+					inspectErr = fmt.Errorf("%s: %s: %w", filename, identifier.Name, err)
+					return false
 				}
 				constants = append(constants, sourceConstant{name: identifier.Name, value: value})
 			}
 		}
+		return true
+	})
+	if inspectErr != nil {
+		return nil, inspectErr
 	}
 	return constants, nil
 }
@@ -668,6 +678,16 @@ func TestSourceConstantInventoryIncludesSyntheticDeclarations(t *testing.T) {
 			prefix: "State",
 			want:   sourceConstant{name: "StateSynthetic", value: "synthetic"},
 		},
+		"function local exit": {
+			source: "package main\nfunc local() {\nconst exitSynthetic = 9\n}\n",
+			prefix: "exit",
+			want:   sourceConstant{name: "exitSynthetic", value: "9"},
+		},
+		"function local state": {
+			source: "package status\ntype State string\nfunc local() {\nconst StateSynthetic State = \"synthetic\"\n}\n",
+			prefix: "State",
+			want:   sourceConstant{name: "StateSynthetic", value: "synthetic"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			constants, err := sourceConstants(name+".go", []byte(test.source), test.prefix)
@@ -831,13 +851,17 @@ func TestParsedCommandRegistryCouplesParserAndAgentDocumentation(t *testing.T) {
 	original := parsedCommandRegistry["status"]
 	mutated := original
 	mutated.flags = append(append([]parsedFlagSpec(nil), original.flags...), parsedFlagSpec{
-		name: "synthetic", kind: parsedFlagBool, usage: "synthetic review mutation",
+		name: "synthetic", kind: parsedFlagBool, target: parsedTargetJSON, usage: "synthetic review mutation",
 	})
 	parsedCommandRegistry["status"] = mutated
 	t.Cleanup(func() { parsedCommandRegistry["status"] = original })
 
-	if _, err := parseCommand("status", []string{"--synthetic"}); err != nil {
+	options, err := parseCommand("status", []string{"--synthetic"})
+	if err != nil {
 		t.Fatalf("parseCommand() rejected production-registered synthetic flag: %v", err)
+	}
+	if !options.json {
+		t.Fatal("parseCommand() discarded production-registered synthetic flag value; json = false, want true")
 	}
 	invocations, err := markdownInvocations(skills.Tree, skills.Root)
 	if err != nil {
@@ -852,6 +876,61 @@ func TestParsedCommandRegistryCouplesParserAndAgentDocumentation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("compareAgentDocumentation() = %#v, want registered synthetic flag drift", mismatches)
+	}
+}
+
+func TestParsedCommandRegistryRejectsUnknownProjectionTarget(t *testing.T) {
+	original := parsedCommandRegistry["status"]
+	mutated := original
+	mutated.flags = append(append([]parsedFlagSpec(nil), original.flags...), parsedFlagSpec{
+		name: "synthetic", kind: parsedFlagBool, target: parsedFlagTarget(255), usage: "synthetic review mutation",
+	})
+	parsedCommandRegistry["status"] = mutated
+	t.Cleanup(func() { parsedCommandRegistry["status"] = original })
+
+	_, err := parseCommand("status", []string{"--synthetic"})
+	if err == nil || !strings.Contains(err.Error(), "unknown projection target") {
+		t.Fatalf("parseCommand() error = %v, want fail-closed unknown projection target", err)
+	}
+}
+
+func TestParsedCommandRegistryProjectsRegisteredOptions(t *testing.T) {
+	statusOptions, err := parseCommand("status", []string{"--session", "fleet", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusOptions.session != "fleet" || !statusOptions.sessionSet || !statusOptions.json {
+		t.Fatalf("status options = %#v, want session fleet explicitly set and JSON true", statusOptions)
+	}
+	omittedStatus, err := parseCommand("status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omittedStatus.sessionSet || omittedStatus.json {
+		t.Fatalf("omitted status options = %#v, want unset session and false JSON", omittedStatus)
+	}
+
+	relaunchOptions, err := parseCommand("relaunch", []string{
+		"--session", "fleet", "--harness", "claude", "--model", "model",
+		"--effort", "high", "--dir", "/repo", "planner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relaunchOptions.session != "fleet" || !relaunchOptions.sessionSet || relaunchOptions.role != "planner" ||
+		relaunchOptions.harness == nil || *relaunchOptions.harness != "claude" ||
+		relaunchOptions.model == nil || *relaunchOptions.model != "model" ||
+		relaunchOptions.effort == nil || *relaunchOptions.effort != "high" ||
+		relaunchOptions.directory == nil || *relaunchOptions.directory != "/repo" {
+		t.Fatalf("relaunch options = %#v, want every registered value projected", relaunchOptions)
+	}
+
+	explicitEmpty, err := parseCommand("relaunch", []string{"--model=", "planner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitEmpty.model == nil || *explicitEmpty.model != "" {
+		t.Fatalf("explicit empty model = %#v, want non-nil pointer to empty value", explicitEmpty.model)
 	}
 }
 

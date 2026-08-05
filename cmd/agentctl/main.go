@@ -517,10 +517,22 @@ const (
 	parsedFlagBool
 )
 
+type parsedFlagTarget uint8
+
+const (
+	parsedTargetSession parsedFlagTarget = iota + 1
+	parsedTargetJSON
+	parsedTargetHarness
+	parsedTargetModel
+	parsedTargetEffort
+	parsedTargetDirectory
+)
+
 type parsedFlagSpec struct {
-	name  string
-	kind  parsedFlagKind
-	usage string
+	name   string
+	kind   parsedFlagKind
+	target parsedFlagTarget
+	usage  string
 }
 
 type parsedCommandSpec struct {
@@ -530,34 +542,34 @@ type parsedCommandSpec struct {
 
 var parsedCommandRegistry = map[string]parsedCommandSpec{
 	"attach": {
-		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
 	},
 	"status": {
 		agentFacing: true,
 		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, usage: "session name"},
-			{name: "json", kind: parsedFlagBool, usage: "emit JSON"},
+			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
+			{name: "json", kind: parsedFlagBool, target: parsedTargetJSON, usage: "emit JSON"},
 		},
 	},
 	"clear": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
 	},
 	"compact": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
 	},
 	"kill": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
 	},
 	"relaunch": {
 		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, usage: "session name"},
-			{name: "harness", kind: parsedFlagString, usage: "harness override"},
-			{name: "model", kind: parsedFlagString, usage: "model override"},
-			{name: "effort", kind: parsedFlagString, usage: "effort override"},
-			{name: "dir", kind: parsedFlagString, usage: "working directory override"},
+			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
+			{name: "harness", kind: parsedFlagString, target: parsedTargetHarness, usage: "harness override"},
+			{name: "model", kind: parsedFlagString, target: parsedTargetModel, usage: "model override"},
+			{name: "effort", kind: parsedFlagString, target: parsedTargetEffort, usage: "effort override"},
+			{name: "dir", kind: parsedFlagString, target: parsedTargetDirectory, usage: "working directory override"},
 		},
 	},
 	"version": {},
@@ -569,35 +581,66 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
 	}
 	flags := cliflags.New(command)
-	stringValues := make(map[string]*string)
-	boolValues := make(map[string]*bool)
+	type parsedFlagValue struct {
+		specification parsedFlagSpec
+		stringValue   *string
+		boolValue     *bool
+	}
+	values := make([]parsedFlagValue, 0, len(specification.flags))
 	for _, registered := range specification.flags {
+		value := parsedFlagValue{specification: registered}
 		switch registered.kind {
 		case parsedFlagString:
-			stringValues[registered.name] = flags.String(registered.name, "", registered.usage)
+			value.stringValue = flags.String(registered.name, "", registered.usage)
 		case parsedFlagBool:
-			boolValues[registered.name] = flags.Bool(registered.name, false, registered.usage)
+			value.boolValue = flags.Bool(registered.name, false, registered.usage)
 		default:
 			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown kind", command, registered.name)
 		}
+		values = append(values, value)
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
 	options := commandOptions{}
-	if sessionValue := stringValues["session"]; sessionValue != nil {
-		options.session = *sessionValue
-		options.sessionSet = flags.WasSet("session")
-	}
-	if jsonOutput := boolValues["json"]; jsonOutput != nil {
-		options.json = *jsonOutput
-	}
-	if command == "relaunch" {
-		options.harness = suppliedValue(flags, "harness", stringValues["harness"])
-		options.model = suppliedValue(flags, "model", stringValues["model"])
-		options.effort = suppliedValue(flags, "effort", stringValues["effort"])
-		options.directory = suppliedValue(flags, "dir", stringValues["dir"])
+	for _, value := range values {
+		registered := value.specification
+		switch registered.target {
+		case parsedTargetSession:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s session projection requires string kind", command, registered.name)
+			}
+			options.session = *value.stringValue
+			options.sessionSet = flags.WasSet(registered.name)
+		case parsedTargetJSON:
+			if value.boolValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s JSON projection requires bool kind", command, registered.name)
+			}
+			options.json = *value.boolValue
+		case parsedTargetHarness:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s harness projection requires string kind", command, registered.name)
+			}
+			options.harness = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetModel:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s model projection requires string kind", command, registered.name)
+			}
+			options.model = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetEffort:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s effort projection requires string kind", command, registered.name)
+			}
+			options.effort = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetDirectory:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s directory projection requires string kind", command, registered.name)
+			}
+			options.directory = suppliedValue(flags, registered.name, value.stringValue)
+		default:
+			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown projection target %d", command, registered.name, registered.target)
+		}
 	}
 
 	positional := flags.Args()
