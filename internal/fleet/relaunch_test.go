@@ -74,6 +74,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
+		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
 	runner := tmuxx.NewFakeRunner(responses...)
@@ -114,6 +115,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "fable"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "max"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
+		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
 	)...)
 }
@@ -124,6 +126,7 @@ func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
 	)
@@ -162,6 +165,7 @@ func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T)
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{},
 		tmuxx.Response{},
@@ -202,6 +206,7 @@ func TestRelaunchDirectoryOverrideLeavesRecordedFleetDirectoryUnchanged(t *testi
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
 	)
@@ -424,6 +429,7 @@ func TestRelaunchStoredRelativeDirectoryAllowsExplicitOverride(t *testing.T) {
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
 	)
 	runner := tmuxx.NewFakeRunner(responses...)
@@ -494,6 +500,7 @@ func TestRelaunchAcceptsLegacySessionWithSuppliedConfigurationAndNeverDefaultsDi
 		{Stdout: []byte("@71\t%88\t5150\n")},
 		createdPlannerWindowResponse(),
 		{}, {}, {}, {}, {},
+		{Stdout: []byte("codex\n")},
 		{Stdout: []byte("codex\n")},
 		{},
 	}
@@ -888,6 +895,7 @@ func TestRelaunchedRoleSatisfiesStatusAndControlAgainstTheFreshBaseline(t *testi
 		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
+		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
 	runner := tmuxx.NewFakeRunner(responses...)
@@ -958,6 +966,7 @@ func relaunchPrefixResponses(end int) []tmuxx.Response {
 		{Stdout: []byte("@71\t%88\t5150\n")},
 		createdPlannerWindowResponse(),
 		{}, {}, {}, {}, {},
+		{Stdout: []byte("2.1.220\n")},
 		{Stdout: []byte("2.1.220\n")},
 		{},
 		{},

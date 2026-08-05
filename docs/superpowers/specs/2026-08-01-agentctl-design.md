@@ -243,7 +243,8 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- MODEL-ARGS EFFORT-ARGS]` (§3.2.1; the `--` separator appears only when at least one of the two is present), assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
    `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
-   lookup — until the `amq coop exec → exec(harness)` chain has completed, and store the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
+   lookup — until §8's stable-pair rule accepts a non-`amq` observation, and store the result as
+   `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
 7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
    report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
 8. After every role has launched successfully, reuse the typed session ID returned by `new-session` and run the same
@@ -822,9 +823,11 @@ reporting the provenance of every field is what keeps an override from silently 
 No name pattern-matching. Identity is established by observation at launch and verified by equality afterwards:
 
 - **Check target.** The pane's *root* process, `#{pane_pid}` — stable across `exec` and unaffected by agent subprocesses. Never `#{pane_current_command}`, which tracks the foreground job and flaps to child commands (`bash`, `python`, …) while an agent runs tools.
-- **Baseline (launch).** Poll `ps -o comm= -p <pane_pid>` until the `amq coop exec → exec(harness)` chain completes,
-  then store the observed value in `@agentctl_process` (trimmed exactly once per §13.7). Timeout → launch failure and
-  rollback (§6.6). Poll parameters are fixed, not tuned per call:
+- **Baseline (launch).** The launch contract assumes that `amq coop exec` replaces itself directly with the harness
+  (`amq coop exec → exec(harness)`), with no intermediate root process between them. Poll
+  `ps -o comm= -p <pane_pid>` and accept a baseline only after **two consecutive identical non-`amq` observations**;
+  store that accepted value in `@agentctl_process` (each observation is trimmed exactly once per §13.7). Poll
+  parameters are fixed, not tuned per call:
 
   | Parameter | Value |
   |---|---|
@@ -833,13 +836,21 @@ No name pattern-matching. Identity is established by observation at launch and v
   | First attempt | immediately, at t=0 |
   | Final attempt | guaranteed at the boundary before declaring timeout |
 
-  Two conditions share the retry path: the sentinel for "no identity available yet" (`ps` reporting nothing for a pid
-  that has not been replaced yet) and an observed value of literal `amq`. The `amq` comparison is against the exact
-  trimmed value — the bare name, not a path — which holds because the window command invokes `amq` by bare name
-  (§13.7). Neither condition is a tmux failure; both simply mean "not yet".
+  A different non-`amq` value replaces the candidate. Two conditions clear the candidate and share the retry path:
+  the sentinel for "no identity available yet" (`ps` reporting nothing for a pid that has not been replaced yet) and
+  an observed value of literal `amq`. The `amq` comparison is against the exact trimmed value — the bare name, not a
+  path — which holds because the window command invokes `amq` by bare name (§13.7). Neither condition is a tmux
+  failure; both simply mean "not yet". Any other process-observation error fails immediately. If no stable pair has
+  been accepted by the final boundary attempt, the existing timeout consequence is unchanged: launch rolls back its
+  created session and relaunch rolls back its created window, both with exit 8 (§§6.6, 6.8).
 - **Verification (control/status).** Re-run the same `ps` query and require **exact equality** with the stored baseline. Mismatch → `unexpected-process` in status; fail closed (exit 5) for control commands. Empty/missing baseline also fails closed.
 
-This handles Claude Code's versioned binary name (`2.1.220` at the time of the spike) without heuristics and is robust to future harness renames. It remains a safety guard against accidents, not an authentication mechanism or an idleness proof: a same-user process can forge metadata or match by renaming an executable.
+The stable pair reduces the window for recording a transient process; it does **not** ensure that the process has
+settled, because it proves only that two observations 100ms apart were equal. Normal launch cost is one additional
+100ms tick per role, approximately 800ms for an eight-role fleet. This handles Claude Code's versioned binary name
+(`2.1.220` at the time of the spike) without heuristics and is robust to future harness renames. It remains a safety
+guard against accidents, not an authentication mechanism or an idleness proof: a same-user process can forge metadata
+or match by renaming an executable.
 
 ## 9. Exit codes
 
@@ -867,7 +878,7 @@ Consequently:
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture (polling, `amq`-transition, timeout → rollback); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and preserves rollback when observations remain unsettled through the timeout boundary; equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
   renders `unmanaged`; alive-pane-with-unavailable-identity and empty-baseline both render `unexpected-process`; zero
   panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
