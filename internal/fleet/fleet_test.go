@@ -677,6 +677,23 @@ func successfulOneRoleResponses(sessions string) []tmuxx.Response {
 	}
 }
 
+func TestStampSessionNeverWritesWindowOwnershipMarker(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+	)
+	launcher := New(runner, Dependencies{LookPath: presentExecutable})
+
+	err := launcher.stampSession(context.Background(), "$17", oneRoleFleet().Roles, "/fleet workspace")
+	if err != nil {
+		t.Fatalf("stampSession() error = %v", err)
+	}
+	for _, call := range runner.Calls {
+		if len(call.Args) == 5 && call.Args[0] == "set-option" && call.Args[1] == "-t" && call.Args[3] == "@agentctl_role" {
+			t.Fatalf("stampSession() wrote window ownership marker: %#v", call)
+		}
+	}
+}
+
 func assertCalls(t *testing.T, runner *tmuxx.FakeRunner, want ...tmuxx.Call) {
 	t.Helper()
 	if !reflect.DeepEqual(runner.Calls, want) {

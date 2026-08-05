@@ -71,7 +71,7 @@ func (r Resolver) Resolve(ctx context.Context, session tmuxx.Session, role strin
 		return "", &RoleResolutionError{Session: session, Role: role, WindowIDs: windowIDs}
 	}
 	window := matches[0]
-	if window.Managed != "1" || window.Role != role {
+	if window.Role != role {
 		return "", &WindowMetadataError{Session: session, Role: role, Window: window}
 	}
 	panes, err := r.client.ListPanes(ctx, window.ID)

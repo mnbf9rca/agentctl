@@ -69,8 +69,11 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate window for role %q: %#v", window.Name, windows)
 		}
 		seenWindows[window.Name] = true
-		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
-			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
+		if managed := fixture.windowOption(window.ID, "@agentctl_managed"); managed != "1" {
+			t.Errorf("window @agentctl_managed = %q, want \"1\"", managed)
+		}
+		if window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
+			t.Errorf("window metadata = %#v, want role-specific metadata", window)
 		}
 		gotDirectory, err := os.Stat(window.Directory)
 		if err != nil {

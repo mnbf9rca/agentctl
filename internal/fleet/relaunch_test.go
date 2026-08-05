@@ -15,7 +15,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-const windowListFormat = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
+const windowListFormat = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
 
 func relaunchSession() tmuxx.Session { return tmuxx.Session{ID: "$4", Name: "epic123"} }
 
@@ -59,7 +59,7 @@ func metadataReadCalls() []tmuxx.Call {
 }
 
 func createdPlannerWindowResponse() tmuxx.Response {
-	return tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\t\t\n")}
+	return tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\n")}
 }
 
 func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T) {
@@ -67,7 +67,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 		"planner,reviewer",
 		"planner:claude:fable:max,reviewer:codex::",
 		"/fleet workspace",
-		"@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n",
+		"@65\treviewer\treviewer\tcodex\t\t\tcodex\n",
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
@@ -159,7 +159,7 @@ func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T)
 		"planner,reviewer",
 		"planner:claude:fable:max,reviewer:codex::",
 		"/repo",
-		"@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n",
+		"@65\treviewer\treviewer\tcodex\t\t\tcodex\n",
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
@@ -537,51 +537,63 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 		extra     []tmuxx.Response
 		wantState status.State
 		message   string
+		wantCalls []tmuxx.Call
 	}{
 		{
 			name:      "running",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("2.1.220\n")}},
 			wantState: status.StateRunning,
 			message:   "role planner already has 1 window in epic123 (@23 running); relaunch creates only absent role windows",
 		},
 		{
 			name:      "dead",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t1\t1\n")}},
 			wantState: status.StateDead,
 			message:   "role planner already has 1 window in epic123 (@23 dead); relaunch creates only absent role windows",
 		},
 		{
-			name:      "unmanaged metadata",
-			windows:   "@23\tplanner\t\t\t\t\t\t\t\n",
+			name:      "unmanaged without stored role",
+			windows:   "@23\tplanner\t\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
+			wantCalls: []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_fleet"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_dir"}},
+				{Executable: "tmux", Args: []string{
+					"list-windows", "-t", "$4", "-F",
+					"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+				}},
+			},
 		},
 		{
 			name:      "unmanaged pane count",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t2\n%43\t4243\t0\t2\n")}},
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
 		},
 		{
 			name:      "zero panes",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("")}},
 			wantState: status.StateMissing,
 			message:   "role planner already has 1 window in epic123 (@23 missing); relaunch creates only absent role windows",
 		},
 		{
 			name:      "unexpected process",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("bash\n")}},
 			wantState: status.StateUnexpectedProcess,
 			message:   "role planner already has 1 window in epic123 (@23 unexpected-process); relaunch creates only absent role windows",
 		},
 		{
 			name:      "ambiguous",
-			windows:   "@23\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n@31\tplanner\t1\t1\tplanner\tclaude\tfable\t\t2.1.220\n",
+			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n@31\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateAmbiguous,
 			message:   "role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch creates only absent role windows",
 		},
@@ -602,6 +614,9 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			}
 			if got := err.Error(); got != tt.message {
 				t.Fatalf("error = %q, want %q", got, tt.message)
+			}
+			if tt.wantCalls != nil {
+				assertCalls(t, runner, tt.wantCalls...)
 			}
 			assertNoCreation(t, runner)
 		})
@@ -730,13 +745,13 @@ func TestRelaunchRollsBackItsCreatedWindowWhenPostCreateVerificationFindsAConfli
 		},
 		{
 			name:        "sole match is not the created window",
-			windows:     "@70\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n",
+			windows:     "@70\tplanner\tplanner\tclaude\t\t\tclaude\n",
 			wantMessage: "failed to relaunch planner; removed window @71: post-create verification observed role planner in 1 window in epic123 (@70); expected only created window @71",
 		},
 		{
 			name: "concurrent duplicate",
-			windows: "@70\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
-				"@71\tplanner\t\t\t\t\t\t\t\n",
+			windows: "@70\tplanner\tplanner\tclaude\t\t\tclaude\n" +
+				"@71\tplanner\t\t\t\t\t\n",
 			wantMessage: "failed to relaunch planner; removed window @71: post-create verification observed role planner in 2 windows in epic123 (@70, @71); expected only created window @71",
 		},
 	} {
@@ -915,7 +930,7 @@ func TestRelaunchedRoleSatisfiesStatusAndControlAgainstTheFreshBaseline(t *testi
 	}
 	record := strings.Join([]string{
 		string(result.WindowID), result.Role,
-		stamped["@agentctl_managed"], "1", stamped["@agentctl_role"],
+		stamped["@agentctl_role"],
 		stamped["@agentctl_harness"], stamped["@agentctl_model"], stamped["@agentctl_effort"], stamped["@agentctl_process"],
 	}, "\t") + "\n"
 	paneRecord := string(result.PaneID) + "\t5150\t0\t1\n"

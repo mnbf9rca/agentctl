@@ -38,8 +38,8 @@ func (e *RoleResolutionError) Error() string {
 	return fmt.Sprintf("role %q matches %d windows in session %q (%s)", e.Role, len(ids), e.Session.Name, strings.Join(ids, ", "))
 }
 
-// WindowMetadataError reports the selected window row whose managed marker or
-// stored role does not match the requested target.
+// WindowMetadataError reports the selected window row whose stored role does
+// not match the requested target.
 type WindowMetadataError struct {
 	Session tmuxx.Session
 	Role    string
@@ -47,9 +47,6 @@ type WindowMetadataError struct {
 }
 
 func (e *WindowMetadataError) Error() string {
-	if e.Window.Managed != "1" {
-		return fmt.Sprintf("window %s for role %q has @agentctl_managed=%q; expected %q", e.Window.ID, e.Role, e.Window.Managed, "1")
-	}
 	return fmt.Sprintf("window %s named %q has stored role %q; expected %q", e.Window.ID, e.Window.Name, e.Window.Role, e.Role)
 }
 

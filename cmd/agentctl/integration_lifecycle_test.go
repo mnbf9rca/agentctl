@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -165,6 +166,97 @@ func TestIntegrationClearReachesOnlyTargetMarker(t *testing.T) {
 	}
 	fixture.waitRoleInput("planner", "/clear\n")
 	fixture.assertRoleInputRemains("coder", "", 750*time.Millisecond)
+}
+
+func TestIntegrationHandmadeRosterWindowIsNeverControlledOrReplaced(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launch := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-handmade-window",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if launch.exitCode != 0 {
+		t.Fatalf("launch result = %#v, want success", launch)
+	}
+	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
+
+	sessions := fixture.sessions()
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %#v, want one managed session", sessions)
+	}
+	session := sessions[0]
+	var coderWindowID tmuxx.WindowID
+	for _, window := range fixture.windows(session.ID) {
+		if window.Name == "coder" {
+			coderWindowID = window.ID
+		}
+	}
+	if coderWindowID == "" {
+		t.Fatalf("coder window absent from %#v", fixture.windows(session.ID))
+	}
+	fixture.killWindow(coderWindowID)
+
+	handmade := fixture.createHandmadeWindow(session.ID, "coder")
+	fixture.waitHandmadeWindowReady(handmade)
+	for _, option := range []string{
+		"@agentctl_managed", "@agentctl_version", "@agentctl_role", "@agentctl_harness",
+		"@agentctl_model", "@agentctl_effort", "@agentctl_process",
+	} {
+		if got := fixture.windowOption(handmade.ID, option); got != "" {
+			t.Fatalf("handmade window option %s = %q, want absent", option, got)
+		}
+	}
+
+	clear := fixture.runAgentctl("clear", "--session", "integration-handmade-window", "coder")
+	wantClear := fmt.Sprintf("agentctl: refusing to send clear; window %s named coder has stored role \"\"; expected \"coder\"\n", handmade.ID)
+	if clear.exitCode != exitRole || clear.stdout != "" || clear.stderr != wantClear {
+		t.Fatalf("clear against handmade window = %#v, want stored-role refusal", clear)
+	}
+	fixture.assertHandmadeInputRemains(handmade, "", 750*time.Millisecond)
+
+	report := parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", "integration-handmade-window", "--json"))
+	if len(report.Agents) != 2 {
+		t.Fatalf("status with handmade window = %#v, want two roster rows", report)
+	}
+	wantStates := map[string]statuspkg.State{
+		"planner": statuspkg.StateRunning,
+		"coder":   statuspkg.StateUnmanaged,
+	}
+	for _, agent := range report.Agents {
+		if want, ok := wantStates[agent.Role]; !ok || agent.State != want {
+			t.Fatalf("status with handmade window agent = %#v, want states %#v", agent, wantStates)
+		}
+		delete(wantStates, agent.Role)
+	}
+	if len(wantStates) != 0 {
+		t.Fatalf("status with handmade window omitted roles %#v", wantStates)
+	}
+
+	before := make(map[tmuxx.WindowID]struct{})
+	for _, window := range fixture.windows(session.ID) {
+		before[window.ID] = struct{}{}
+	}
+	if _, present := before[handmade.ID]; !present {
+		t.Fatalf("handmade window %s absent before relaunch: %#v", handmade.ID, fixture.windows(session.ID))
+	}
+	relaunch := fixture.runAgentctl("relaunch", "--session", "integration-handmade-window", "coder")
+	wantRelaunch := fmt.Sprintf("agentctl: refusing to relaunch coder; role coder already has 1 window in integration-handmade-window (%s unmanaged); relaunch creates only absent role windows\n", handmade.ID)
+	if relaunch.exitCode != exitRole || relaunch.stdout != "" || relaunch.stderr != wantRelaunch {
+		t.Fatalf("relaunch against handmade window = %#v, want existing-window refusal", relaunch)
+	}
+	after := make(map[tmuxx.WindowID]struct{})
+	for _, window := range fixture.windows(session.ID) {
+		after[window.ID] = struct{}{}
+	}
+	if len(after) != len(before) {
+		t.Fatalf("window IDs after relaunch = %#v, want %#v", after, before)
+	}
+	for windowID := range before {
+		if _, present := after[windowID]; !present {
+			t.Fatalf("window %s missing after relaunch: %#v", windowID, after)
+		}
+	}
 }
 
 func TestIntegrationKillRemovesManagedSession(t *testing.T) {

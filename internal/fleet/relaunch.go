@@ -533,7 +533,7 @@ func (l Launcher) observeWindows(ctx context.Context, matches []tmuxx.Window, ro
 // observeWindow reports the state status would report for one window, in the
 // same precedence order, so a refusal never asserts more than was verified.
 func (l Launcher) observeWindow(ctx context.Context, window tmuxx.Window, role string) (status.State, error) {
-	if window.Managed != "1" || window.Role != role {
+	if window.Role != role {
 		return status.StateUnmanaged, nil
 	}
 	panes, err := l.tmux.ListPanes(ctx, window.ID)
