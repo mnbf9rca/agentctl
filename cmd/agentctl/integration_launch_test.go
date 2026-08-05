@@ -17,9 +17,7 @@ func TestIntegrationLaunchStartsWithoutTmuxServer(t *testing.T) {
 		"--session", "integration-first-launch",
 		"--roles", "planner:claude",
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-first-launch")
 
 	sessions := fixture.sessions()
 	if len(sessions) != 1 || sessions[0].Name != "integration-first-launch" {
@@ -39,9 +37,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		"--efforts", "planner:max,coder:high",
 		"--dir", launchDir,
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-launch")
 
 	sessions := fixture.sessions()
 	if len(sessions) != 1 || sessions[0].Name != "integration-launch" {
@@ -134,9 +130,7 @@ func TestIntegrationLaunchExportsIdentityEnvironmentIntoEveryPane(t *testing.T) 
 		"--session", "integration-identity-env",
 		"--roles", "planner:claude,coder:codex",
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-identity-env")
 
 	// planner comes from the new-session path and coder from new-window, so
 	// both creation paths are observed from inside a real pane.
@@ -230,5 +224,19 @@ func TestIntegrationLaunchRollsBackAfterLaterWindowFailure(t *testing.T) {
 		if session.Name == "integration-rollback" {
 			t.Fatalf("partially launched session remains after rollback: %#v", session)
 		}
+	}
+}
+
+func assertLaunchMatchesStatus(t *testing.T, fixture *integrationFixture, launch integrationResult, session string) {
+	t.Helper()
+	if launch.exitCode != 0 || launch.stdout == "" || launch.stderr != "" {
+		t.Fatalf("launch result = %#v, want successful observed status table", launch)
+	}
+	status := fixture.runAgentctl("status", "--session", session)
+	if status.exitCode != 0 || status.stderr != "" {
+		t.Fatalf("status after launch = %#v, want success", status)
+	}
+	if launch.stdout != status.stdout {
+		t.Fatalf("launch stdout = %q, want status stdout %q", launch.stdout, status.stdout)
 	}
 }

@@ -444,14 +444,11 @@ func TestStatusAllTreatsReportPresenceSeparatelyFromSchemaValue(t *testing.T) {
 }
 
 func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing.T) {
-	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-		t.Fatal("launch called session resolver")
-		return tmuxx.Session{}, nil
-	})
 	tests := []struct {
-		name     string
-		args     []string
-		wantCode int
+		name        string
+		args        []string
+		wantCode    int
+		wantResolve int
 	}{
 		{name: "missing", args: []string{"launch", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "empty", args: []string{"launch", "--session=", "--roles", "planner:claude"}, wantCode: exitUsage},
@@ -461,10 +458,26 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(launchOneRoleResponses("")...)
+			resolveCalls := 0
+			resolver := resolverFunc(func(_ context.Context, explicit *string) (tmuxx.Session, error) {
+				resolveCalls++
+				if explicit == nil || *explicit != "fleet" {
+					t.Fatalf("Resolve() explicit = %v, want fleet", explicit)
+				}
+				return tmuxx.Session{ID: "$17", Name: "fleet"}, nil
+			})
+			collector := selectedStatusCollectorStub{report: statuspkg.Report{
+				Schema: 1, Session: "fleet", Managed: true, Agents: []statuspkg.Agent{},
+			}}
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{launch: launchTestDependencies(runner), resolver: resolver})
+			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
+				launch: launchTestDependencies(runner), resolver: resolver, collector: collector,
+			})
 			if code != tt.wantCode {
 				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
+			}
+			if resolveCalls != tt.wantResolve {
+				t.Fatalf("Resolve() calls = %d, want %d", resolveCalls, tt.wantResolve)
 			}
 		})
 	}
@@ -493,6 +506,19 @@ func (s statusCollectorStub) Collect(context.Context, string, tmuxx.SessionID) (
 
 func (s statusCollectorStub) CollectAll(context.Context) (*statuspkg.SessionsReport, error) {
 	return &s.report, s.err
+}
+
+type selectedStatusCollectorStub struct {
+	report statuspkg.Report
+	err    error
+}
+
+func (s selectedStatusCollectorStub) Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error) {
+	return s.report, s.err
+}
+
+func (s selectedStatusCollectorStub) CollectAll(context.Context) (*statuspkg.SessionsReport, error) {
+	return nil, errors.New("unexpected all-sessions collection")
 }
 
 func lookupValues(values map[string]string) session.LookupEnv {
