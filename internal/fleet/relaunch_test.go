@@ -537,6 +537,7 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 		extra     []tmuxx.Response
 		wantState status.State
 		message   string
+		wantCalls []tmuxx.Call
 	}{
 		{
 			name:      "running",
@@ -557,6 +558,17 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			windows:   "@23\tplanner\t\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
+			wantCalls: []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_fleet"}},
+				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_dir"}},
+				{Executable: "tmux", Args: []string{
+					"list-windows", "-t", "$4", "-F",
+					"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+				}},
+			},
 		},
 		{
 			name:      "unmanaged pane count",
@@ -602,6 +614,9 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			}
 			if got := err.Error(); got != tt.message {
 				t.Fatalf("error = %q, want %q", got, tt.message)
+			}
+			if tt.wantCalls != nil {
+				assertCalls(t, runner, tt.wantCalls...)
 			}
 			assertNoCreation(t, runner)
 		})
