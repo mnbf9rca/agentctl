@@ -296,6 +296,22 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 			want: "agentctl: failed to relaunch planner; removed window @71: stamp failed\n",
 		},
 		{
+			name: "concurrent loser rollback failure",
+			err: &fleet.RelaunchError{
+				Role:     "planner",
+				WindowID: "@71",
+				Cause: &fleet.PostCreateWindowConflictError{
+					Session:         session,
+					Role:            "planner",
+					CreatedWindowID: "@71",
+					WindowIDs:       []tmuxx.WindowID{"@70", "@71"},
+				},
+				CleanupErr: errors.New("kill failed"),
+			},
+			code: exitLaunch,
+			want: "agentctl: refusing to relaunch planner; post-create verification observed role planner in 2 windows in epic123 (@70, @71); expected only created window @71; failed to remove window @71: kill failed\n",
+		},
+		{
 			name: "post-ownership rollback failure",
 			err:  &fleet.RelaunchError{Role: "planner", WindowID: "@71", Cause: errors.New("stamp failed"), CleanupErr: errors.New("kill failed")},
 			code: exitLaunch,
@@ -351,6 +367,7 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("/fleet workspace\n")},
 		tmuxx.Response{Stdout: []byte("@65\treviewer\t1\t1\treviewer\tcodex\t\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\t\t\n")},
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
@@ -383,6 +400,7 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
 		}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
@@ -391,6 +409,46 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
 	)
+}
+
+func TestRunRelaunchConcurrentLoserRefusesAfterRemovingItsCreatedWindow(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("planner\n")},
+		tmuxx.Response{Stdout: []byte("planner:claude::\n")},
+		tmuxx.Response{Stdout: []byte("/repo\n")},
+		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		tmuxx.Response{Stdout: []byte(
+			"@70\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
+				"@71\tplanner\t\t\t\t\t\t\t\n",
+		)},
+		tmuxx.Response{},
+	)
+	var stdout, stderr bytes.Buffer
+
+	code := runWithAllDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{
+		resolver:   session.New(tmuxx.New(runner), func(string) (string, bool) { return "", false }),
+		relauncher: fleet.New(runner, launchTestDependencies(runner).fleet),
+	})
+
+	if code != exitLaunch {
+		t.Fatalf("runWithAllDependencies() = %d, want %d; stderr = %q", code, exitLaunch, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no success output", stdout.String())
+	}
+	want := "agentctl: refusing to relaunch planner; post-create verification observed role planner in 2 windows in epic123 (@70, @71); expected only created window @71; removed window @71\n"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	last := runner.Calls[len(runner.Calls)-1]
+	wantRollback := tmuxx.Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@71"}}
+	if !reflect.DeepEqual(last, wantRollback) {
+		t.Fatalf("rollback call = %#v, want %#v", last, wantRollback)
+	}
 }
 
 func strPtr(value string) *string { return &value }

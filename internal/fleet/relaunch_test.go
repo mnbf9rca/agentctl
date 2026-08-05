@@ -58,6 +58,10 @@ func metadataReadCalls() []tmuxx.Call {
 	}
 }
 
+func createdPlannerWindowResponse() tmuxx.Response {
+	return tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\t\t\n")}
+}
+
 func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T) {
 	responses := storedMetadataResponses(
 		"planner,reviewer",
@@ -67,6 +71,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
@@ -102,6 +107,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
 		}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", windowListFormat}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
@@ -116,6 +122,7 @@ func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
@@ -153,6 +160,7 @@ func TestRelaunchFlagOverridesRewriteFleetMetadataAfterTheBaseline(t *testing.T)
 	)
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{},
@@ -192,6 +200,7 @@ func TestRelaunchDirectoryOverrideLeavesRecordedFleetDirectoryUnchanged(t *testi
 	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
@@ -412,6 +421,7 @@ func TestRelaunchStoredRelativeDirectoryAllowsExplicitOverride(t *testing.T) {
 	responses := storedMetadataResponses("planner", "planner:claude::", "payload", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},
@@ -482,6 +492,7 @@ func TestRelaunchAcceptsLegacySessionWithSuppliedConfigurationAndNeverDefaultsDi
 		{Stdout: []byte("\n")},
 		{Stdout: []byte("")},
 		{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		{}, {}, {}, {}, {},
 		{Stdout: []byte("codex\n")},
 		{},
@@ -700,20 +711,72 @@ func TestRelaunchMalformedCreationOutputRemovesNothing(t *testing.T) {
 	assertNoWindowKill(t, runner)
 }
 
+func TestRelaunchRollsBackItsCreatedWindowWhenPostCreateVerificationFindsAConflict(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		windows     string
+		wantMessage string
+	}{
+		{
+			name:        "created window disappeared",
+			wantMessage: "failed to relaunch planner; removed window @71: post-create verification observed role planner in 0 windows in epic123; expected only created window @71",
+		},
+		{
+			name:        "sole match is not the created window",
+			windows:     "@70\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n",
+			wantMessage: "failed to relaunch planner; removed window @71: post-create verification observed role planner in 1 window in epic123 (@70); expected only created window @71",
+		},
+		{
+			name: "concurrent duplicate",
+			windows: "@70\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
+				"@71\tplanner\t\t\t\t\t\t\t\n",
+			wantMessage: "failed to relaunch planner; removed window @71: post-create verification observed role planner in 2 windows in epic123 (@70, @71); expected only created window @71",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
+			responses = append(responses,
+				tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+				tmuxx.Response{Stdout: []byte(tt.windows)},
+				tmuxx.Response{},
+			)
+			runner := tmuxx.NewFakeRunner(responses...)
+
+			_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
+
+			if err == nil || err.Error() != tt.wantMessage {
+				t.Fatalf("Relaunch() error = %v, want %q", err, tt.wantMessage)
+			}
+			wantCalls := append(metadataReadCalls(),
+				tmuxx.Call{Executable: "tmux", Args: []string{
+					"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/repo",
+					"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
+					"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
+					"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude'",
+				}},
+				tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", windowListFormat}},
+				tmuxx.Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@71"}},
+			)
+			assertCalls(t, runner, wantCalls...)
+		})
+	}
+}
+
 func TestRelaunchRollsBackOnlyTheWindowThisInvocationCreated(t *testing.T) {
 	cause := errors.New("injected failure")
 	for _, tt := range []struct {
 		name  string
 		index int
 	}{
-		{name: "window managed option", index: 7},
-		{name: "window role option", index: 8},
-		{name: "window harness option", index: 9},
-		{name: "window model option", index: 10},
-		{name: "window effort option", index: 11},
-		{name: "process baseline", index: 12},
-		{name: "window process option", index: 13},
-		{name: "fleet metadata rewrite", index: 14},
+		{name: "post-create verification", index: 7},
+		{name: "window managed option", index: 8},
+		{name: "window role option", index: 9},
+		{name: "window harness option", index: 10},
+		{name: "window model option", index: 11},
+		{name: "window effort option", index: 12},
+		{name: "process baseline", index: 13},
+		{name: "window process option", index: 14},
+		{name: "fleet metadata rewrite", index: 15},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			responses := relaunchPrefixResponses(tt.index)
@@ -771,7 +834,7 @@ func TestRelaunchErrorReportsBothCleanupOutcomesWithTheirCause(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			responses := append(relaunchPrefixResponses(7), tmuxx.Response{Err: cause}, tt.cleanup)
+			responses := append(relaunchPrefixResponses(8), tmuxx.Response{Err: cause}, tt.cleanup)
 			runner := tmuxx.NewFakeRunner(responses...)
 
 			_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
@@ -822,6 +885,7 @@ func TestRelaunchedRoleSatisfiesStatusAndControlAgainstTheFreshBaseline(t *testi
 	responses := storedMetadataResponses("planner", "planner:claude:fable:", "/repo", "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
@@ -892,6 +956,7 @@ func relaunchPrefixResponses(end int) []tmuxx.Response {
 		{Stdout: []byte("/repo\n")},
 		{Stdout: []byte("")},
 		{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		{}, {}, {}, {}, {},
 		{Stdout: []byte("2.1.220\n")},
 		{},

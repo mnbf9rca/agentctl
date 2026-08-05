@@ -204,6 +204,7 @@ func TestLaunchRelativeDirectoryRemainsStableAcrossRelaunchFromDifferentDirector
 	responses := storedMetadataResponses("planner", "planner:claude::", alphaPayload, "")
 	responses = append(responses,
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{},

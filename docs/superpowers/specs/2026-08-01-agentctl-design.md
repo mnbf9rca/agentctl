@@ -763,11 +763,24 @@ reporting the provenance of every field is what keeps an override from silently 
    argument** — the window lands at the next free index. Operator-visible ordering is unaffected because `status`
    iterates the roster, not the window list. Unparseable creation output is pre-ownership: exit 6, kill nothing, and
    append `; a window named ROLE may exist; inspect with tmux list-windows`.
-7. Stamp the window options in §6.5's per-window order, poll the baseline with §8's fixed parameters, and stamp
+7. Immediately after parsing the created window ID, list windows again with §13.2 row 8 against the exact session ID.
+   Continue only when ROLE has exactly one match and that match is the just-created ID. Any other observation is a
+   concurrent conflict: use step 9's rollback on the created ID and refuse with exit 8, naming every role-window ID
+   observed. Zero matches and one match with a different ID also refuse; the message pluralizes `window` by count and
+   omits the parenthesized ID list only when none were observed. A contender that sees another same-name window therefore cannot stamp or report
+   success. Two contenders may both observe the conflict and roll back, leaving the role absent; this is factual and
+   retryable, unlike an ambiguous fleet or false success. For the two-window race, the cleanup-success form is:
+
+   ```text
+   agentctl: refusing to relaunch ROLE; post-create verification observed role ROLE in 2 windows in SESSION (W1, W2); expected only created window W2; removed window W2
+   ```
+
+   The cleanup-failure form replaces the final clause with `failed to remove window W: CLEANUP_CAUSE`. Both exit 8.
+8. Stamp the window options in §6.5's per-window order, poll the baseline with §8's fixed parameters, and stamp
    `@agentctl_process`. If `--harness`, `--model` or `--effort` overrode a stored value, rewrite `@agentctl_fleet` in full
    afterwards. A `--dir` override does **not** rewrite `@agentctl_dir`: that option records the fleet's launch
    directory and the other roles still live there. The divergence is stated in the output instead.
-8. Any failure after the new window's ID parses → `kill-window` on **that ID only**, exit 8:
+9. Any failure after the new window's ID parses → `kill-window` on **that ID only**, exit 8:
 
    ```text
    agentctl: failed to relaunch ROLE; removed window W: CAUSE
@@ -776,7 +789,7 @@ reporting the provenance of every field is what keeps an override from silently 
 
    Same shape and same rules as §6.6, including that `CAUSE` is mandatory in both variants. Exit 8's meaning therefore
    extends from "the session this invocation created was removed" to "**what this invocation created** was removed".
-9. Success (exit 0) states the role, harness, model and effort (`""` in metadata, `default` in human output, §12.7), session,
+10. Success (exit 0) states the role, harness, model and effort (`""` in metadata, `default` in human output, §12.7), session,
    window ID, pane ID, directory, and the provenance of each configuration field — `stored`, `flag override`, or
    `flags`. This report is what keeps an override honest: `status` cannot detect a harness swap, so relaunch says so.
 
@@ -874,7 +887,10 @@ Consequently:
   Assert the word count as well as the bytes:
   `set -- <quoted>; printf %s "$#"; printf ':'; printf %s "$1"` → `1:` + input.
 - `relaunch` (§6.8): exact argv for stored-mode recreation, with the stamping order asserted as an ordered call
-  sequence and no index argument in the creation call; flag overrides re-encoding `@agentctl_fleet` **after** the
+  sequence, no index argument in the creation call, and the post-create row-8 read against the exact session ID before
+  any stamp; deterministic fake-Runner interleaving where the precondition sees zero matches and the post-create read
+  sees two, asserting refusal with every observed ID, exit 8, `kill-window` on only the ID this invocation created,
+  no success output and no stamp; flag overrides re-encoding `@agentctl_fleet` **after** the
   baseline, and a `--dir` override leaving `@agentctl_dir` untouched; every refusal above with its exit code and
   message — ownership gate, roster defect, role outside the roster, each metadata defect, legacy session with and
   without the required options, and each §6.3 state a surviving window can be in, `dead` included; both rollback

@@ -155,6 +155,32 @@ func (e *WindowPresentError) Error() string {
 		e.Role, len(e.Windows), noun, e.Session.Name, strings.Join(rendered, ", "))
 }
 
+// PostCreateWindowConflictError reports that the exact-session verification
+// after creation did not find the new window as the role's sole window.
+type PostCreateWindowConflictError struct {
+	Session         tmuxx.Session
+	Role            string
+	CreatedWindowID tmuxx.WindowID
+	WindowIDs       []tmuxx.WindowID
+}
+
+func (e *PostCreateWindowConflictError) Error() string {
+	rendered := make([]string, len(e.WindowIDs))
+	for index, windowID := range e.WindowIDs {
+		rendered[index] = string(windowID)
+	}
+	noun := "windows"
+	if len(e.WindowIDs) == 1 {
+		noun = "window"
+	}
+	observation := fmt.Sprintf("post-create verification observed role %s in %d %s in %s",
+		e.Role, len(e.WindowIDs), noun, e.Session.Name)
+	if len(rendered) > 0 {
+		observation += " (" + strings.Join(rendered, ", ") + ")"
+	}
+	return fmt.Sprintf("%s; expected only created window %s", observation, e.CreatedWindowID)
+}
+
 // StoredDirectoryError reports a recorded launch directory that cannot be used.
 type StoredDirectoryError struct {
 	Session tmuxx.Session
@@ -257,6 +283,9 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 			return RelaunchResult{}, &WindowCreationError{Role: role.Name, Cause: err}
 		}
 		return RelaunchResult{}, tmuxx.ClassifyError(err)
+	}
+	if err := l.verifyCreatedWindow(ctx, session, role.Name, created.WindowID); err != nil {
+		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
 	}
 	if err := l.stampWindow(ctx, created.WindowID, created.PanePID, role); err != nil {
 		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
@@ -459,6 +488,31 @@ func (l Launcher) requireAbsentWindow(ctx context.Context, session tmuxx.Session
 		return err
 	}
 	return &WindowPresentError{Session: session, Role: role, Windows: observed}
+}
+
+// verifyCreatedWindow closes the absence-check/create race before any success
+// can be reported. It addresses the session by typed ID and accepts only the
+// exact window ID returned by this invocation's NewWindow call.
+func (l Launcher) verifyCreatedWindow(ctx context.Context, session tmuxx.Session, role string, createdWindowID tmuxx.WindowID) error {
+	windows, err := l.tmux.ListWindows(ctx, session.ID)
+	if err != nil {
+		return tmuxx.ClassifyError(err)
+	}
+	windowIDs := make([]tmuxx.WindowID, 0, 1)
+	for _, window := range windows {
+		if window.Name == role {
+			windowIDs = append(windowIDs, window.ID)
+		}
+	}
+	if len(windowIDs) == 1 && windowIDs[0] == createdWindowID {
+		return nil
+	}
+	return &PostCreateWindowConflictError{
+		Session:         session,
+		Role:            role,
+		CreatedWindowID: createdWindowID,
+		WindowIDs:       windowIDs,
+	}
 }
 
 func (l Launcher) observeWindows(ctx context.Context, matches []tmuxx.Window, role string) ([]ObservedWindow, error) {
