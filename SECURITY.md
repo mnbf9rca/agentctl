@@ -61,7 +61,20 @@
 
 ## File and socket permissions
 
-agentctl creates no persistent files of its own (no database, no state directory) and writes nothing inside application repositories. It relies on tmux's default private socket (`0700` directory) and AMQ's documented `0700`/`0600` permissions for session data created by `amq coop exec`.
+agentctl writes files only under `$HOME/.claude/skills/agentctl/` and
+`$HOME/.agents/skills/agentctl/`, and only when the operator runs
+`agentctl skill install` (directories `0755`, files `0644`, plus a
+`.agentctl-skill.json` manifest recording the version and SHA-256 of every
+file written). Installs are manifest-checked and refuse to overwrite files
+agentctl cannot prove it wrote, absent `--force`. No launch, control,
+status, or kill path writes to the filesystem; `launch` reads the manifests
+(only) to report skill/binary version skew. The skill content is a
+build-time constant; target paths are fixed with no caller-supplied
+components; a failed `$HOME` resolution is a refusal, not a fallback.
+Otherwise agentctl creates no persistent files (no database, no state
+directory) and writes nothing inside application repositories. It relies on
+tmux's default private socket (`0700` directory) and AMQ's documented
+`0700`/`0600` permissions for session data created by `amq coop exec`.
 
 ## Reporting a vulnerability
 
