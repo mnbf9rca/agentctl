@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -334,8 +335,15 @@ func (l Launcher) resolveDirectory(directory *string) (string, error) {
 	if directory == nil {
 		return l.getwd()
 	}
+	if *directory == "" {
+		return "", &DirectoryError{Path: *directory, Err: fs.ErrNotExist}
+	}
+	resolved, err := filepath.Abs(*directory)
+	if err != nil {
+		return "", &DirectoryError{Path: *directory, Err: err}
+	}
 	{
-		info, err := l.stat(*directory)
+		info, err := l.stat(resolved)
 		if err != nil {
 			return "", &DirectoryError{Path: *directory, Err: err}
 		}
@@ -343,5 +351,5 @@ func (l Launcher) resolveDirectory(directory *string) (string, error) {
 			return "", &DirectoryError{Path: *directory}
 		}
 	}
-	return *directory, nil
+	return resolved, nil
 }

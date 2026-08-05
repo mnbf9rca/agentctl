@@ -4,7 +4,7 @@
 
 **Goal:** Ensure a relative launch `--dir` identifies the same absolute directory when a missing fleet role is relaunched from any working directory.
 
-**Architecture:** Normalize explicit launch directories at the `internal/fleet` source boundary with a standard-library `filepath.Abs` dependency before stat, tmux creation, and metadata stamping. Keep relaunch overrides unchanged, but reject a stored relative `@agentctl_dir` when it would otherwise become authoritative; the existing `StoredDirectoryError` and CLI refusal mapping preserve exit 3 and provide the explicit `--dir` escape hatch.
+**Architecture:** Normalize explicit launch directories at the `internal/fleet` source boundary with standard-library `filepath.Abs` before stat, tmux creation, and metadata stamping. Keep relaunch overrides unchanged, but reject a stored relative `@agentctl_dir` when it would otherwise become authoritative; the existing `StoredDirectoryError` and CLI refusal mapping preserve exit 3 and provide the explicit `--dir` escape hatch.
 
 **Tech Stack:** Go 1.26, standard library only (`path/filepath`), existing `tmuxx.Runner` fake, throwaway-socket tmux integration tests.
 
@@ -31,12 +31,12 @@
 - Modify: `docs/superpowers/specs/2026-08-01-agentctl-design.md`
 
 **Interfaces:**
-- Consumes: `filepath.Abs(path string) (string, error)` through `fleet.Dependencies.AbsPath` and `filepath.IsAbs(path string)` on stored metadata.
+- Consumes: `filepath.Abs(path string) (string, error)` on an explicit launch flag and `filepath.IsAbs(path string)` on stored metadata.
 - Produces: `Launcher.resolveDirectory(*string) (string, error)` returning one absolute explicit launch directory and `StoredDirectoryError` for an authoritative relative `@agentctl_dir`.
 
-- [ ] **Step 1: Write the failing launch regression tests**
+- [x] **Step 1: Write the failing launch regression tests**
 
-Add table cases for `.` and `../sibling`. Inject an absolute-path resolver rooted at `/work/alpha`, launch a one-role fleet, and assert literal tmux calls contain the same hand-derived path in both locations:
+Add table cases for `.` and `../sibling`. Create real temporary directories, change the test process to the chosen launch cwd, launch a one-role fleet, and assert literal tmux calls contain the same hand-derived path in both locations:
 
 ```go
 tmuxx.Call{Executable: "tmux", Args: []string{
@@ -52,7 +52,7 @@ tmuxx.Call{Executable: "tmux", Args: []string{
 
 The production mutation these tests catch is returning the raw relative flag to either tmux or metadata.
 
-- [ ] **Step 2: Run the launch test to verify RED**
+- [x] **Step 2: Run the launch test to verify RED**
 
 Run:
 
@@ -62,7 +62,7 @@ go test ./internal/fleet -run '^TestLaunchMakesRelativeDirectoryAbsoluteBeforeCr
 
 Expected: FAIL because `new-session -c` and `@agentctl_dir` still receive `.` or `../sibling`.
 
-- [ ] **Step 3: Write the failing cross-cwd relaunch and legacy-refusal tests**
+- [x] **Step 3: Write the failing cross-cwd relaunch and legacy-refusal tests**
 
 Script a launch from `/work/alpha` with `--dir payload`, then feed its expected stored `/work/alpha/payload` into a relaunch whose `Getwd` fails if called. Assert the exact recreation argv contains:
 
@@ -83,7 +83,7 @@ agentctl: refusing to relaunch planner; managed session "epic123" records launch
 
 Add an override case proving `--dir /elsewhere` remains the explicit escape hatch and leaves `@agentctl_dir` unchanged.
 
-- [ ] **Step 4: Run the relaunch tests to verify RED**
+- [x] **Step 4: Run the relaunch tests to verify RED**
 
 Run:
 
@@ -93,12 +93,12 @@ go test ./internal/fleet ./cmd/agentctl -run 'RelativeDirectory|StoredRelativeDi
 
 Expected: FAIL because relaunch currently treats a relative stored directory as authoritative and the CLI has no pinned relative-path refusal fixture.
 
-- [ ] **Step 5: Implement the minimal source and read-side fix**
+- [x] **Step 5: Implement the minimal source and read-side fix**
 
-Add `AbsPath func(string) (string, error)` to `fleet.Dependencies` and `Launcher`, default it to `filepath.Abs`, and resolve an explicit launch directory before calling `Stat`:
+Resolve a non-empty explicit launch directory before calling `Stat`:
 
 ```go
-resolved, err := l.absPath(*directory)
+resolved, err := filepath.Abs(*directory)
 if err != nil {
 	return "", &DirectoryError{Path: *directory, Err: err}
 }
@@ -107,7 +107,7 @@ info, err := l.stat(resolved)
 
 Return `resolved` so new-session, every new-window, and `@agentctl_dir` share one value. In stored-mode relaunch, before adopting `directoryValue`, refuse `!filepath.IsAbs(directoryValue)` only when `request.Directory == nil`, using a `StoredDirectoryError` variant whose message is exactly `path is not absolute`; an explicit override continues through the existing directory validation and provenance flow.
 
-- [ ] **Step 6: Run focused tests to verify GREEN**
+- [x] **Step 6: Run focused tests to verify GREEN**
 
 Run:
 
@@ -117,7 +117,7 @@ go test ./internal/fleet ./cmd/agentctl -run 'RelativeDirectory|StoredRelativeDi
 
 Expected: PASS with exact argv, metadata, message, and exit-code assertions.
 
-- [ ] **Step 7: Run all repository gates**
+- [x] **Step 7: Run all repository gates**
 
 Fetch and rebase onto current `origin/main`, then run:
 
@@ -132,6 +132,6 @@ git diff --check
 
 Expected: all commands exit 0. After push, wait for and cite the PR's own `pull_request` CI run.
 
-- [ ] **Step 8: Commit and publish**
+- [x] **Step 8: Commit the implementation**
 
-Stage only issue #123 files and create signed focused commits. Open a non-draft PR whose body includes `Closes #123`, the red/green evidence, documentation impact, and full verification. Request the reviewer gate with the exact pull-request CI URL, then detach this worktree without merging the PR.
+Stage only issue #123 files and create signed focused commits. The repository workflow then publishes a non-draft PR whose body includes `Closes #123`, the red/green evidence, documentation impact, and full verification; after the PR's own CI, request the reviewer gate with the exact run URL and detach this worktree without merging the PR.
