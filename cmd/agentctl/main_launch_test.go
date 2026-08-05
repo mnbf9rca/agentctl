@@ -308,6 +308,7 @@ func TestRunLaunchBoundsDuplicateSessionRaceClassification(t *testing.T) {
 		message  string
 	}{
 		{name: "matching words inside unrelated stderr", exitCode: 1, message: "permission denied: duplicate session: fleet"},
+		{name: "duplicate refusal has an unrelated suffix", exitCode: 1, message: "duplicate session: fleet: permission denied"},
 		{name: "matching stderr from a different exit status", exitCode: 23, message: "duplicate session: fleet"},
 		{name: "duplicate refusal names a different session", exitCode: 1, message: "duplicate session: other"},
 		{name: "duplicate refusal has an extra stderr line", exitCode: 1, message: "duplicate session: fleet\npermission denied"},
@@ -336,13 +337,51 @@ func TestRunLaunchBoundsDuplicateSessionRaceClassification(t *testing.T) {
 	}
 }
 
+func TestRunLaunchClassifiesDuplicateSessionRaceLineEndings(t *testing.T) {
+	tests := []struct {
+		name       string
+		terminator string
+	}{
+		{name: "no terminator"},
+		{name: "CRLF", terminator: "\r\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := tmuxx.NewFakeRunner(
+				tmuxx.Response{},
+				tmuxx.Response{Err: launchExitErrorWithTerminator(t, 1, "duplicate session: fleet", tt.terminator)},
+			)
+			var stdout, stderr bytes.Buffer
+
+			code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
+
+			if code != exitSession {
+				t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+			if got, want := stderr.String(), "agentctl: tmux create session: exit status 1: duplicate session: fleet\n"; got != want {
+				t.Fatalf("stderr = %q, want %q", got, want)
+			}
+			assertNoKillCall(t, runner)
+		})
+	}
+}
+
 func launchExitError(t *testing.T, exitCode int, message string) error {
+	t.Helper()
+	return launchExitErrorWithTerminator(t, exitCode, message, "\n")
+}
+
+func launchExitErrorWithTerminator(t *testing.T, exitCode int, message, terminator string) error {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestLaunchExitErrorHelper$")
 	command.Env = append(os.Environ(),
 		"GO_WANT_LAUNCH_EXIT_ERROR_HELPER=1",
 		"LAUNCH_EXIT_CODE="+strconv.Itoa(exitCode),
 		"LAUNCH_EXIT_STDERR="+message,
+		"LAUNCH_EXIT_TERMINATOR="+terminator,
 	)
 	_, err := command.Output()
 	if err == nil {
@@ -355,7 +394,7 @@ func TestLaunchExitErrorHelper(t *testing.T) {
 	if os.Getenv("GO_WANT_LAUNCH_EXIT_ERROR_HELPER") != "1" {
 		return
 	}
-	fmt.Fprintln(os.Stderr, os.Getenv("LAUNCH_EXIT_STDERR"))
+	fmt.Fprint(os.Stderr, os.Getenv("LAUNCH_EXIT_STDERR"), os.Getenv("LAUNCH_EXIT_TERMINATOR"))
 	exitCode, err := strconv.Atoi(os.Getenv("LAUNCH_EXIT_CODE"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
