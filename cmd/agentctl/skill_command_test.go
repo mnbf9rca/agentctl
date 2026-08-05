@@ -153,3 +153,21 @@ func TestRunSkillNeverCallsTmux(t *testing.T) {
 		t.Fatalf("runner calls = %#v, want none", runner.Calls)
 	}
 }
+
+func TestRunSkillNormalizesReleaseTagForManifestVersion(t *testing.T) {
+	restoreBuildStamp(t, "v0.3.0")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var stdout, stderr bytes.Buffer
+
+	if code := run([]string{"skill", "install"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("install exit = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	manifest, ok, err := skillinstall.ReadManifest(skillinstall.Targets(home)[0].Dir)
+	if err != nil || !ok {
+		t.Fatalf("ReadManifest() = %#v, %v, %v; want manifest", manifest, ok, err)
+	}
+	if manifest.Version != "0.3.0" {
+		t.Fatalf("manifest version = %q, want release version without tag prefix", manifest.Version)
+	}
+}

@@ -332,7 +332,7 @@ func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
 		fmt.Fprintf(stderr, "agentctl: cannot resolve home directory: %v\n", err)
 		return exitUnclassified
 	}
-	version := buildinfo.Current()
+	version := skillBinaryVersion()
 	targets := skillinstall.Targets(home)
 
 	switch subcommand {
@@ -376,6 +376,10 @@ func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
 	default:
 		panic(fmt.Sprintf("unreachable skill subcommand %q", subcommand))
 	}
+}
+
+func skillBinaryVersion() string {
+	return strings.TrimPrefix(buildinfo.Current(), "v")
 }
 
 func parseSkill(arguments []string) (string, bool, error) {
