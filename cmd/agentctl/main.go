@@ -278,7 +278,7 @@ func runWithAllDependencies(
 			return attachError(stderr, err)
 		}
 		observation, state := attachSessionState(ctx, deps.attacher, resolved)
-		fmt.Fprintf(stdout, "agentctl: control-mode attachment to session %q ended (tmux exit 0); %s\n", resolved.Name, state)
+		fmt.Fprintf(stdout, "Attachment to session %q ended (tmux exit 0). %s\n", resolved.Name, state)
 		writeAttachNextSteps(stdout, observation, resolved)
 		return exitOK
 	}
@@ -345,23 +345,22 @@ func attachSessionState(ctx context.Context, attacher sessionAttacher, target tm
 	present, err := attacher.StillRunning(ctx, target)
 	switch {
 	case err != nil:
-		return attachUnverifiable, fmt.Sprintf("could not verify whether session %s is still running: %v", target.ID, err)
+		return attachUnverifiable, fmt.Sprintf("Could not verify whether session %s is still running: %v", target.ID, err)
 	case present:
-		return attachStillRunning, fmt.Sprintf("session %s is still running", target.ID)
+		return attachStillRunning, fmt.Sprintf("Session %s is still running.", target.ID)
 	default:
-		return attachNoLongerPresent, fmt.Sprintf("session %s is no longer present", target.ID)
+		return attachNoLongerPresent, fmt.Sprintf("Session %s is no longer present.", target.ID)
 	}
 }
 
 func writeAttachNextSteps(out io.Writer, observation attachObservation, target tmuxx.Session) {
 	switch observation {
 	case attachStillRunning:
-		fmt.Fprintf(out, "agentctl: session %q is still running.\n", target.Name)
-		fmt.Fprintf(out, "agentctl:   re-attach:     agentctl attach --session %s\n", target.Name)
-		fmt.Fprintf(out, "agentctl:   check status:  agentctl status --session %s\n", target.Name)
-		fmt.Fprintf(out, "agentctl:   stop it:       agentctl kill --session %s\n", target.Name)
+		fmt.Fprintf(out, "\n  re-attach:     agentctl attach --session %s\n", target.Name)
+		fmt.Fprintf(out, "  check status:  agentctl status --session %s\n", target.Name)
+		fmt.Fprintf(out, "  stop it:       agentctl kill --session %s\n", target.Name)
 	case attachUnverifiable:
-		fmt.Fprintf(out, "agentctl:   check status:  agentctl status --session %s\n", target.Name)
+		fmt.Fprintf(out, "\n  check status:  agentctl status --session %s\n", target.Name)
 	}
 }
 

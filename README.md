@@ -310,17 +310,24 @@ Once the ownership gate passes, `attach` reads the session's window count once a
 immediately before control mode starts. For session `epic123` with three windows:
 
 ```text
-agentctl: attaching session "epic123" (3 windows) in iTerm2…
-agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.
-agentctl:   esc  detach: the tabs close and the fleet keeps running.
-agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not
-agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.
-agentctl: detaching never stops the fleet; to stop it: agentctl kill --session epic123
+agentctl 0.2.0
+Attaching session "epic123" (3 windows) in iTerm2.
+
+iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:
+
+  esc   detach cleanly — the tabs close and the fleet keeps running
+  X     (uppercase) force-quit — the fleet keeps running, but the tmux client
+        does not exit, so this terminal stays busy and agentctl cannot report.
+        Prefer esc.
+
+Detaching never stops the fleet. To stop it: agentctl kill --session epic123
 ```
 
-If the window-count read fails, the first line omits `(3 windows)` and the attach continues; agentctl never guesses a
-count. The `Command Menu` that follows (`esc`, `X`, `L`, `C`) belongs to iTerm2's tmux integration. agentctl neither
-prints it nor controls its keys, so their case sensitivity is iTerm2's behaviour, not agentctl's: press uppercase `X`.
+The opening version is the same build identity reported by `agentctl version`. It appears on `attach` only. If the
+window-count read fails, only the second line changes to `Attaching session "epic123" in iTerm2.` and the attach
+continues; agentctl never guesses a count. The `Command Menu` that follows (`esc`, `X`, `L`, `C`) belongs to iTerm2's
+tmux integration. agentctl neither prints it nor controls its keys, so their case sensitivity is iTerm2's behaviour,
+not agentctl's: press uppercase `X`.
 
 If `X` wedges the `tmux -CC` client, killing the session or sending that client `SIGTERM` does not release the
 terminal. Terminate the client with `kill -9 PID`; agentctl then reports `agentctl: tmux attach session: signal: killed`
@@ -328,33 +335,36 @@ and exits. See [design spec §3.4 (PR #107)](https://github.com/mnbf9rca/agentct
 
 When control mode ends, `attach` lists sessions once more and reports the state it observed, by session ID, so a
 session recreated under the same name is not reported as the one you attached. Exit code 0 in all three cases — the
-attachment completed; only the state report differs:
+attachment completed; only the state report and available commands differ:
 
 ```text
-agentctl: control-mode attachment to session "epic123" ended (tmux exit 0); session $4 is still running
-agentctl: control-mode attachment to session "epic123" ended (tmux exit 0); session $4 is no longer present
-agentctl: control-mode attachment to session "epic123" ended (tmux exit 0); could not verify whether session $4 is still running: CAUSE
-```
+Attachment to session "epic123" ended (tmux exit 0). Session $4 is still running.
 
-When the session is still running, the state line is followed by all available next steps:
-
-```text
-agentctl: session "epic123" is still running.
-agentctl:   re-attach:     agentctl attach --session epic123
-agentctl:   check status:  agentctl status --session epic123
-agentctl:   stop it:       agentctl kill --session epic123
+  re-attach:     agentctl attach --session epic123
+  check status:  agentctl status --session epic123
+  stop it:       agentctl kill --session epic123
 ```
 
 When the state is not verifiable, only the action that does not assume presence is shown:
 
 ```text
-agentctl:   check status:  agentctl status --session epic123
+Attachment to session "epic123" ended (tmux exit 0). Could not verify whether session $4 is still running: CAUSE
+
+  check status:  agentctl status --session epic123
 ```
 
-No next-steps block follows the `no longer present` state because suggesting an action would imply the session exists.
-That final probe is advisory: it never changes the exit code, and a probe failure is reported as an unverified state
-rather than as an absence. If the killed session was the last one, tmux takes its server down too, so the probe reports
-the unverified form with tmux's own reason instead of the `no longer present` form.
+When the resolved session ID is absent, the report has no command block:
+
+```text
+Attachment to session "epic123" ended (tmux exit 0). Session $4 is no longer present.
+```
+
+The report says `Attachment ... ended`, not `Detached`, because control mode ending does not establish how it ended.
+The observed state appears once; any following block contains commands only. No next-steps block follows the `no
+longer present` state because suggesting an action would imply the session exists. That final probe is advisory: it
+never changes the exit code, and a probe failure is reported as an unverified state rather than as an absence. If the
+killed session was the last one, tmux takes its server down too, so the probe reports the unverified form with tmux's
+own reason instead of the `no longer present` form.
 
 An ownership-gate refusal gives the direct-tmux escape hatch. For session `epic123`, the exact forms are:
 
