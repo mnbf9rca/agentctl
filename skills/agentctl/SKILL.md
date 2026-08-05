@@ -44,7 +44,7 @@ agentctl compact --session SESSION ROLE
 agentctl kill --session SESSION
 ```
 
-`launch` and `attach` are operator-only; do not issue them.
+`launch`, `relaunch`, and `attach` are operator-only; do not issue them.
 
 ## 3. Read status as factual claims
 
@@ -88,7 +88,8 @@ on exit.
 
 No arbitrary keystrokes or free-text payloads (the payload registry is
 closed and argument-free), no reading or writing AMQ state, no attaching for
-you, no machine-state inference. Do not ask.
+you, no agent-initiated per-window restart (`relaunch` stays operator-only
+until #79's successor lands), no machine-state inference. Do not ask.
 
 ## 7. Branch on exit codes, not prose
 
