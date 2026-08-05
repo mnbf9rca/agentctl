@@ -77,14 +77,14 @@ func WriteManifest(dir string, manifest Manifest) error {
 		return fmt.Errorf("create temporary manifest: %w", err)
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 
 	if err := temporary.Chmod(0o644); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("set temporary manifest permissions: %w", err)
 	}
 	if _, err := temporary.Write(content); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("write temporary manifest: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
