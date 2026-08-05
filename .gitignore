@@ -6,3 +6,7 @@
 # Local build output
 /bin/
 /dist/
+
+# Claude Code project-local state
+.claude/worktrees/
+.claude/settings.local.json
