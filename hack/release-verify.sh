@@ -187,7 +187,7 @@ render_results() {
     printf -- '- Claude clear: recorded %s\n' "$(field claude_clear_attestation "$metadata")"
     printf -- '- Codex clear: recorded %s\n' "$(field codex_clear_attestation "$metadata")"
     printf -- '- Compact (claude): recorded %s\n' "$(field compact_attestation "$metadata")"
-    printf -- '- Relaunch: %s; codex ready: recorded %s\n' \
+    printf -- '- Relaunch: %s; fresh codex input with no junk: recorded %s\n' \
       "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
     case "$(field teardown_status_exit "$metadata")" in
       3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
@@ -623,10 +623,16 @@ else
       LIVE_STATUS=1
     else
       original_window_id=$ROLE_WINDOW_ID
-      echo 'Running exact-ID missing-role setup:'
-      printf '  tmux kill-window -t %s\n' "$original_window_id"
-      if ! tmux kill-window -t "$original_window_id"; then
-        echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
+      original_pane_id=$ROLE_PANE_ID
+      echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
+      if ask 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
+        echo 'Running exact-ID missing-role setup:'
+        printf '  tmux kill-window -t %s\n' "$original_window_id"
+        if ! tmux kill-window -t "$original_window_id"; then
+          echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
+          LIVE_STATUS=1
+        fi
+      else
         LIVE_STATUS=1
       fi
     fi
@@ -659,7 +665,11 @@ else
     if ! resolve_role_window "$LIVE_SESSION_ID" b; then
       echo 'RELAUNCH FAIL (could not resolve the recreated role b window and pane IDs)'
       LIVE_STATUS=1
+    elif [ "$ROLE_PANE_ID" = "$original_pane_id" ]; then
+      echo "RELAUNCH FAIL (recreated role b reused original pane $original_pane_id)"
+      LIVE_STATUS=1
     else
+      printf 'RELAUNCH PASS (role b pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
       expected_relaunch="agentctl: relaunched b in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness codex (stored), model default (stored), effort high (stored), dir $TOP (stored)"
       actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
       if [ "$actual_relaunch" != "$expected_relaunch" ]; then
@@ -681,9 +691,18 @@ else
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    if ask 'Is the relaunched codex TUI visibly ready with its input surface?'; then
+    relaunch_prompt=$(cat <<'EOF'
+One of the fleet's harnesses was terminated, and agentctl relaunched it from
+the fleet's stored configuration. The new pane is a new process: its harness,
+model and effort carry over; its conversation does not, so the junk you typed
+is gone.
+
+Do you see a fresh, ready codex input surface with no trace of that junk?
+EOF
+)
+    if ask "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
-      RELAUNCH_CHECK='PASS (stored codex/default/high provenance)'
+      RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
