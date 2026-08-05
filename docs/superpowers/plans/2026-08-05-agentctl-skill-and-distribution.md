@@ -672,9 +672,15 @@ workflow passes only SHAs, via `env:`, and **never** interpolates
   `cmd/agentctl/` plus `skills/agentctl/` → exit 0; change under
   `cmd/agentctl/` only, with `[skill-unaffected]` in any commit message in
   the range → exit 0; token present only in a commit outside the range →
-  exit 1; change elsewhere only → exit 0; `internal/config/` change → exit 1.
+  exit 1; change elsewhere only → exit 0; `internal/config/` change → exit 1;
+  base branch advanced with a surface change after the branch point while the
+  PR touches no surface path → exit 0 (pins the three-dot/merge-base diff —
+  a two-dot diff fails this fixture).
 - [ ] **Step 2: Script**: args `BASE_SHA HEAD_SHA`;
-  `git diff --name-only "$BASE_SHA".."$HEAD_SHA"` for the surface check
+  `git diff --name-only "$BASE_SHA"..."$HEAD_SHA"` for the surface check —
+  three dots (merge-base comparison), because `base.sha` is the base branch
+  TIP: a two-dot tree diff would attribute changes landed on main after the
+  branch point to the PR
   (surface paths `cmd/agentctl/` and `internal/config/`; skill path
   `skills/agentctl/`); override check is
   `git log --format=%B "$BASE_SHA".."$HEAD_SHA" | grep -Fq '[skill-unaffected]'`.

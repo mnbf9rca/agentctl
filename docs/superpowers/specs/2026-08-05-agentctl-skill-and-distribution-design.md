@@ -131,7 +131,8 @@ contains files whose hashes match neither the current manifest nor the tree bein
 installed, it is treated as someone else's work — the install refuses with `exitUnsafe`
 (5) and names the offending path, unless `--force` is given. A target matching the
 manifest is overwritten freely (that includes downgrade on binary downgrade — the skill
-always tracks the invoking binary). A fully current install is a silent success, exit 0.
+always tracks the invoking binary). A fully current install reports `current` per
+target and exits 0 — §1.1 prefers the stated fact to silence.
 Partial-write failure reports every path written and every path not written (§1.1) and
 exits `exitUnclassified` (1). Usage errors exit `exitUsage` (2). No other command writes
 these paths; `launch`, control commands, and `status` never install or repair the skill.
@@ -177,7 +178,9 @@ and process drift. None is contingent on the delivery mechanism.
 A test in `cmd/agentctl` reads the embedded skill tree and asserts:
 
 - every `agentctl `-prefixed line in fenced blocks names a command that is a key in
-  `commandUsage`, and every flag on that line is registered on that command's `FlagSet`;
+  `commandUsage`, and every flag on that line is accepted by that command's parser —
+  checked by invoking the command parser and rejecting only its unknown-flag error, so
+  no new accessor is needed on `internal/cliflags`, whose flag set is unexported;
 - every constant name in `references/exit-codes.md` exists with the documented numeric
   value, and every `exit*` constant in `cmd/agentctl` appears in the table (both
   directions — a new exit code cannot ship undocumented);
