@@ -55,6 +55,17 @@ func TestCheckSkillVersionRejectsMismatch(t *testing.T) {
 	}
 }
 
+func TestCheckSkillVersionReadsVersionOnlyFromMetadata(t *testing.T) {
+	skill := "---\nversion: \"0.3.0\"\nmetadata:\n  version: \"0.2.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected metadata.version mismatch to fail despite another matching version key")
+	}
+	if !strings.Contains(stderr, "0.2.0") || !strings.Contains(stderr, "0.3.0") {
+		t.Fatalf("stderr must name metadata and release versions, got %q", stderr)
+	}
+}
+
 func TestCheckSkillVersionRejectsMissingMetadataVersion(t *testing.T) {
 	stderr, err := runSkillVersionCheck(t, "---\nmetadata:\n  owner: agentctl\n---\n", "0.3.0")
 	if err == nil {

@@ -8,12 +8,13 @@ head_sha="${2:?usage: check-skill-pairing.sh BASE_SHA HEAD_SHA}"
 
 surface_changed=0
 skill_changed=0
+changed_paths="$(git diff --name-only "$base_sha"..."$head_sha")"
 while IFS= read -r path; do
   case "$path" in
     cmd/agentctl/*|internal/config/*) surface_changed=1 ;;
     skills/agentctl/*) skill_changed=1 ;;
   esac
-done < <(git diff --name-only "$base_sha"..."$head_sha")
+done <<<"$changed_paths"
 
 if [ "$surface_changed" -eq 0 ] || [ "$skill_changed" -eq 1 ]; then
   exit 0

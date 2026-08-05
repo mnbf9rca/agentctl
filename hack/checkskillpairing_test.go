@@ -147,6 +147,13 @@ func TestCheckSkillPairing(t *testing.T) {
 				return base, head
 			},
 		},
+		{
+			name:     "invalid range fails closed",
+			wantFail: true,
+			setup: func(_ *testing.T, _ *pairingRepo, initial string) (string, string) {
+				return "deadbeef", initial
+			},
+		},
 	}
 
 	for _, tc := range tests {
