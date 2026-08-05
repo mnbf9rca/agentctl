@@ -456,10 +456,10 @@ func TestListWindowsRejectsMalformedOutput(t *testing.T) {
 		name   string
 		stdout string
 	}{
-		{name: "too few fields", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
-		{name: "wrong id prefix", stdout: "$7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n"},
-		{name: "empty name", stdout: "@7\t\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n"},
-		{name: "blank trailing record", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n\n"},
+		{name: "too few fields", stdout: "@7\tplanner\tplanner\tclaude\tfable\tclaude\n"},
+		{name: "wrong id prefix", stdout: "$7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n"},
+		{name: "empty name", stdout: "@7\t\tplanner\tclaude\tfable\tmax\tclaude\n"},
+		{name: "blank trailing record", stdout: "@7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

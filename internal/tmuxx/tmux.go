@@ -12,7 +12,7 @@ const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
 	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"
 	createdWindowFormat  = "#{window_id}\t#{pane_id}\t#{pane_pid}"
-	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
+	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
 
@@ -72,8 +72,6 @@ type CreatedWindow struct {
 type Window struct {
 	ID      WindowID
 	Name    string
-	Managed string
-	Version string
 	Role    string
 	Harness string
 	Model   string
@@ -272,9 +270,9 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 
 	windows := make([]Window, 0, len(records))
 	for index, record := range records {
-		fields := strings.SplitN(record, "\t", 9)
-		if len(fields) != 9 || fields[1] == "" {
-			return nil, fmt.Errorf("parse tmux window record %d: expected 9 fields and a nonempty name", index+1)
+		fields := strings.SplitN(record, "\t", 7)
+		if len(fields) != 7 || fields[1] == "" {
+			return nil, fmt.Errorf("parse tmux window record %d: expected 7 fields and a nonempty name", index+1)
 		}
 		if err := validateID(fields[0], '@'); err != nil {
 			return nil, fmt.Errorf("parse tmux window record %d: %w", index+1, err)
@@ -282,13 +280,11 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 		windows = append(windows, Window{
 			ID:      WindowID(fields[0]),
 			Name:    fields[1],
-			Managed: fields[2],
-			Version: fields[3],
-			Role:    fields[4],
-			Harness: fields[5],
-			Model:   fields[6],
-			Effort:  fields[7],
-			Process: fields[8],
+			Role:    fields[2],
+			Harness: fields[3],
+			Model:   fields[4],
+			Effort:  fields[5],
+			Process: fields[6],
 		})
 	}
 	return windows, nil

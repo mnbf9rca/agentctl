@@ -162,7 +162,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 		}
 		window := matches[0]
 		agent := agentForWindow(role, window)
-		if window.Managed != "1" || window.Role != role {
+		if window.Role != role {
 			agent.State = StateUnmanaged
 			report.Agents = append(report.Agents, agent)
 			continue

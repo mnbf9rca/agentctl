@@ -737,11 +737,7 @@ func controlError(stderr io.Writer, operation, usage string, err error) int {
 	}
 	var windowMetadata *target.WindowMetadataError
 	if errors.As(err, &windowMetadata) {
-		if windowMetadata.Window.Managed != "1" {
-			controlRefusal(stderr, operation, "window %s for %s:%s has @agentctl_managed=%q; expected %q", windowMetadata.Window.ID, windowMetadata.Session.Name, windowMetadata.Role, windowMetadata.Window.Managed, "1")
-		} else {
-			controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
-		}
+		controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
 		return exitRole
 	}
 	var paneState *target.PaneStateError
