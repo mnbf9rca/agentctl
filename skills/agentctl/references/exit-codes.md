@@ -7,7 +7,7 @@
 | 2 | `exitUsage` | The invocation was invalid; nothing was attempted. |
 | 3 | `exitSession` | The session could not be resolved, does not exist, is not managed, or carries an incompatible/malformed management marker. Also every `attach` refusal. |
 | 4 | `exitRole` | The role is not in the roster, has no window, or resolves to more than one window. |
-| 5 | `exitUnsafe` | Refused as unsafe: the resolved target is the caller's own pane, or an overwrite of files agentctl cannot prove it wrote. |
+| 5 | `exitUnsafe` | A control target was refused as unsafe: invalid pane count, state, or death; unavailable, empty, or mismatched process identity; or the caller's own pane. |
 | 6 | `exitTmux` | A tmux (or `ps`) command actually ran and failed; the message carries the tool's own stderr. |
 | 7 | `exitMissingExecutable` | A required executable was not found on PATH. |
-| 8 | `exitLaunch` | What this invocation created was removed: `launch` rolled back the session, `relaunch` the window. |
+| 8 | `exitLaunch` | A post-ownership `launch` or `relaunch` failed; cleanup of the created session or window was attempted, and output states whether it succeeded. |
