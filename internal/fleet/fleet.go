@@ -335,10 +335,20 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 
 func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, error) {
 	deadline := l.now().Add(processPollTimeout)
+	previous := ""
 	for {
 		process, err := l.tmux.ProcessName(ctx, panePID)
-		if err == nil && process != "amq" {
-			return process, nil
+		if err == nil {
+			if process != "amq" {
+				if process == previous {
+					return process, nil
+				}
+				previous = process
+			} else {
+				previous = ""
+			}
+		} else {
+			previous = ""
 		}
 		if err != nil && !errors.Is(err, tmuxx.ErrProcessUnavailable) {
 			return "", err

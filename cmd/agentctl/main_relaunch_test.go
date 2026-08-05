@@ -370,6 +370,7 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\t\t\n")},
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
+		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{},
 	)
 	var stdout, stderr bytes.Buffer
@@ -406,6 +407,7 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "fable"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "max"}},
+		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
 	)
