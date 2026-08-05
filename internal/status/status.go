@@ -13,6 +13,16 @@ const (
 	StateAmbiguous         State = "ambiguous"
 )
 
+// States is the complete set of State values the status package can emit.
+var States = []State{
+	StateAmbiguous,
+	StateUnmanaged,
+	StateMissing,
+	StateDead,
+	StateUnexpectedProcess,
+	StateRunning,
+}
+
 // Report is the versioned status document for one resolved session.
 type Report struct {
 	Schema  int     `json:"schema"`
