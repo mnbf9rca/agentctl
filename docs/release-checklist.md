@@ -16,7 +16,8 @@ worktree instead needs `AMQ_GLOBAL_ROOT` propagated into that server.
 bash hack/release-verify.sh
 ```
 - [ ] `PROBES PASS` printed; all four probes completed and no throwaway server survived
-- [ ] The wrapper ran `./bin/agentctl launch --session relverify --roles a:claude,b:codex` successfully
+- [ ] The wrapper ran `./bin/agentctl launch --session relverify --roles
+      a:claude,b:codex --efforts b:high` successfully
 
 ## Part B — Watch the live release-candidate delivery path
 
@@ -25,8 +26,11 @@ From Window 2, run the bare command printed after `Attach from Window 2 with:`:
 ```bash
 ./bin/agentctl attach --session relverify
 ```
-- [ ] The narration starts with `agentctl: attaching session "relverify" (2 windows) in iTerm2…`
-      and warns that the Command Menu belongs to iTerm2
+- [ ] The narration starts with `agentctl: attaching session "relverify" (2 windows)
+      in iTerm2…` when the advisory window-count read succeeds, and warns that
+      the Command Menu belongs to iTerm2. If `(2 windows)` is omitted, record
+      the advisory read failure in `docs/release-verification-notes.md`; omission
+      is not a release failure and agentctl never guesses the count
 - [ ] Window 2 shows the claude and codex tabs; answer `y` at the attach prompt
 
 Keep this attachment open through the live checks below. After the last visual
@@ -57,23 +61,36 @@ post-detach session-state report beginning with
 
 ### Relaunch a missing role
 
-This step is staged for the single-role `relaunch` surface. Finalize its exact
-commands and output assertions against the merged implementation before marking
-this runbook ready.
+The wrapper resolves `relverify` to its exact tmux session ID, resolves role
+`b` to its exact window and pane IDs, and prints the resolved ID in this setup
+command:
 
-- [ ] The wrapper resolved the codex role's window ID, removed that exact ID,
-      and `./bin/agentctl status --session relverify` reported role `b` missing
-- [ ] The wrapper ran `./bin/agentctl relaunch --session relverify b`, asserted
-      the printed harness/model/directory provenance, and confirmed explicit
-      status restored role `b` to running
-- [ ] In the relaunched codex tab, wait for the TUI to become ready; answer `y`
-      only after observing the ready input surface
+```text
+tmux kill-window -t @ID
+```
+
+- [ ] The wrapper ran that exact-ID removal, then ran
+      `./bin/agentctl status --session relverify` and printed `RELAUNCH PASS
+      (role b reported missing after exact-ID removal)`
+- [ ] The wrapper ran `./bin/agentctl relaunch --session relverify b` and printed
+      exactly this line, substituting the observed IDs and primary-checkout root:
+
+      ```text
+      agentctl: relaunched b in relverify: window @ID, pane %ID, harness codex (stored), model default (stored), effort high (stored), dir REPO_ROOT (stored)
+      ```
+
+- [ ] A second `./bin/agentctl status --session relverify` printed `RELAUNCH
+      PASS (role b restored to running)`
+- [ ] In the relaunched codex tab, wait for the TUI to show its ready input
+      surface; answer `y` only after observing it
 
 ### Automated teardown and evidence
 
 - [ ] The wrapper killed `relverify`; `./bin/agentctl status --session relverify`
-      exited `3` (`6` only when no tmux server remained); no matching tmux
-      process remained; and it printed `ALL VERIFIED — evidence appended`
+      exited `3` when other tmux sessions remained or `6` when `relverify` was
+      the last session and the server exited. Both are expected absence results;
+      the wrapper recorded which occurred in `docs/release-verification-notes.md`,
+      no matching tmux process remained, and it printed `ALL VERIFIED — evidence appended`
 - [ ] `docs/release-verification-notes.md` committed
 
 Every prompt accepts exactly `y` or `n`. Empty input and other text re-prompt; `n`

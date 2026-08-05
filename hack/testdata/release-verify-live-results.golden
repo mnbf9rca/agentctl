@@ -11,4 +11,6 @@
 - Claude clear: recorded y
 - Codex clear: recorded y
 - Compact (claude): recorded y
+- Relaunch: PASS (stored codex/default/high provenance); codex ready: recorded y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS

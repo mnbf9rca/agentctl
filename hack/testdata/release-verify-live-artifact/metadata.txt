@@ -6,4 +6,7 @@ attach_attestation=y
 claude_clear_attestation=y
 codex_clear_attestation=y
 compact_attestation=y
+relaunch_check=PASS (stored codex/default/high provenance)
+relaunch_attestation=y
+teardown_status_exit=3
 teardown_check=PASS
