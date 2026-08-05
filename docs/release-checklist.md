@@ -1,8 +1,9 @@
 # Release Verification Runbook
 
-Run this when a release changes tmux targeting, harness startup, or injected
-command delivery. Otherwise tick "Checklist not required" (box 2) on the
-promotion PR below and skip this file. Rationale and results history:
+Run this when a release changes tmux targeting, harness startup, injected
+command delivery, or the agent-facing CLI/skill surface. Otherwise tick
+"Checklist not required" (box 2) on the promotion PR below and skip this
+file. Rationale and results history:
 [docs/release-verification-notes.md](release-verification-notes.md).
 
 Run the checklist from the clean primary checkout's repository root, not from
@@ -11,6 +12,16 @@ AMQ auto-discovers the primary checkout's repo-local `.agent-mail`; a linked
 worktree instead needs `AMQ_GLOBAL_ROOT` propagated into that server.
 
 ## Part A — Run the wrapper
+
+Resolve the release version and prove that the embedded skill documents that
+same version before building release artifacts:
+
+```bash
+release_version="$(hack/next-version.sh)"
+hack/check-skill-version.sh "$release_version"
+```
+
+- [ ] The skill version check exited 0 and printed no mismatch or missing-version error
 
 ```bash
 bash hack/release-verify.sh
@@ -127,6 +138,29 @@ surviving conversation. Neither half alone is the relaunch contract.
 Every prompt accepts exactly `y` or `n`. Empty input and other text re-prompt; `n`
 fails closed after teardown is attempted.
 
+## Part C — Verify live skill discovery and meaning
+
+Use a separate stub fleet on a throwaway tmux socket; never use the default
+tmux server. Create a temporary `HOME`, run `agentctl skill install` with that
+`HOME`, and launch the Claude Code and codex harnesses under test with the same
+`HOME` so each harness sees only the release candidate's installed skill. Use
+an empty throwaway project and preserve any separately configured harness
+authentication needed for the live session.
+
+- [ ] `HOME="$skill_home" ./bin/agentctl skill install` reported successful
+      installs under both `$skill_home/.claude/skills/agentctl/` and
+      `$skill_home/.agents/skills/agentctl/`
+- [ ] The stub fleet ran only on its named throwaway tmux socket, both harnesses
+      reached a ready prompt, and each harness's skill inventory listed `agentctl`
+- [ ] Ask each harness: "What does `ambiguous` mean in agentctl status, and
+      which commands refuse on it?" The answer matches
+      [`skills/agentctl/references/status-states.md`](../skills/agentctl/references/status-states.md):
+      more than one window has the role's exact name, no window is selected as
+      real, and role-targeted control commands (`clear` and `compact`) refuse
+      until an operator repairs the ambiguity with raw tmux
+- [ ] Tear down the stub fleet and its named tmux server, then remove the
+      temporary project and `HOME`; no process or skill-probe file survived
+
 ## --measure (only when `internal/tmuxx.payloadDelay` changes)
 
 ```bash
@@ -136,7 +170,7 @@ The forensic `verify-injection.sh` rig is measure-only. Judge each prompted
 snapshot batch and answer exactly `y` or `n`.
 Wait for the first "Is the <harness> TUI fully ready?" prompt, then run the command printed under `ATTACH:` from Window 2.
 
-## Part C — Promotion PR
+## Part D — Promotion PR
 
 `--body-file` is mandatory: GitHub shows no template chooser for PRs, so
 without it the attestation checkbox is silently lost.
