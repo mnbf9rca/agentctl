@@ -272,6 +272,12 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 			want: "agentctl: refusing to relaunch planner; managed session \"epic123\" records launch directory \"/gone\": file does not exist; supply --dir to relaunch planner elsewhere\n",
 		},
 		{
+			name: "stored directory is relative",
+			err:  &fleet.StoredDirectoryError{Session: session, Role: "planner", Path: "payload", Err: errors.New("path is not absolute")},
+			code: exitSession,
+			want: "agentctl: refusing to relaunch planner; managed session \"epic123\" records launch directory \"payload\": path is not absolute; supply --dir to relaunch planner elsewhere\n",
+		},
+		{
 			name: "missing executable",
 			err:  &preflight.MissingExecutableError{Name: "codex"},
 			code: exitMissingExecutable,

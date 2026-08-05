@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -23,6 +24,8 @@ const (
 	// ProvenanceFlags is a value supplied by flags because the session records none.
 	ProvenanceFlags Provenance = "flags"
 )
+
+var errStoredDirectoryNotAbsolute = errors.New("path is not absolute")
 
 // RelaunchRequest is one relaunch invocation. A nil field means its option was
 // omitted; an omitted option is never the same as an empty one.
@@ -366,6 +369,14 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 		return config.RoleConfig{}, "", sources{}, &MetadataError{
 			Session: session,
 			Reason:  fmt.Sprintf("has %s %q whose roles do not match %s %q", optionFleet, fleetValue, optionRoles, roster),
+		}
+	}
+	if request.Directory == nil && !filepath.IsAbs(directoryValue) {
+		return config.RoleConfig{}, "", sources{}, &StoredDirectoryError{
+			Session: session,
+			Role:    request.Role,
+			Path:    directoryValue,
+			Err:     errStoredDirectoryNotAbsolute,
 		}
 	}
 

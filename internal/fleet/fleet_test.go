@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -122,6 +124,104 @@ func TestLaunchRejectsExplicitEmptyDirectoryBeforeTmux(t *testing.T) {
 	}
 	if len(runner.Calls) != 0 {
 		t.Fatalf("Runner calls = %#v, want none", runner.Calls)
+	}
+}
+
+func TestLaunchMakesRelativeDirectoryAbsoluteBeforeCreationAndStamping(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	alphaPayload := filepath.Join(alpha, "payload")
+	sibling := filepath.Join(root, "sibling")
+	for _, directory := range []string{alphaPayload, sibling} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", directory, err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name          string
+		cwd           string
+		directory     string
+		wantDirectory string
+	}{
+		{name: "dot", cwd: alphaPayload, directory: ".", wantDirectory: alphaPayload},
+		{name: "parent sibling", cwd: alpha, directory: "../sibling", wantDirectory: sibling},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(tt.cwd)
+			runner := tmuxx.NewFakeRunner(successfulOneRoleResponses("")...)
+			launcher := New(runner, Dependencies{LookPath: presentExecutable})
+
+			if _, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr(tt.directory)); err != nil {
+				t.Fatalf("Launch() error = %v", err)
+			}
+
+			wantCreation := tmuxx.Call{Executable: "tmux", Args: []string{
+				"new-session", "-d", "-s", "epic123", "-n", "planner", "-c", tt.wantDirectory,
+				"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
+				"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
+				"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude'",
+			}}
+			if got := runner.Calls[1]; !reflect.DeepEqual(got, wantCreation) {
+				t.Fatalf("creation call = %#v, want %#v", got, wantCreation)
+			}
+			wantStamp := tmuxx.Call{Executable: "tmux", Args: []string{
+				"set-option", "-t", "$17", "@agentctl_dir", tt.wantDirectory,
+			}}
+			if got := runner.Calls[6]; !reflect.DeepEqual(got, wantStamp) {
+				t.Fatalf("directory stamp = %#v, want %#v", got, wantStamp)
+			}
+		})
+	}
+}
+
+func TestLaunchRelativeDirectoryRemainsStableAcrossRelaunchFromDifferentDirectory(t *testing.T) {
+	root := t.TempDir()
+	alpha := filepath.Join(root, "alpha")
+	alphaPayload := filepath.Join(alpha, "payload")
+	beta := filepath.Join(root, "beta")
+	for _, directory := range []string{alphaPayload, filepath.Join(beta, "payload")} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %q: %v", directory, err)
+		}
+	}
+
+	t.Chdir(alpha)
+	launchRunner := tmuxx.NewFakeRunner(successfulOneRoleResponses("")...)
+	if _, err := New(launchRunner, Dependencies{LookPath: presentExecutable}).Launch(
+		context.Background(), "epic123", oneRoleFleet(), directoryPtr("payload"),
+	); err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	wantStamp := tmuxx.Call{Executable: "tmux", Args: []string{
+		"set-option", "-t", "$17", "@agentctl_dir", alphaPayload,
+	}}
+	if got := launchRunner.Calls[6]; !reflect.DeepEqual(got, wantStamp) {
+		t.Fatalf("launch directory stamp = %#v, want %#v", got, wantStamp)
+	}
+
+	t.Chdir(beta)
+	responses := storedMetadataResponses("planner", "planner:claude::", alphaPayload, "")
+	responses = append(responses,
+		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{},
+	)
+	relaunchRunner := tmuxx.NewFakeRunner(responses...)
+	if _, err := relaunchLauncher(relaunchRunner, nil).Relaunch(
+		context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"},
+	); err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	wantCreation := tmuxx.Call{Executable: "tmux", Args: []string{
+		"new-window", "-d", "-t", "$4", "-n", "planner", "-c", alphaPayload,
+		"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
+		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
+		"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude'",
+	}}
+	if got := relaunchRunner.Calls[6]; !reflect.DeepEqual(got, wantCreation) {
+		t.Fatalf("relaunch creation call = %#v, want %#v", got, wantCreation)
 	}
 }
 

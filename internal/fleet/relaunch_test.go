@@ -389,6 +389,56 @@ func TestRelaunchRefusesDefectiveFleetMetadata(t *testing.T) {
 	}
 }
 
+func TestRelaunchRefusesStoredRelativeDirectoryWithoutOverride(t *testing.T) {
+	runner := tmuxx.NewFakeRunner(storedMetadataResponses("planner", "planner:claude::", "payload", "")...)
+
+	_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
+
+	var stored *StoredDirectoryError
+	if !errors.As(err, &stored) {
+		t.Fatalf("Relaunch() error = %v, want *StoredDirectoryError", err)
+	}
+	if stored.Path != "payload" {
+		t.Fatalf("StoredDirectoryError.Path = %q, want payload", stored.Path)
+	}
+	want := `managed session "epic123" records launch directory "payload": path is not absolute; supply --dir to relaunch planner elsewhere`
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	assertNoCreation(t, runner)
+}
+
+func TestRelaunchStoredRelativeDirectoryAllowsExplicitOverride(t *testing.T) {
+	responses := storedMetadataResponses("planner", "planner:claude::", "payload", "")
+	responses = append(responses,
+		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("claude\n")},
+		tmuxx.Response{},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+
+	result, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{
+		Role:      "planner",
+		Directory: stringPtr("/elsewhere"),
+	})
+
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	if result.Directory != "/elsewhere" || result.DirectoryFrom != ProvenanceOverride || result.StoredDirectory != "payload" {
+		t.Fatalf("Relaunch() result = %#v, want /elsewhere override with stored payload preserved", result)
+	}
+	if got := runner.Calls[6].Args[7]; got != "/elsewhere" {
+		t.Fatalf("creation -c argument = %q, want /elsewhere", got)
+	}
+	for _, call := range runner.Calls {
+		if len(call.Args) >= 5 && call.Args[0] == "set-option" && call.Args[1] == "-t" && call.Args[3] == "@agentctl_dir" {
+			t.Fatalf("unexpected stored directory rewrite: %#v", call)
+		}
+	}
+}
+
 func TestRelaunchRefusesLegacySessionsWithoutSuppliedConfiguration(t *testing.T) {
 	wantMessage := "session records no per-role configuration; it was launched before agentctl recorded @agentctl_fleet and @agentctl_dir; supply --harness [--model] [--effort] --dir"
 	for _, tt := range []struct {
