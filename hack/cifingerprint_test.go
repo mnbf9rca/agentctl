@@ -27,6 +27,25 @@ func TestCIFingerprintWritesStdoutAndSummary(t *testing.T) {
 	}
 }
 
+func TestCIFingerprintReportsRunnerImageUniformly(t *testing.T) {
+	// The runner-image line must always appear, with an explicit "not set"
+	// fallback, whether or not ImageOS/ImageVersion are set — not only when
+	// at least one of them happens to be present.
+	summaryPath := t.TempDir() + "/summary.md"
+	command := exec.Command("./ci-fingerprint.sh")
+	command.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"GITHUB_STEP_SUMMARY=" + summaryPath,
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ci-fingerprint failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "runner image: not set/not set") {
+		t.Fatalf("stdout does not report runner image uniformly with both vars unset:\n%s", output)
+	}
+}
+
 func TestCIFingerprintHandlesMissingTools(t *testing.T) {
 	summaryPath := t.TempDir() + "/summary.md"
 	command := exec.Command("./ci-fingerprint.sh")

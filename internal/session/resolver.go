@@ -73,6 +73,12 @@ func (e *ResolutionError) Unwrap() error {
 	return e.Err
 }
 
+// Unresolved reports that no permitted source named a session at all, as
+// distinct from a named session that was invalid, missing, or ambiguous.
+func (e *ResolutionError) Unresolved() bool {
+	return e.Source == "" && e.Name == "" && e.Err == nil && len(e.Matches) == 0
+}
+
 // Resolver applies agentctl's fixed session-source precedence.
 type Resolver struct {
 	client    Client

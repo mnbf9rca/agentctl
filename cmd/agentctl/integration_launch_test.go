@@ -36,6 +36,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		"--session", "integration-launch",
 		"--roles", "planner:claude,coder:codex",
 		"--models", "planner:opus,coder:gpt-5",
+		"--efforts", "planner:max,coder:high",
 		"--dir", launchDir,
 	)
 	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
@@ -57,9 +58,10 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	expected := map[string]struct {
 		harness string
 		model   string
+		effort  string
 	}{
-		"planner": {harness: "claude", model: "opus"},
-		"coder":   {harness: "codex", model: "gpt-5"},
+		"planner": {harness: "claude", model: "opus", effort: "max"},
+		"coder":   {harness: "codex", model: "gpt-5", effort: "high"},
 	}
 	seenWindows := make(map[string]bool, len(expected))
 	for _, window := range windows {
@@ -71,7 +73,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate window for role %q: %#v", window.Name, windows)
 		}
 		seenWindows[window.Name] = true
-		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model {
+		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
 			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
 		}
 		gotDirectory, err := os.Stat(window.Directory)
@@ -113,12 +115,55 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate stub invocation for role %q: %#v", invocation.Role, invocations)
 		}
 		seenInvocations[invocation.Role] = true
-		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model {
+		if invocation.Session != "integration-launch" || invocation.Harness != want.harness || invocation.Model != want.model || invocation.Effort != want.effort {
 			t.Errorf("stub invocation = %#v, want launch inputs preserved", invocation)
 		}
 	}
 	for role := range expected {
 		if !seenInvocations[role] {
+			t.Errorf("missing stub invocation for role %q", role)
+		}
+	}
+}
+
+func TestIntegrationLaunchExportsIdentityEnvironmentIntoEveryPane(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-identity-env",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want silent success", result)
+	}
+
+	// planner comes from the new-session path and coder from new-window, so
+	// both creation paths are observed from inside a real pane.
+	want := map[string]stubEnvironment{
+		"planner": {Session: "integration-identity-env", Role: "planner", Managed: "1"},
+		"coder":   {Session: "integration-identity-env", Role: "coder", Managed: "1"},
+	}
+	invocations := fixture.waitStubInvocations(2)
+	if len(invocations) != 2 {
+		t.Fatalf("stub invocations = %#v, want two", invocations)
+	}
+	seen := make(map[string]bool, len(want))
+	for _, invocation := range invocations {
+		wantEnvironment, ok := want[invocation.Role]
+		if !ok {
+			t.Fatalf("unexpected stub invocation %#v", invocation)
+		}
+		if seen[invocation.Role] {
+			t.Fatalf("duplicate stub invocation for role %q: %#v", invocation.Role, invocations)
+		}
+		seen[invocation.Role] = true
+		if invocation.Environment != wantEnvironment {
+			t.Errorf("role %q pane environment = %#v, want %#v", invocation.Role, invocation.Environment, wantEnvironment)
+		}
+	}
+	for role := range want {
+		if !seen[role] {
 			t.Errorf("missing stub invocation for role %q", role)
 		}
 	}

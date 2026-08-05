@@ -50,8 +50,6 @@ OUTPUT_EXPLICIT=0
 CAPTURE_PRE_ENTER=0
 SOCKET="agentctl-injection-$$"
 SESSION=agentctl-injection
-printf 'ATTACH:\n'
-printf 'tmux -L %s attach -t %s\n' "$SOCKET" "$SESSION"
 SESSION_ID=''
 CLAUDE_PANE=''
 CODEX_PANE=''
@@ -128,6 +126,12 @@ esac
 if [ "$CAPTURE_PRE_ENTER" -eq 1 ] && [ "$MODE" != measure ]; then
   die '--capture-pre-enter is valid only in measure mode'
 fi
+
+# Printed only after every --help/usage exit above, so a --help invocation
+# (as the sole argument, or after MODE, or amid flags) never shows the
+# ATTACH command ahead of the usage text it is supposed to follow.
+printf 'ATTACH:\n'
+printf 'tmux -L %s attach -t %s\n' "$SOCKET" "$SESSION"
 
 tmux_cmd() {
   tmux -L "$SOCKET" "$@"

@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,64 @@ func TestIntegrationStatusReportsLiveAndKilledRoleWindows(t *testing.T) {
 		if !seenRoles[role] {
 			t.Errorf("status after window kill missing role %q", role)
 		}
+	}
+}
+
+func TestIntegrationStatusWithoutSessionListsEverySession(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	for _, session := range []string{"integration-all-a", "integration-all-b"} {
+		launch := fixture.runAgentctl("launch", "--session", session, "--roles", "planner:claude")
+		if launch.exitCode != 0 {
+			t.Fatalf("launch %s result = %#v, want success", session, launch)
+		}
+	}
+	fixture.waitStubInvocations(2)
+	fixture.createSentinelSession("integration-all-plain")
+
+	t.Setenv("AGENTCTL_SESSION", "")
+	if err := os.Unsetenv("AGENTCTL_SESSION"); err != nil {
+		t.Fatalf("unset AGENTCTL_SESSION: %v", err)
+	}
+	if err := os.Unsetenv("TMUX_PANE"); err != nil {
+		t.Fatalf("unset TMUX_PANE: %v", err)
+	}
+
+	result := fixture.runAgentctl("status", "--json")
+	if result.exitCode != 0 || result.stderr != "" {
+		t.Fatalf("status result = %#v, want JSON success", result)
+	}
+	var report statuspkg.SessionsReport
+	if err := json.Unmarshal([]byte(result.stdout), &report); err != nil {
+		t.Fatalf("parse status JSON %q: %v", result.stdout, err)
+	}
+	if report.Schema != 1 {
+		t.Fatalf("status schema = %d, want 1", report.Schema)
+	}
+	listed := make(map[string]statuspkg.Report, len(report.Sessions))
+	for _, session := range report.Sessions {
+		if _, duplicate := listed[session.Session]; duplicate {
+			t.Fatalf("status listed %q twice: %#v", session.Session, report.Sessions)
+		}
+		listed[session.Session] = session
+	}
+	if len(listed) != 3 {
+		t.Fatalf("status listed %#v, want the managed and unmanaged sessions", report.Sessions)
+	}
+	for _, name := range []string{"integration-all-a", "integration-all-b"} {
+		session, ok := listed[name]
+		if !ok {
+			t.Fatalf("status omitted managed session %q: %#v", name, report.Sessions)
+		}
+		if !session.Managed || len(session.Agents) != 1 || session.Agents[0].Role != "planner" {
+			t.Fatalf("status session %q = %#v, want one managed planner row", name, session)
+		}
+	}
+	sentinel, listedSentinel := listed["integration-all-plain"]
+	if !listedSentinel {
+		t.Fatalf("status omitted the unmanaged sentinel session: %#v", report.Sessions)
+	}
+	if sentinel.Managed || len(sentinel.Agents) != 0 {
+		t.Fatalf("unmanaged sentinel = %#v, want managed false and no agents", sentinel)
 	}
 }
 

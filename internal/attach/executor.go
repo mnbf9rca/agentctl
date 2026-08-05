@@ -4,18 +4,23 @@ package attach
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 // LookupEnv is compatible with os.LookupEnv.
 type LookupEnv func(string) (string, bool)
 
-// Client is the tmux surface required to validate and attach a session.
+// Client is the tmux surface required to validate, attach, and afterwards
+// observe a session.
 type Client interface {
 	ShowSessionOption(context.Context, tmuxx.SessionID, string) (string, error)
+	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	AttachSession(context.Context, tmuxx.SessionID) error
+	ListSessions(context.Context) ([]tmuxx.Session, error)
 }
 
 // EnvironmentError reports a local terminal environment where iTerm2 control
@@ -83,8 +88,10 @@ func (e Executor) CheckEnvironment() error {
 }
 
 // Execute requires the current managed/version markers, then attaches by the
-// resolved session ID.
-func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
+// resolved session ID. The narration is written to out only once the ownership
+// gate has passed and immediately before control mode starts, so it never
+// announces an attachment a refusal prevented.
+func (e Executor) Execute(ctx context.Context, target tmuxx.Session, out io.Writer) error {
 	managed, err := e.client.ShowSessionOption(ctx, target.ID, "@agentctl_managed")
 	if err != nil {
 		return tmuxx.ClassifyError(err)
@@ -101,8 +108,57 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session) error {
 		return &RefusalError{Session: target, Option: "@agentctl_version", Value: version}
 	}
 
+	windowCount := -1
+	if windows, countErr := e.client.ListWindows(ctx, target.ID); countErr == nil {
+		windowCount = len(windows)
+	}
+	writeNarration(out, target, windowCount)
+
 	if err := e.client.AttachSession(ctx, target.ID); err != nil {
 		return tmuxx.ClassifyError(err)
 	}
 	return nil
+}
+
+// StillRunning reports whether the attached session is still present once
+// control mode has ended. It compares the resolved session ID, so a session
+// recreated under the same name is not reported as the one just attached. The
+// probe is advisory: its own failure is returned rather than rendered as an
+// absence, so the caller can state what it could not verify (§1.1).
+func (e Executor) StillRunning(ctx context.Context, target tmuxx.Session) (bool, error) {
+	sessions, err := e.client.ListSessions(ctx)
+	if err != nil {
+		return false, tmuxx.ClassifyError(err)
+	}
+	for _, candidate := range sessions {
+		if candidate.ID == target.ID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// writeNarration states what iTerm2 is about to do and what its command-menu
+// keys mean. A negative windowCount means the advisory count read failed, so
+// the count is omitted rather than guessed.
+func writeNarration(out io.Writer, target tmuxx.Session, windowCount int) {
+	if out == nil {
+		return
+	}
+	fmt.Fprintf(out, "agentctl %s\n", buildinfo.Current())
+	if windowCount >= 0 {
+		label := "windows"
+		if windowCount == 1 {
+			label = "window"
+		}
+		fmt.Fprintf(out, "Attaching session %q (%d %s) in iTerm2.\n\n", target.Name, windowCount, label)
+	} else {
+		fmt.Fprintf(out, "Attaching session %q in iTerm2.\n\n", target.Name)
+	}
+	fmt.Fprint(out, "iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n")
+	fmt.Fprint(out, "  esc   detach cleanly — the tabs close and the fleet keeps running\n")
+	fmt.Fprint(out, "  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n")
+	fmt.Fprint(out, "        does not exit, so this terminal stays busy and agentctl cannot report.\n")
+	fmt.Fprint(out, "        Prefer esc.\n\n")
+	fmt.Fprintf(out, "Detaching never stops the fleet. To stop it: agentctl kill --session %s\n", target.Name)
 }

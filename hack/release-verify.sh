@@ -11,10 +11,11 @@ Usage:
   hack/release-verify.sh [--measure]
   hack/release-verify.sh --render-results VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --process-check VERSIONS_FILE ARTIFACT_DIR
+  hack/release-verify.sh --assert-probe PROBE_NAME OUTPUT_FILE
 
 Runs preflight and the four hack/probe-*.sh contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
-compact, kill, and status. With --measure it runs hack/verify-injection.sh in
+compact, relaunch, kill, and status. With --measure it runs hack/verify-injection.sh in
 measure mode. Both paths finish with automated cleanup checks and results
 rendering.
 
@@ -27,6 +28,9 @@ for measure mode, results.tsv. No append; testable.
 row in ARTIFACT_DIR/results.tsv must be PASS and its process= value must
 match the expected pane process (codex: "codex"; claude: the version token
 from VERSIONS_FILE's claude_version= line). No append; testable.
+
+--assert-probe validates captured OUTPUT_FILE against the explicit contract
+for PROBE_NAME. It exits 1 and names the missing observation on failure.
 EOF
 }
 
@@ -91,6 +95,66 @@ session_absent() {
   esac
 }
 
+valid_tmux_id() {
+  local value=$1
+  local prefix=$2
+  local digits
+  [ "${value#?}" != "$value" ] || return 1
+  [ "${value%"${value#?}"}" = "$prefix" ] || return 1
+  digits=${value#?}
+  case "$digits" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+}
+
+LIVE_SESSION_ID=''
+resolve_live_session_id() {
+  local session_name=$1
+  local format
+  local matches
+  format="#{session_id}$(printf '\t')#{session_name}"
+  matches=$(tmux list-sessions -F "$format") || return 1
+  LIVE_SESSION_ID=$(printf '%s\n' "$matches" | awk -F '\t' -v session="$session_name" '$2 == session { print $1 }')
+  valid_tmux_id "$LIVE_SESSION_ID" '$'
+}
+
+ROLE_WINDOW_ID=''
+ROLE_PANE_ID=''
+resolve_role_window() {
+  local session_id=$1
+  local role=$2
+  local format
+  local records
+  local record
+  local observed_role
+  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{@agentctl_role}"
+  records=$(tmux list-windows -t "$session_id" -F "$format") || return 1
+  record=$(printf '%s\n' "$records" | awk -F '\t' -v role="$role" '$3 == role { print }')
+  [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
+  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_role <<<"$record"
+  [ "$observed_role" = "$role" ] || return 1
+  valid_tmux_id "$ROLE_WINDOW_ID" '@' && valid_tmux_id "$ROLE_PANE_ID" '%'
+}
+
+assert_role_state() {
+  local session_name=$1
+  local role=$2
+  local expected=$3
+  local output_file=$4
+  local states
+  if ! ./bin/agentctl status --session "$session_name" >"$output_file"; then
+    cat "$output_file"
+    return 1
+  fi
+  cat "$output_file"
+  states=$(awk -v session="$session_name" -v role="$role" '$1 == session && $2 == role { print $NF }' "$output_file")
+  [ "$states" = "$expected" ]
+}
+
+# Markdown backticks below are literal; command substitution is deliberately
+# suppressed throughout this function. One function-level directive replaces
+# what would otherwise be a repeated per-line disable comment.
+# shellcheck disable=SC2016
 render_results() {
   versions_file=$1
   artifact_dir=$2
@@ -110,23 +174,11 @@ render_results() {
   date_only=${date_utc%%T*}
 
   printf '### %s\n\n' "$date_only"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- agentctl: `%s`\n' "$agentctl_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- tmux: `%s`\n' "$tmux_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Claude Code: `%s`\n' "$claude_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- codex-cli: `%s`\n' "$codex_version"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Mode: `%s`; harness: `%s`\n' "$mode" "$harness"
-  # Markdown backticks are literal; command substitution deliberately suppressed.
-  # shellcheck disable=SC2016
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
 
   if [ "$mode" = verify-live ]; then
@@ -135,6 +187,13 @@ render_results() {
     printf -- '- Claude clear: recorded %s\n' "$(field claude_clear_attestation "$metadata")"
     printf -- '- Codex clear: recorded %s\n' "$(field codex_clear_attestation "$metadata")"
     printf -- '- Compact (claude): recorded %s\n' "$(field compact_attestation "$metadata")"
+    printf -- '- Relaunch: %s; fresh codex input with no junk: recorded %s\n' \
+      "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+    case "$(field teardown_status_exit "$metadata")" in
+      3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
+      6) printf -- '- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)\n' ;;
+      *) die 'live metadata has invalid teardown_status_exit' ;;
+    esac
     printf -- '- Teardown check: %s\n' "$(field teardown_check "$metadata")"
     return
   fi
@@ -196,7 +255,83 @@ process_check() {
   printf 'PROCESS CHECK PASS (claude=%s, codex=codex)\n' "$claude_expected"
 }
 
-# --render-results and --process-check are pure, testable subcommands:
+require_probe_text() {
+  local probe_name=$1
+  local expected=$2
+  case "$PROBE_OUTPUT" in
+    *"$expected"*) ;;
+    *)
+      printf 'PROBE ASSERT FAIL (%s): missing expected output: %s\n' "$probe_name" "$expected" >&2
+      return 1
+      ;;
+  esac
+}
+
+assert_probe_output() {
+  local probe_name=$1
+  local PROBE_OUTPUT=$2
+
+  case "$probe_name" in
+    probe-1-argv.sh)
+      require_probe_text "$probe_name" 'OK exit=0' &&
+        require_probe_text "$probe_name" 'empty-value set OK' &&
+        require_probe_text "$probe_name" 'read role:  role1' &&
+        require_probe_text "$probe_name" "  -v read:   'two words'" &&
+        require_probe_text "$probe_name" 'name=role1 role=role1 proc=2.1.220' &&
+        require_probe_text "$probe_name" "after killing =foo, has-session -t '=foobar': exit0 (foobar survived)" &&
+        require_probe_text "$probe_name" "list-panes -t 'probe:rev' resolves to: rev" &&
+        require_probe_text "$probe_name" "list-panes -t 'probe:=rev' resolves to: rev" &&
+        require_probe_text "$probe_name" 'literal send OK' &&
+        require_probe_text "$probe_name" 'Enter OK' &&
+        require_probe_text "$probe_name" "captured: '/clear'"
+      ;;
+    probe-2-targeting.sh)
+      require_probe_text "$probe_name" "set-option -t '=alpha':  no such session: =alpha" &&
+        require_probe_text "$probe_name" 'set-option -t alpha:     OK' &&
+        require_probe_text "$probe_name" "show-options -qv -t alpha @k: 'v'" &&
+        require_probe_text "$probe_name" 'set-option -t alph @k2 v: OK <- PREFIX MATCHED (bad)' &&
+        require_probe_text "$probe_name" 'has-session -t betab (unique prefix): exit=0 (0 = prefix matched)' &&
+        require_probe_text "$probe_name" "has-session -t '=betab':             can't find session: betab
+exit=1" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:rev'  -> reviewer" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:=rev' -> can't find window: rev
+   exit=1" &&
+        require_probe_text "$probe_name" "list-panes -t 'alpha:dup' picks: can't find window: dup" &&
+        require_probe_text "$probe_name" "set:   '1' exit=0" &&
+        require_probe_text "$probe_name" "unset: '' exit=0" &&
+        require_probe_text "$probe_name" "unset no -q: 'invalid option: @agentctl_absent' exit=1" &&
+        require_probe_text "$probe_name" "display-message -p -t \$PANE_ID '#{session_name}': alpha"
+      ;;
+    probe-3-ids.sh)
+      require_probe_text "$probe_name" "created session id = '\$0'" &&
+        require_probe_text "$probe_name" "set-option -t \$SESSION_ID:  OK" &&
+        require_probe_text "$probe_name" "show-options -qv -t \$SESSION_ID @agentctl_managed: '1'" &&
+        require_probe_text "$probe_name" "decoy 'alphabet' contaminated? managed=''" &&
+        require_probe_text "$probe_name" "list-windows -t \$SESSION_ID: alpha" &&
+        require_probe_text "$probe_name" "has-session  -t \$SESSION_ID: exit=0" &&
+        require_probe_text "$probe_name" "new-window   -t \$SESSION_ID: @2 %2" &&
+        require_probe_text "$probe_name" "model set-to-empty via -F: ''" &&
+        require_probe_text "$probe_name" "never-set option via -F:   ''" &&
+        require_probe_text "$probe_name" "stdout='@4'" &&
+        require_probe_text "$probe_name" 'killed by id OK' &&
+        require_probe_text "$probe_name" "remaining:
+  alphabet"
+      ;;
+    probe-4-attach.sh)
+      require_probe_text "$probe_name" "sid=\$0" &&
+        require_probe_text "$probe_name" "attach-session -t \$SESSION_ID     : open terminal failed: not a terminal" &&
+        require_probe_text "$probe_name" "attach-session -t '=alpha'  : open terminal failed: not a terminal" &&
+        require_probe_text "$probe_name" "attach-session -t '=nope'   : can't find session: nope" &&
+        require_probe_text "$probe_name" "-CC attach-session -t \$SESSION_ID : tcgetattr failed: Operation not supported by device"
+      ;;
+    *)
+      printf 'PROBE ASSERT FAIL (%s): no assertion defined\n' "$probe_name" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Pure, testable subcommands are handled before the live-environment flow.
 # handle them before any of the interactive/live-environment flow below.
 if [ "${1:-}" = '--render-results' ]; then
   [ "$#" -eq 3 ] || die '--render-results requires VERSIONS_FILE ARTIFACT_DIR'
@@ -208,6 +343,13 @@ if [ "${1:-}" = '--process-check' ]; then
   [ "$#" -eq 3 ] || die '--process-check requires VERSIONS_FILE ARTIFACT_DIR'
   token=$(claude_version_token "$2")
   process_check "$3/results.tsv" "$token" && exit 0 || exit 1
+fi
+
+if [ "${1:-}" = '--assert-probe' ]; then
+  [ "$#" -eq 3 ] || die '--assert-probe requires PROBE_NAME OUTPUT_FILE'
+  [ -r "$3" ] || die "cannot read probe output: $3"
+  probe_out=$(cat "$3")
+  assert_probe_output "$2" "$probe_out" && exit 0 || exit 1
 fi
 
 if [ "${1:-}" = '--help' ] || [ "${1:-}" = '-h' ]; then
@@ -265,43 +407,19 @@ printf 'codex:    %s\n' "$CODEX_VERSION"
 # 2. Probes (fully automated)
 # ---------------------------------------------------------------------------
 
-# Each probe's final marker line, read from its own source (hack/probe-*.sh):
-#   probe-1-argv.sh:      final `echo 'done'` after `echo "== cleanup =="`
-#   probe-2-targeting.sh: final `echo cleanup-done`
-#   probe-3-ids.sh:       final `echo cleanup-done`
-#   probe-4-attach.sh:    has no "done"-style marker; its last statement is
-#                         `echo -n "-CC attach-session -t \$SESSION_ID : "`
-#                         followed by the (variable) attach output, so the
-#                         fixed literal prefix "-CC attach-session -t " is
-#                         the only reliable proof it ran to completion.
-probe_marker() {
-  case "$1" in
-    probe-1-argv.sh) printf 'done' ;;
-    probe-2-targeting.sh) printf 'cleanup-done' ;;
-    probe-3-ids.sh) printf 'cleanup-done' ;;
-    probe-4-attach.sh) printf -- '-CC attach-session -t ' ;;
-    *) die "no known marker for probe: $1" ;;
-  esac
-}
-
 echo
 echo '== Probes =='
 for probe in "$TOP"/hack/probe-*.sh; do
   probe_name=$(basename "$probe")
-  marker=$(probe_marker "$probe_name")
   echo "-- $probe_name --"
-  if ! probe_out=$(bash "$probe" </dev/null); then
-    echo "PROBES FAIL ($probe_name)"
+  probe_status=0
+  probe_out=$(bash "$probe" </dev/null 2>&1) || probe_status=$?
+  printf '%s\n' "$probe_out"
+  if [ "$probe_status" -ne 0 ]; then
+    echo "PROBES FAIL ($probe_name: exit $probe_status)"
     exit 1
   fi
-  printf '%s\n' "$probe_out"
-  case "$probe_out" in
-    *"$marker"*) ;;
-    *)
-      echo "PROBES FAIL ($probe_name: did not reach marker '$marker')"
-      exit 1
-      ;;
-  esac
+  assert_probe_output "$probe_name" "$probe_out" || exit 1
 done
 
 if pgrep -fl '[t]mux.*agentctl-probe-' >/dev/null 2>&1; then
@@ -385,7 +503,10 @@ else
   CLAUDE_CLEAR_ATTESTATION=''
   CODEX_CLEAR_ATTESTATION=''
   COMPACT_ATTESTATION=''
+  RELAUNCH_ATTESTATION=''
+  RELAUNCH_CHECK=FAIL
   TEARDOWN_CHECK=FAIL
+  TEARDOWN_STATUS_EXIT=''
   STATUS_STDOUT="$ARTIFACT_DIR/status.stdout"
   STATUS_STDERR="$ARTIFACT_DIR/status.stderr"
 
@@ -401,8 +522,8 @@ else
   fi
 
   echo 'Running:'
-  echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex'
-  if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex; then
+  echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex --efforts b:high'
+  if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex --efforts b:high; then
     die 'live release verification launch failed'
   fi
 
@@ -491,6 +612,103 @@ else
     fi
   fi
 
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo
+    echo '== Relaunch verification =='
+    if ! resolve_live_session_id "$LIVE_SESSION"; then
+      echo 'RELAUNCH FAIL (could not resolve relverify to one exact tmux session ID)'
+      LIVE_STATUS=1
+    elif ! resolve_role_window "$LIVE_SESSION_ID" b; then
+      echo 'RELAUNCH FAIL (could not resolve role b to one exact tmux window and pane ID)'
+      LIVE_STATUS=1
+    else
+      original_window_id=$ROLE_WINDOW_ID
+      original_pane_id=$ROLE_PANE_ID
+      echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
+      if ask 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
+        echo 'Running exact-ID missing-role setup:'
+        printf '  tmux kill-window -t %s\n' "$original_window_id"
+        if ! tmux kill-window -t "$original_window_id"; then
+          echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
+          LIVE_STATUS=1
+        fi
+      else
+        LIVE_STATUS=1
+      fi
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo 'Running:'
+    echo '  ./bin/agentctl status --session relverify'
+    if assert_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
+      echo 'RELAUNCH PASS (role b reported missing after exact-ID removal)'
+    else
+      echo 'RELAUNCH FAIL (role b did not report missing after exact-ID removal)'
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo 'Running:'
+    echo '  ./bin/agentctl relaunch --session relverify b'
+    if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
+      cat "$ARTIFACT_DIR/relaunch.stdout"
+    else
+      cat "$ARTIFACT_DIR/relaunch.stdout"
+      echo 'RELAUNCH FAIL (agentctl relaunch failed)'
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    if ! resolve_role_window "$LIVE_SESSION_ID" b; then
+      echo 'RELAUNCH FAIL (could not resolve the recreated role b window and pane IDs)'
+      LIVE_STATUS=1
+    elif [ "$ROLE_PANE_ID" = "$original_pane_id" ]; then
+      echo "RELAUNCH FAIL (recreated role b reused original pane $original_pane_id)"
+      LIVE_STATUS=1
+    else
+      printf 'RELAUNCH PASS (role b pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
+      expected_relaunch="agentctl: relaunched b in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness codex (stored), model default (stored), effort high (stored), dir $TOP (stored)"
+      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
+      if [ "$actual_relaunch" != "$expected_relaunch" ]; then
+        printf 'RELAUNCH FAIL (provenance output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
+        LIVE_STATUS=1
+      fi
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo 'Running:'
+    echo '  ./bin/agentctl status --session relverify'
+    if assert_role_state "$LIVE_SESSION" b running "$ARTIFACT_DIR/relaunch-running.status"; then
+      echo 'RELAUNCH PASS (role b restored to running)'
+    else
+      echo 'RELAUNCH FAIL (role b did not return to running)'
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    relaunch_prompt=$(cat <<'EOF'
+One of the fleet's harnesses was terminated, and agentctl relaunched it from
+the fleet's stored configuration. The new pane is a new process: its harness,
+model and effort carry over; its conversation does not, so the junk you typed
+is gone.
+
+Do you see a fresh, ready codex input surface with no trace of that junk?
+EOF
+)
+    if ask "$relaunch_prompt"; then
+      RELAUNCH_ATTESTATION=$ASK_ANSWER
+      RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
+    else
+      RELAUNCH_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
   echo
   echo '== Automated teardown =='
   echo 'Running:'
@@ -502,7 +720,8 @@ else
   fi
 
   if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
-    echo 'TEARDOWN PASS (agentctl status proves relverify is absent)'
+    TEARDOWN_STATUS_EXIT=$STATUS_EXIT
+    printf 'TEARDOWN PASS (agentctl status exit %s proves relverify is absent)\n' "$TEARDOWN_STATUS_EXIT"
   else
     absence_status=$?
     if [ "$absence_status" -eq 1 ]; then
@@ -560,6 +779,9 @@ else
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
     printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"
     printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
+    printf 'relaunch_check=%s\n' "$RELAUNCH_CHECK"
+    printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
+    printf 'teardown_status_exit=%s\n' "$TEARDOWN_STATUS_EXIT"
     printf 'teardown_check=%s\n' "$TEARDOWN_CHECK"
   } >"$ARTIFACT_DIR/metadata.txt"
 

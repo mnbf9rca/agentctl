@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -78,6 +79,7 @@ type Dependencies struct {
 	Stat     func(string) (fs.FileInfo, error)
 	Now      func() time.Time
 	Sleep    func(time.Duration)
+	Stderr   io.Writer
 }
 
 // Launcher coordinates preflight and tmux fleet creation.
@@ -88,12 +90,42 @@ type Launcher struct {
 	stat     func(string) (fs.FileInfo, error)
 	now      func() time.Time
 	sleep    func(time.Duration)
+	stderr   io.Writer
 }
 
 const (
 	processPollTimeout  = 5 * time.Second
 	processPollInterval = 100 * time.Millisecond
+	envSession          = "AGENTCTL_SESSION"
+	envRole             = "AGENTCTL_ROLE"
+	envManaged          = "AGENTCTL_MANAGED"
 )
+
+// Session and window metadata option names (§6.5).
+const (
+	optionManaged   = "@agentctl_managed"
+	optionVersion   = "@agentctl_version"
+	optionRoles     = "@agentctl_roles"
+	optionFleet     = "@agentctl_fleet"
+	optionDirectory = "@agentctl_dir"
+	optionRole      = "@agentctl_role"
+	optionHarness   = "@agentctl_harness"
+	optionModel     = "@agentctl_model"
+	optionEffort    = "@agentctl_effort"
+	optionProcess   = "@agentctl_process"
+)
+
+// EncodeFleet renders per-role configuration as comma-joined
+// role:harness:model:effort quads in roster order. Every field is
+// charset-bound (§7), so neither separator can occur inside a field and a
+// defaulted model or effort renders as an empty field.
+func EncodeFleet(roles []config.RoleConfig) string {
+	entries := make([]string, len(roles))
+	for index, role := range roles {
+		entries[index] = role.Name + ":" + string(role.Harness) + ":" + role.Model + ":" + role.Effort
+	}
+	return strings.Join(entries, ",")
+}
 
 // New constructs a launcher with production defaults for omitted dependencies.
 func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
@@ -112,6 +144,9 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 	if dependencies.Sleep == nil {
 		dependencies.Sleep = time.Sleep
 	}
+	if dependencies.Stderr == nil {
+		dependencies.Stderr = io.Discard
+	}
 	return Launcher{
 		tmux:     tmuxx.New(runner),
 		lookPath: dependencies.LookPath,
@@ -119,6 +154,7 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 		stat:     dependencies.Stat,
 		now:      dependencies.Now,
 		sleep:    dependencies.Sleep,
+		stderr:   dependencies.Stderr,
 	}
 }
 
@@ -157,12 +193,13 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 		}
 		return err
 	}
-	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles); err != nil {
+	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles, directoryName); err != nil {
 		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
 		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
+	l.clearSessionIdentity(ctx, createdSession.SessionID)
 
 	for _, role := range fleet.Roles[1:] {
 		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directoryName)
@@ -176,12 +213,20 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	return nil
 }
 
+func (l Launcher) clearSessionIdentity(ctx context.Context, sessionID tmuxx.SessionID) {
+	for _, name := range []string{envSession, envRole, envManaged} {
+		if err := l.tmux.ClearSessionEnvironment(ctx, sessionID, name); err != nil {
+			fmt.Fprintf(l.stderr, "agentctl: could not clear %s from the tmux session environment; windows created by hand may inherit the first role's identity: %v\n", name, err)
+		}
+	}
+}
+
 func (l Launcher) newSession(ctx context.Context, session string, role config.RoleConfig, directory string) (tmuxx.CreatedSession, error) {
 	command, err := agentCommand(session, role)
 	if err != nil {
 		return tmuxx.CreatedSession{}, err
 	}
-	return l.tmux.NewSession(ctx, session, role.Name, directory, command)
+	return l.tmux.NewSession(ctx, session, role.Name, directory, command, identityEnvironment(session, role.Name))
 }
 
 func (l Launcher) newWindow(ctx context.Context, sessionID tmuxx.SessionID, session string, role config.RoleConfig, directory string) (tmuxx.CreatedWindow, error) {
@@ -189,37 +234,63 @@ func (l Launcher) newWindow(ctx context.Context, sessionID tmuxx.SessionID, sess
 	if err != nil {
 		return tmuxx.CreatedWindow{}, err
 	}
-	return l.tmux.NewWindow(ctx, sessionID, role.Name, directory, command)
+	return l.tmux.NewWindow(ctx, sessionID, role.Name, directory, command, identityEnvironment(session, role.Name))
+}
+
+// identityEnvironment names the fleet and role a window belongs to, so an agent
+// (or human) in that pane can read its own identity. Session and role have
+// already passed config validation by the time a window is created.
+//
+// The variables are informational. agentctl never reads them back when deciding
+// what to control, kill, or report on: that stays with the @agentctl_* tmux
+// options and the fail-closed target chain, because a same-user process can
+// forge either (see SECURITY.md).
+func identityEnvironment(session, role string) []tmuxx.EnvVar {
+	return []tmuxx.EnvVar{
+		{Name: envSession, Value: session},
+		{Name: envRole, Value: role},
+		{Name: envManaged, Value: "1"},
+	}
 }
 
 func agentCommand(session string, role config.RoleConfig) (string, error) {
-	argv, err := harness.AgentArgv(session, role.Name, string(role.Harness), role.Model)
+	argv, err := harness.AgentArgv(session, role.Name, string(role.Harness), harness.Options{
+		Model:  role.Model,
+		Effort: role.Effort,
+	})
 	if err != nil {
 		return "", err
 	}
 	return "exec " + shellq.Join(argv), nil
 }
 
-func (l Launcher) stampSession(ctx context.Context, sessionID tmuxx.SessionID, roles []config.RoleConfig) error {
-	if err := l.tmux.SetSessionOption(ctx, sessionID, "@agentctl_managed", "1"); err != nil {
+func (l Launcher) stampSession(ctx context.Context, sessionID tmuxx.SessionID, roles []config.RoleConfig, directory string) error {
+	if err := l.tmux.SetSessionOption(ctx, sessionID, optionManaged, "1"); err != nil {
 		return err
 	}
-	if err := l.tmux.SetSessionOption(ctx, sessionID, "@agentctl_version", "1"); err != nil {
+	if err := l.tmux.SetSessionOption(ctx, sessionID, optionVersion, "1"); err != nil {
 		return err
 	}
 	roleNames := make([]string, len(roles))
 	for index, role := range roles {
 		roleNames[index] = role.Name
 	}
-	return l.tmux.SetSessionOption(ctx, sessionID, "@agentctl_roles", strings.Join(roleNames, ","))
+	if err := l.tmux.SetSessionOption(ctx, sessionID, optionRoles, strings.Join(roleNames, ",")); err != nil {
+		return err
+	}
+	if err := l.tmux.SetSessionOption(ctx, sessionID, optionFleet, EncodeFleet(roles)); err != nil {
+		return err
+	}
+	return l.tmux.SetSessionOption(ctx, sessionID, optionDirectory, directory)
 }
 
 func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, panePID int, role config.RoleConfig) error {
 	for _, option := range []struct{ name, value string }{
-		{name: "@agentctl_managed", value: "1"},
-		{name: "@agentctl_role", value: role.Name},
-		{name: "@agentctl_harness", value: string(role.Harness)},
-		{name: "@agentctl_model", value: role.Model},
+		{name: optionManaged, value: "1"},
+		{name: optionRole, value: role.Name},
+		{name: optionHarness, value: string(role.Harness)},
+		{name: optionModel, value: role.Model},
+		{name: optionEffort, value: role.Effort},
 	} {
 		if err := l.tmux.SetWindowOption(ctx, windowID, option.name, option.value); err != nil {
 			return err
@@ -229,7 +300,7 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 	if err != nil {
 		return err
 	}
-	return l.tmux.SetWindowOption(ctx, windowID, "@agentctl_process", process)
+	return l.tmux.SetWindowOption(ctx, windowID, optionProcess, process)
 }
 
 func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, error) {

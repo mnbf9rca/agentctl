@@ -36,6 +36,9 @@ func TestRunLaunchRejectsInvalidConfigurationBeforeRunner(t *testing.T) {
 		{name: "invalid session", args: []string{"launch", "--session", "Invalid", "--roles", "planner:claude"}, want: "invalid session \"Invalid\""},
 		{name: "invalid fleet", args: []string{"launch", "--session", "fleet", "--roles", "planner:unknown"}, want: "unknown harness \"unknown\""},
 		{name: "explicitly empty models", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models="}, want: "--models value \"\": must not be empty"},
+		{name: "explicitly empty efforts", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts="}, want: "--efforts value \"\": must not be empty"},
+		{name: "unsupported effort level", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:turbo"}, want: "harness \"claude\" does not support effort \"turbo\"; supported levels are low, medium, high, xhigh, max"},
+		{name: "effort for undefined role", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "worker:high"}, want: "effort references undefined role \"worker\""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner()
@@ -142,6 +145,27 @@ func TestRunLaunchSuccessStartsWithSessionLookupAndIsSilent(t *testing.T) {
 	if got, want := runner.Calls[0], (tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("first runner call = %#v, want %#v", got, want)
 	}
+}
+
+func TestRunLaunchReportsSessionEnvironmentClearFailureButStillSucceeds(t *testing.T) {
+	responses := launchOneRoleResponses("")
+	responses[15] = tmuxx.Response{Err: errors.New("permission denied")}
+	runner := tmuxx.NewFakeRunner(responses...)
+	var stdout, stderr bytes.Buffer
+
+	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
+
+	if code != exitOK {
+		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	want := "agentctl: could not clear AGENTCTL_ROLE from the tmux session environment; windows created by hand may inherit the first role's identity: tmux clear session environment: permission denied\n"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	assertNoKillCall(t, runner)
 }
 
 func TestRunLaunchMapsSessionCollisionWithoutKilling(t *testing.T) {
@@ -303,7 +327,7 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 
 	code := runWith([]string{
 		"launch", "--session", "fleet", "--roles", "planner:claude,reviewer:codex",
-		"--models", "reviewer:gpt-5.6", "--dir", "/fleet workspace",
+		"--models", "reviewer:gpt-5.6", "--efforts", "planner:high", "--dir", "/fleet workspace",
 	}, &stdout, &stderr, launchTestDependencies(runner))
 
 	if code != exitOK {
@@ -314,21 +338,28 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 	}
 	assertLaunchCalls(t, runner,
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/fleet workspace", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude'"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude' '--' '--effort' 'high'"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_version", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_roles", "planner,reviewer"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_fleet", "planner:claude::high,reviewer:codex:gpt-5.6:"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_dir", "/fleet workspace"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_harness", "claude"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_model", ""}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_effort", "high"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_process", "claude"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace", "-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_SESSION"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_ROLE"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_MANAGED"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_role", "reviewer"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_harness", "codex"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_model", "gpt-5.6"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_effort", ""}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_process", "codex"}},
 	)
@@ -348,8 +379,9 @@ func launchOneRoleResponses(sessions string) []tmuxx.Response {
 	return []tmuxx.Response{
 		{Stdout: []byte(sessions)},
 		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {},
+		{}, {}, {}, {}, {}, {}, {}, {}, {}, {},
 		{Stdout: []byte("claude\n")}, {},
+		{}, {}, {},
 	}
 }
 
@@ -357,9 +389,10 @@ func launchTwoRoleResponses() []tmuxx.Response {
 	return []tmuxx.Response{
 		{},
 		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {}, {Stdout: []byte("claude\n")}, {},
+		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {Stdout: []byte("claude\n")}, {},
+		{}, {}, {},
 		{Stdout: []byte("@65\t%87\t8686\n")},
-		{}, {}, {}, {}, {Stdout: []byte("codex\n")}, {},
+		{}, {}, {}, {}, {}, {Stdout: []byte("codex\n")}, {},
 	}
 }
 

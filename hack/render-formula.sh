@@ -14,8 +14,12 @@ if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 sha_for() {
-  local arch="$1" sha
-  sha="$(awk -v pat="_darwin_${arch}.tar.gz" '$2 ~ pat"$" {print $1}' "$checksums")"
+  local arch="$1" sha want
+  # Exact string match on the goreleaser name_template output, not a regex:
+  # a regex here would need both left-anchoring and dot-escaping (".tar.gz"
+  # otherwise matches any char for the dots) to avoid false positives.
+  want="agentctl_${version}_darwin_${arch}.tar.gz"
+  sha="$(awk -v want="$want" '$2 == want {print $1}' "$checksums")"
   if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]]; then
     echo "render-formula: no single valid sha256 for darwin_${arch} in $checksums" >&2
     exit 1

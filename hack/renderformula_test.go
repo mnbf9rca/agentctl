@@ -1,16 +1,27 @@
 package hack_test
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
 )
 
+// render runs render-formula.sh and returns its stdout. On failure, the
+// returned error wraps the process error together with captured stderr, so
+// a test failure message shows *why* the script failed rather than just
+// that it did.
 func render(t *testing.T, version, checksums string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("./render-formula.sh", version, checksums)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	if err != nil && stderr.Len() > 0 {
+		err = fmt.Errorf("%w: %s", err, stderr.String())
+	}
 	return string(out), err
 }
 

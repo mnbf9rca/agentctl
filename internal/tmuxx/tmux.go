@@ -12,7 +12,7 @@ const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
 	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"
 	createdWindowFormat  = "#{window_id}\t#{pane_id}\t#{pane_pid}"
-	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}"
+	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
 
@@ -38,6 +38,14 @@ type WindowID string
 
 // PaneID is an exact tmux pane ID such as %9.
 type PaneID string
+
+// EnvVar is one environment variable exported into a window tmux creates. Each
+// variable becomes a separate -e argv pair, so no value is ever concatenated
+// into a shell-interpreted string.
+type EnvVar struct {
+	Name  string
+	Value string
+}
 
 // Session identifies one listed tmux session.
 type Session struct {
@@ -69,6 +77,7 @@ type Window struct {
 	Role    string
 	Harness string
 	Model   string
+	Effort  string
 	Process string
 }
 
@@ -115,12 +124,13 @@ func (c Client) ListSessions(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
-// NewSession creates the first role and returns the IDs printed by tmux.
-func (c Client) NewSession(ctx context.Context, name, role, dir, command string) (CreatedSession, error) {
-	output, err := c.tmuxOutput(ctx, "create session",
-		"new-session", "-d", "-s", name, "-n", role, "-c", dir,
-		"-P", "-F", createdSessionFormat, "--", command,
-	)
+// NewSession creates the first role and returns the IDs printed by tmux. Each
+// entry of env is exported into the created window's environment.
+func (c Client) NewSession(ctx context.Context, name, role, dir, command string, env []EnvVar) (CreatedSession, error) {
+	arguments := []string{"new-session", "-d", "-s", name, "-n", role, "-c", dir}
+	arguments = append(arguments, environmentArguments(env)...)
+	arguments = append(arguments, "-P", "-F", createdSessionFormat, "--", command)
+	output, err := c.tmuxOutput(ctx, "create session", arguments...)
 	if err != nil {
 		return CreatedSession{}, err
 	}
@@ -150,14 +160,15 @@ func (c Client) NewSession(ctx context.Context, name, role, dir, command string)
 }
 
 // NewWindow creates a later role in sid and returns the IDs printed by tmux.
-func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command string) (CreatedWindow, error) {
+// Each entry of env is exported into the created window's environment.
+func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command string, env []EnvVar) (CreatedWindow, error) {
 	if err := validateID(string(sid), '$'); err != nil {
 		return CreatedWindow{}, fmt.Errorf("new window target: %w", err)
 	}
-	output, err := c.tmuxOutput(ctx, "create window",
-		"new-window", "-d", "-t", string(sid), "-n", role, "-c", dir,
-		"-P", "-F", createdWindowFormat, "--", command,
-	)
+	arguments := []string{"new-window", "-d", "-t", string(sid), "-n", role, "-c", dir}
+	arguments = append(arguments, environmentArguments(env)...)
+	arguments = append(arguments, "-P", "-F", createdWindowFormat, "--", command)
+	output, err := c.tmuxOutput(ctx, "create window", arguments...)
 	if err != nil {
 		return CreatedWindow{}, err
 	}
@@ -178,6 +189,18 @@ func (c Client) NewWindow(ctx context.Context, sid SessionID, role, dir, command
 	return CreatedWindow{WindowID: WindowID(fields[0]), PaneID: PaneID(fields[1]), PanePID: panePID}, nil
 }
 
+// environmentArguments renders env as tmux -e argv pairs in declaration order.
+func environmentArguments(env []EnvVar) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	arguments := make([]string, 0, 2*len(env))
+	for _, variable := range env {
+		arguments = append(arguments, "-e", variable.Name+"="+variable.Value)
+	}
+	return arguments
+}
+
 func creationOutputError(operation string, err error) error {
 	return fmt.Errorf("%w: %s: %w", ErrCreationOutput, operation, err)
 }
@@ -188,6 +211,15 @@ func (c Client) SetSessionOption(ctx context.Context, sid SessionID, name, value
 		return fmt.Errorf("set session option target: %w", err)
 	}
 	_, err := c.tmuxOutput(ctx, "set session option", "set-option", "-t", string(sid), name, value)
+	return err
+}
+
+// ClearSessionEnvironment removes one variable from an exact session ID.
+func (c Client) ClearSessionEnvironment(ctx context.Context, sid SessionID, name string) error {
+	if err := validateID(string(sid), '$'); err != nil {
+		return fmt.Errorf("clear session environment target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "clear session environment", "set-environment", "-t", string(sid), "-u", name)
 	return err
 }
 
@@ -240,9 +272,9 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 
 	windows := make([]Window, 0, len(records))
 	for index, record := range records {
-		fields := strings.SplitN(record, "\t", 8)
-		if len(fields) != 8 || fields[1] == "" {
-			return nil, fmt.Errorf("parse tmux window record %d: expected 8 fields and a nonempty name", index+1)
+		fields := strings.SplitN(record, "\t", 9)
+		if len(fields) != 9 || fields[1] == "" {
+			return nil, fmt.Errorf("parse tmux window record %d: expected 9 fields and a nonempty name", index+1)
 		}
 		if err := validateID(fields[0], '@'); err != nil {
 			return nil, fmt.Errorf("parse tmux window record %d: %w", index+1, err)
@@ -255,7 +287,8 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 			Role:    fields[4],
 			Harness: fields[5],
 			Model:   fields[6],
-			Process: fields[7],
+			Effort:  fields[7],
+			Process: fields[8],
 		})
 	}
 	return windows, nil
@@ -317,6 +350,17 @@ func (c Client) KillSession(ctx context.Context, sid SessionID) error {
 		return fmt.Errorf("kill session target: %w", err)
 	}
 	_, err := c.tmuxOutput(ctx, "kill session", "kill-session", "-t", string(sid))
+	return err
+}
+
+// KillWindow kills an exact window ID. It exists solely so a relaunch can roll
+// back the one window that invocation created; no command removes a window it
+// did not create.
+func (c Client) KillWindow(ctx context.Context, wid WindowID) error {
+	if err := validateID(string(wid), '@'); err != nil {
+		return fmt.Errorf("kill window target: %w", err)
+	}
+	_, err := c.tmuxOutput(ctx, "kill window", "kill-window", "-t", string(wid))
 	return err
 }
 

@@ -73,7 +73,7 @@ func TestNewSessionUsesCanonicalArgvAndParsesCreatedIDs(t *testing.T) {
 	t.Parallel()
 
 	runner := NewFakeRunner(Response{Stdout: []byte("$4\t@7\t%9\t4321\n")})
-	got, err := New(runner).NewSession(context.Background(), "epic123", "planner", "/repo path", "exec amq coop exec")
+	got, err := New(runner).NewSession(context.Background(), "epic123", "planner", "/repo path", "exec amq coop exec", nil)
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
@@ -87,11 +87,30 @@ func TestNewSessionUsesCanonicalArgvAndParsesCreatedIDs(t *testing.T) {
 	}})
 }
 
+func TestNewSessionPassesEachEnvironmentVariableAsSeparateArgvPair(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{Stdout: []byte("$4\t@7\t%9\t4321\n")})
+	environment := []EnvVar{
+		{Name: "AGENTCTL_SESSION", Value: "epic123"},
+		{Name: "AGENTCTL_ROLE", Value: "planner"},
+		{Name: "AGENTCTL_MANAGED", Value: "1"},
+	}
+	if _, err := New(runner).NewSession(context.Background(), "epic123", "planner", "/repo path", "exec amq coop exec", environment); err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"new-session", "-d", "-s", "epic123", "-n", "planner", "-c", "/repo path",
+		"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
+		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec amq coop exec",
+	}})
+}
+
 func TestNewWindowUsesResolvedSessionIDAndParsesCreatedIDs(t *testing.T) {
 	t.Parallel()
 
 	runner := NewFakeRunner(Response{Stdout: []byte("@8\t%10\t5432\n")})
-	got, err := New(runner).NewWindow(context.Background(), "$4", "codex1", "/repo", "exec amq coop exec --session epic123")
+	got, err := New(runner).NewWindow(context.Background(), "$4", "codex1", "/repo", "exec amq coop exec --session epic123", nil)
 	if err != nil {
 		t.Fatalf("NewWindow() error = %v", err)
 	}
@@ -102,6 +121,25 @@ func TestNewWindowUsesResolvedSessionIDAndParsesCreatedIDs(t *testing.T) {
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"new-window", "-d", "-t", "$4", "-n", "codex1", "-c", "/repo",
 		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec amq coop exec --session epic123",
+	}})
+}
+
+func TestNewWindowPassesEachEnvironmentVariableAsSeparateArgvPair(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{Stdout: []byte("@8\t%10\t5432\n")})
+	environment := []EnvVar{
+		{Name: "AGENTCTL_SESSION", Value: "epic123"},
+		{Name: "AGENTCTL_ROLE", Value: "codex1"},
+		{Name: "AGENTCTL_MANAGED", Value: "1"},
+	}
+	if _, err := New(runner).NewWindow(context.Background(), "$4", "codex1", "/repo", "exec amq coop exec", environment); err != nil {
+		t.Fatalf("NewWindow() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"new-window", "-d", "-t", "$4", "-n", "codex1", "-c", "/repo",
+		"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=codex1", "-e", "AGENTCTL_MANAGED=1",
+		"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec amq coop exec",
 	}})
 }
 
@@ -140,9 +178,9 @@ func TestCreationRejectsMalformedOutput(t *testing.T) {
 			client := New(runner)
 			var err error
 			if tt.newSession {
-				_, err = client.NewSession(context.Background(), "epic123", "planner", "/repo", "exec agent")
+				_, err = client.NewSession(context.Background(), "epic123", "planner", "/repo", "exec agent", nil)
 			} else {
-				_, err = client.NewWindow(context.Background(), "$1", "worker", "/repo", "exec agent")
+				_, err = client.NewWindow(context.Background(), "$1", "worker", "/repo", "exec agent", nil)
 			}
 			if err == nil {
 				t.Fatal("creation error = nil, want malformed-output error")
@@ -162,11 +200,11 @@ func TestCreationRunnerErrorsAreNotCreationOutputErrors(t *testing.T) {
 		run  func(Client) error
 	}{
 		{name: "session", run: func(client Client) error {
-			_, err := client.NewSession(context.Background(), "epic123", "planner", "/repo", "exec agent")
+			_, err := client.NewSession(context.Background(), "epic123", "planner", "/repo", "exec agent", nil)
 			return err
 		}},
 		{name: "window", run: func(client Client) error {
-			_, err := client.NewWindow(context.Background(), "$1", "worker", "/repo", "exec agent")
+			_, err := client.NewWindow(context.Background(), "$1", "worker", "/repo", "exec agent", nil)
 			return err
 		}},
 	}
@@ -218,6 +256,19 @@ func TestSessionOptionWrappersOwnScopeAndPreserveValues(t *testing.T) {
 	)
 }
 
+func TestClearSessionEnvironmentUsesResolvedIDAndUnsetArgv(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	client := New(runner)
+	if err := client.ClearSessionEnvironment(context.Background(), "$4", "AGENTCTL_ROLE"); err != nil {
+		t.Fatalf("ClearSessionEnvironment() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
+		"set-environment", "-t", "$4", "-u", "AGENTCTL_ROLE",
+	}})
+}
+
 func TestWindowOptionWrappersOwnScopeAndAllowEmptyValue(t *testing.T) {
 	t.Parallel()
 
@@ -247,17 +298,23 @@ func TestTypedTargetsRejectNamesBeforeRunningTmux(t *testing.T) {
 		run  func(Client) error
 	}{
 		{name: "new window session", run: func(client Client) error {
-			_, err := client.NewWindow(context.Background(), "epic123", "worker", "/repo", "exec agent")
+			_, err := client.NewWindow(context.Background(), "epic123", "worker", "/repo", "exec agent", nil)
 			return err
 		}},
 		{name: "session option", run: func(client Client) error {
 			return client.SetSessionOption(context.Background(), "epic123", "@k", "v")
+		}},
+		{name: "session environment", run: func(client Client) error {
+			return client.ClearSessionEnvironment(context.Background(), "epic123", "NAME")
 		}},
 		{name: "window option", run: func(client Client) error {
 			return client.SetWindowOption(context.Background(), "worker", "@k", "v")
 		}},
 		{name: "kill", run: func(client Client) error {
 			return client.KillSession(context.Background(), "epic123")
+		}},
+		{name: "kill window", run: func(client Client) error {
+			return client.KillWindow(context.Background(), "worker")
 		}},
 		{name: "display", run: func(client Client) error {
 			_, err := client.DisplayMessage(context.Background(), "pane")
@@ -289,6 +346,16 @@ func TestKillSessionUsesResolvedID(t *testing.T) {
 		t.Fatalf("KillSession() error = %v", err)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-session", "-t", "$4"}})
+}
+
+func TestKillWindowUsesResolvedID(t *testing.T) {
+	t.Parallel()
+
+	runner := NewFakeRunner(Response{})
+	if err := New(runner).KillWindow(context.Background(), "@9"); err != nil {
+		t.Fatalf("KillWindow() error = %v", err)
+	}
+	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@9"}})
 }
 
 func TestDisplayMessageTargetsCurrentPaneID(t *testing.T) {
@@ -349,23 +416,23 @@ func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
 	t.Parallel()
 
 	runner := NewFakeRunner(Response{Stdout: []byte(
-		"@7\tplanner\t1\t1\tplanner\tclaude\tfable\tweird name\twith tab\n" +
-			"@8\tcodex1\t1\t1\tcodex1\tcodex\t\tcodex\n",
+		"@7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tweird name\twith tab\n" +
+			"@8\tcodex1\t1\t1\tcodex1\tcodex\t\t\tcodex\n",
 	)})
 	got, err := New(runner).ListWindows(context.Background(), "$4")
 	if err != nil {
 		t.Fatalf("ListWindows() error = %v", err)
 	}
 	want := []Window{
-		{ID: "@7", Name: "planner", Managed: "1", Version: "1", Role: "planner", Harness: "claude", Model: "fable", Process: "weird name\twith tab"},
-		{ID: "@8", Name: "codex1", Managed: "1", Version: "1", Role: "codex1", Harness: "codex", Model: "", Process: "codex"},
+		{ID: "@7", Name: "planner", Managed: "1", Version: "1", Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Process: "weird name\twith tab"},
+		{ID: "@8", Name: "codex1", Managed: "1", Version: "1", Role: "codex1", Harness: "codex", Model: "", Effort: "", Process: "codex"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListWindows() = %#v, want %#v", got, want)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"list-windows", "-t", "$4", "-F",
-		"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_process}",
+		"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
 	}})
 }
 
@@ -389,10 +456,10 @@ func TestListWindowsRejectsMalformedOutput(t *testing.T) {
 		name   string
 		stdout string
 	}{
-		{name: "too few fields", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\n"},
-		{name: "wrong id prefix", stdout: "$7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
-		{name: "empty name", stdout: "@7\t\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
-		{name: "blank trailing record", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n\n"},
+		{name: "too few fields", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tclaude\n"},
+		{name: "wrong id prefix", stdout: "$7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n"},
+		{name: "empty name", stdout: "@7\t\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n"},
+		{name: "blank trailing record", stdout: "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tclaude\n\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

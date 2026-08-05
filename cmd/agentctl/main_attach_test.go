@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -186,14 +187,107 @@ func TestRunAttachRefusesEveryFailedOwnershipGateWithEscapeHatch(t *testing.T) {
 	}
 }
 
-func TestRunAttachAttemptsControlModeByResolvedID(t *testing.T) {
+var attachNotice = "agentctl " + buildinfo.Current() + "\n" +
+	"Attaching session \"fleet\" (3 windows) in iTerm2.\n\n" +
+	"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+	"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+	"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+	"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+	"        Prefer esc.\n\n" +
+	"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
+
+var attachNoticeWithoutCount = "agentctl " + buildinfo.Current() + "\n" +
+	"Attaching session \"fleet\" in iTerm2.\n\n" +
+	"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+	"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+	"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+	"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+	"        Prefer esc.\n\n" +
+	"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
+
+const attachWindows = "@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
+	"@8\tcoder\t1\t1\tcoder\tcodex\t\t\tcodex\n" +
+	"@9\treviewer\t1\t1\treviewer\tclaude\t\t\tclaude\n"
+
+var attachListWindowsCall = tmuxx.Call{Executable: "tmux", Args: []string{
+	"list-windows", "-t", "$4", "-F",
+	"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+}}
+
+func TestRunAttachAttemptsControlModeByResolvedIDAndReportsTheSessionStateItObserved(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		afterexit  tmuxx.Response
+		wantReport string
+	}{
+		{
+			name:      "session still present",
+			afterexit: tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is still running.\n\n" +
+				"  re-attach:     agentctl attach --session fleet\n" +
+				"  check status:  agentctl status --session fleet\n" +
+				"  stop it:       agentctl kill --session fleet\n",
+		},
+		{
+			name:       "session gone",
+			afterexit:  tmuxx.Response{Stdout: []byte("$7\tother\n")},
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is no longer present.\n",
+		},
+		{
+			name:      "state unverifiable",
+			afterexit: tmuxx.Response{Err: assertError("list failed")},
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Could not verify whether session $4 is still running: tmux list sessions: list failed\n\n" +
+				"  check status:  agentctl status --session fleet\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runner := tmuxx.NewFakeRunner(
+				tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte(attachWindows)},
+				tmuxx.Response{},
+				tt.afterexit,
+			)
+			var stdout, stderr bytes.Buffer
+
+			code := runWithRunner(context.Background(), []string{"attach", "--session", "fleet"}, &stdout, &stderr, runner, lookupValues(map[string]string{"TERM_PROGRAM": "iTerm.app"}))
+
+			if code != exitOK {
+				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+			}
+			if want := attachNotice + tt.wantReport; stdout.String() != want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+			assertAttachCalls(t, runner,
+				tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+				tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
+				tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+				attachListWindowsCall,
+				tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
+				tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+			)
+		})
+	}
+}
+
+func TestRunAttachOmitsWindowCountWhenItsReadFails(t *testing.T) {
 	t.Parallel()
 
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Err: assertError("count failed")},
 		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
 	)
 	var stdout, stderr bytes.Buffer
 
@@ -202,7 +296,12 @@ func TestRunAttachAttemptsControlModeByResolvedID(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
-	if want := "agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0)\n"; stdout.String() != want {
+	want := attachNoticeWithoutCount +
+		"Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is still running.\n\n" +
+		"  re-attach:     agentctl attach --session fleet\n" +
+		"  check status:  agentctl status --session fleet\n" +
+		"  stop it:       agentctl kill --session fleet\n"
+	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 	if stderr.Len() != 0 {
@@ -212,7 +311,9 @@ func TestRunAttachAttemptsControlModeByResolvedID(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
+		attachListWindowsCall,
 		tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 	)
 }
 
@@ -220,8 +321,9 @@ func TestRunAttachMapsEveryTmuxFailureToTmuxExit(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		responses []tmuxx.Response
+		name       string
+		responses  []tmuxx.Response
+		wantStdout string
 	}{
 		{
 			name: "resolver",
@@ -250,8 +352,10 @@ func TestRunAttachMapsEveryTmuxFailureToTmuxExit(t *testing.T) {
 				{Stdout: []byte("$4\tfleet\n")},
 				{Stdout: []byte("1\n")},
 				{Stdout: []byte("1\n")},
+				{Stdout: []byte(attachWindows)},
 				{Err: assertError("control mode failed")},
 			},
+			wantStdout: attachNotice,
 		},
 	}
 	for _, tt := range tests {
@@ -268,8 +372,11 @@ func TestRunAttachMapsEveryTmuxFailureToTmuxExit(t *testing.T) {
 			if !strings.Contains(stderr.String(), "failed") {
 				t.Fatalf("stderr = %q, want tmux cause", stderr.String())
 			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q, want empty", stdout.String())
+			if stdout.String() != tt.wantStdout {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+			if strings.Contains(stdout.String(), "ended (tmux exit 0)") {
+				t.Fatalf("stdout = %q, must not report a completed attachment", stdout.String())
 			}
 			assertAttachNeverCreates(t, runner.Calls)
 		})

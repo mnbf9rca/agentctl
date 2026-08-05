@@ -30,6 +30,23 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-05
+
+- agentctl: `agentctl bb68e3b`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.222 (Claude Code)`
+- codex-cli: `codex-cli 0.146.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.KJb4PF/verify-live`
+- Probes: all four completed, no surviving throwaway server
+- Attach: recorded y
+- Claude clear: recorded y
+- Codex clear: recorded y
+- Compact (claude): recorded y
+- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: recorded y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
+- Teardown check: PASS
+
 ### 2026-08-03
 
 - agentctl: `agentctl 4be8604`
