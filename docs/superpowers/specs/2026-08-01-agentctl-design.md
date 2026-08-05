@@ -235,9 +235,11 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 3. Existence check, **best-effort and advisory** (§6.7): attempt `list-sessions`; on an exact match → exit 3. On a
    tmux or parse failure, fall through to creation — `new-session` is the authoritative arbiter. A cancelled context
    propagates instead and creates nothing.
-4. Resolve cwd: `--dir` if given, else invocation cwd; pass via `-c` on every window. `--dir` must name an existing
-   **directory**; a path that does not exist and a path that exists as a regular file are both usage errors → exit 2,
-   checked before anything is created (§7).
+4. Resolve cwd: `--dir` if given, else invocation cwd. An explicit relative `--dir` is converted with
+   `filepath.Abs` before validation, creation, or metadata stamping; this is lexical resolution only, with no symlink
+   evaluation. Pass that one absolute string via `-c` on every window and record it in `@agentctl_dir`. `--dir` must
+   name an existing **directory**; a path that does not exist and a path that exists as a regular file are both usage
+   errors → exit 2, checked before anything is created (§7).
 5. First role: `new-session`; remaining roles: `new-window` — canonical argv in §13.2 rows 2–3, where `CMD = exec amq coop exec --session S --me ROLE HARNESS [-- MODEL-ARGS EFFORT-ARGS]` (§3.2.1; the `--` separator appears only when at least one of the two is present), assembled per §12.1. Both use `-P -F` so the launcher receives session/window/pane IDs at creation and never name-matches its own windows.
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
    `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
@@ -611,10 +613,11 @@ window closes they close with it, so nothing surviving records what a missing ro
 (§6.8) could only ask the caller, and exact fleet comparison (#17, §14) is not correctly implementable at all — a
 missing role's configuration would be unknowable.
 
-**`@agentctl_dir`** records the exact resolved string passed to `-c` at launch — the `--dir` value or the invocation
-cwd, verbatim, with no symlink resolution. It is alone in its own option because, unlike every other metadata field, its
-value is unconstrained (§13.3's rule that unconstrained values must not share a delimited field). §13.4 is untouched:
-`pane_current_path` is still never read, and the recorded string is what agentctl passed, not what tmux resolved.
+**`@agentctl_dir`** records the exact absolute string passed to `-c` at launch. An explicit relative `--dir` is first
+resolved lexically with `filepath.Abs`; an omitted flag uses the absolute invocation cwd. Neither path is resolved
+through symlinks. It is alone in its own option because, unlike every other metadata field, its value is unconstrained
+(§13.3's rule that unconstrained values must not share a delimited field). §13.4 is untouched: `pane_current_path` is
+still never read, and the recorded string is what agentctl passed, not what tmux resolved.
 
 **No `@agentctl_version` bump.** The quad is the v1 `@agentctl_fleet` schema; its earlier triple form existed only while
 the unreleased relaunch work was staged. Sessions launched before `@agentctl_fleet` and `@agentctl_dir` exist carry
@@ -738,9 +741,14 @@ reporting the provenance of every field is what keeps an override from silently 
    entry) → exit 3, the same family as §6.3's. `@agentctl_fleet` and `@agentctl_dir` both present → **stored** mode;
    both absent → **legacy** mode; exactly one present, a structurally invalid `@agentctl_fleet`, or fleet roles that
    differ from the roster in names or order → a metadata defect, exit 3, rendering the values observed (§1.1). Stored
-   values are re-validated against §7 on read, because tmux options are advisory (SECURITY.md residual 4).
+   values are re-validated against §7 on read, because tmux options are advisory (SECURITY.md residual 4). A stored
+   `@agentctl_dir` is also required to be absolute before it can supply the effective directory. A relative value from
+   a pre-fix session is refused as a metadata defect (exit 3), naming that value verbatim and directing the caller to
+   an explicit `--dir`; no trustworthy launch-time base remains against which agentctl could resolve it.
 3. **Stored mode**: the role's harness, model, effort and directory come from the options; `--harness`, `--model`, `--effort` and `--dir`
-   each override their own field. **Legacy mode**: refuse (exit 3) unless `--harness` *and* `--dir` are supplied
+   each override their own field. An explicit `--dir` may override an unusable or legacy-relative stored directory;
+   as with every directory override, `@agentctl_dir` remains unchanged and the divergence is reported. **Legacy mode**:
+   refuse (exit 3) unless `--harness` *and* `--dir` are supplied
    (`--model` and `--effort` are optional; absent means empty, the harness defaults). The directory is **never** defaulted to the
    invocation cwd — relaunching one role somewhere the rest of the fleet does not live is exactly the silent
    divergence this refusal exists to prevent.
@@ -780,7 +788,9 @@ reporting the provenance of every field is what keeps an override from silently 
 - `--efforts` shares every structural rule with `--models`: optional, non-nil-but-empty is a usage error, entries are `ROLE:VALUE`, duplicate role entries and entries for undefined roles are rejected, and empty list entries name the raw list and the entry index.
 - Harnesses: `claude` | `codex` only.
 - All rejection cases from the brief's Validation section: unknown harnesses, duplicate roles, duplicate model entries, models for undefined roles, missing values, empty `--roles`, trailing commas, whitespace in names, names beginning with `-`, duplicate command-line options.
-- `--dir`: must be an existing **directory**. Non-existent path and existing-but-a-regular-file are both exit 2, evaluated before any tmux call (§6.1 step 4).
+- `--dir`: must be an existing **directory**. On `launch`, a relative value is made absolute before validation and
+  reuse; on `relaunch`, it is an explicit one-invocation override and is not persisted. Non-existent path and
+  existing-but-a-regular-file are both exit 2, evaluated before any tmux call (§6.1 step 4).
 
 ## 8. Process-identity policy
 
@@ -871,6 +881,10 @@ Consequently:
   branches asserting `kill-window` on the created ID and **no** `kill-session`; a pre-ownership creation failure
   killing nothing; provenance rendered for stored, override and legacy cases; and the relaunched role passing `status`
   and the control chain against its **new** `@agentctl_process` baseline.
+- Relative launch directories: `launch --dir .` and `launch --dir ../sibling` pass and stamp the same hand-derived
+  absolute path; a launch from directory A followed by a relaunch from directory B with the same relative directory
+  name still recreates with A's stored absolute `-c` argv. A pre-fix relative `@agentctl_dir` is refused with exit 3,
+  its stored value verbatim, an explicit `--dir` remedy, and no creation call.
 - Integration tests (build tag `integration`): real tmux on a throwaway socket (`tmux -L agentctl-test-$RANDOM`), windows running stub scripts standing in for harnesses; never the user's server, never real agents.
 - Manual verification checklist (tracked as a backlog issue): re-run the §3.3 spike against current harness versions before first release.
 - CI: `go test ./...`, `go vet ./...`.
