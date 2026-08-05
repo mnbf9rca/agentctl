@@ -36,11 +36,21 @@ func (e *DirectoryError) Error() string {
 func (e *DirectoryError) Unwrap() error { return e.Err }
 
 // SessionExistsError reports that the requested session name is already in use.
-type SessionExistsError struct{ Name string }
+// Cause is present when tmux atomically refused new-session after the advisory
+// existence check missed the session.
+type SessionExistsError struct {
+	Name  string
+	Cause error
+}
 
 func (e *SessionExistsError) Error() string {
+	if e.Cause != nil {
+		return tmuxx.ClassifyError(e.Cause).Error()
+	}
 	return fmt.Sprintf("session %q already exists", e.Name)
 }
+
+func (e *SessionExistsError) Unwrap() error { return e.Cause }
 
 // CreationError reports malformed successful new-session output. It is a
 // pre-ownership error because no typed session ID was obtained.
@@ -190,6 +200,9 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	first := fleet.Roles[0]
 	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {
+		if isDuplicateSessionRefusal(err, session) {
+			return tmuxx.Session{}, &SessionExistsError{Name: session, Cause: err}
+		}
 		if errors.Is(err, tmuxx.ErrCreationOutput) {
 			return tmuxx.Session{}, &CreationError{Session: session, Cause: err}
 		}
@@ -213,6 +226,21 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 		}
 	}
 	return tmuxx.Session{ID: createdSession.SessionID, Name: session}, nil
+}
+
+func isDuplicateSessionRefusal(err error, session string) bool {
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		return false
+	}
+	stderr := string(exitError.Stderr)
+	switch {
+	case strings.HasSuffix(stderr, "\r\n"):
+		stderr = strings.TrimSuffix(stderr, "\r\n")
+	case strings.HasSuffix(stderr, "\n"):
+		stderr = strings.TrimSuffix(stderr, "\n")
+	}
+	return stderr == "duplicate session: "+session
 }
 
 func (l Launcher) clearSessionIdentity(ctx context.Context, sessionID tmuxx.SessionID) {

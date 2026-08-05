@@ -185,7 +185,7 @@ func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestIntegrationLaunchCarriesDuplicateStderrWhenAdvisoryLookupFails(t *testing.T) {
+func TestIntegrationLaunchClassifiesDuplicateSessionWhenAdvisoryLookupFails(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	fixture.createSentinelSession("integration-raced-existing")
 	sentinel := fixture.sentinelSnapshot("integration-raced-existing")
@@ -196,8 +196,8 @@ func TestIntegrationLaunchCarriesDuplicateStderrWhenAdvisoryLookupFails(t *testi
 		"--session", "integration-raced-existing",
 		"--roles", "planner:claude,coder:codex",
 	)
-	if result.exitCode != 6 || result.stdout != "" || !strings.Contains(result.stderr, "duplicate session: integration-raced-existing") {
-		t.Fatalf("launch result = %#v, want tmux duplicate refusal with captured stderr", result)
+	if result.exitCode != 3 || result.stdout != "" || !strings.Contains(result.stderr, "duplicate session: integration-raced-existing") {
+		t.Fatalf("launch result = %#v, want existing-session classification with captured tmux stderr", result)
 	}
 	current := fixture.sentinelSnapshot("integration-raced-existing")
 	if current != sentinel {
