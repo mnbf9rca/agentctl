@@ -66,6 +66,50 @@ func TestCheckSkillVersionReadsVersionOnlyFromMetadata(t *testing.T) {
 	}
 }
 
+func TestCheckSkillVersionRejectsDuplicateMetadataVersion(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n  version: \"0.2.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected duplicate metadata.version values to fail")
+	}
+	if !strings.Contains(stderr, "multiple metadata.version") {
+		t.Fatalf("stderr must identify duplicate metadata.version values, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsUnclosedFrontmatter(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected unclosed frontmatter to fail")
+	}
+	if !strings.Contains(stderr, "frontmatter is not closed") {
+		t.Fatalf("stderr must identify unclosed frontmatter, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionIgnoresNestedMetadata(t *testing.T) {
+	skill := "---\nouter:\n  metadata:\n    version: \"0.3.0\"\nmetadata:\n  version: \"0.2.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected direct metadata.version mismatch to fail")
+	}
+	if !strings.Contains(stderr, "0.2.0") || !strings.Contains(stderr, "0.3.0") {
+		t.Fatalf("stderr must compare the direct metadata.version, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionIgnoresNestedVersion(t *testing.T) {
+	skill := "---\nmetadata:\n  nested:\n    version: \"0.3.0\"\n  version: \"0.2.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected direct metadata.version mismatch to fail")
+	}
+	if !strings.Contains(stderr, "0.2.0") || !strings.Contains(stderr, "0.3.0") {
+		t.Fatalf("stderr must compare the direct metadata.version, got %q", stderr)
+	}
+}
+
 func TestCheckSkillVersionRejectsMissingMetadataVersion(t *testing.T) {
 	stderr, err := runSkillVersionCheck(t, "---\nmetadata:\n  owner: agentctl\n---\n", "0.3.0")
 	if err == nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,22 +71,25 @@ func (r *pairingRepo) rev(t *testing.T, ref string) string {
 	return string(out[:len(out)-1])
 }
 
-func (r *pairingRepo) check(t *testing.T, base, head string) error {
+func (r *pairingRepo) check(t *testing.T, base, head string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("./hack/check-skill-pairing.sh", base, head)
 	cmd.Dir = r.dir
-	return cmd.Run()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func TestCheckSkillPairing(t *testing.T) {
 	tests := []struct {
-		name     string
-		wantFail bool
-		setup    func(t *testing.T, r *pairingRepo, initial string) (base, head string)
+		name       string
+		wantExit   int
+		wantOutput string
+		setup      func(t *testing.T, r *pairingRepo, initial string) (base, head string)
 	}{
 		{
-			name:     "command surface change without skill fails",
-			wantFail: true,
+			name:       "command surface change without skill fails",
+			wantExit:   1,
+			wantOutput: "command surface changed without skills/agentctl/",
 			setup: func(t *testing.T, r *pairingRepo, initial string) (string, string) {
 				r.git(t, "switch", "-qc", "feature")
 				r.write(t, "cmd/agentctl/main.go", []byte("package main\n"), 0o644)
@@ -110,8 +114,9 @@ func TestCheckSkillPairing(t *testing.T) {
 			},
 		},
 		{
-			name:     "override outside PR range fails",
-			wantFail: true,
+			name:       "override outside PR range fails",
+			wantExit:   1,
+			wantOutput: "command surface changed without skills/agentctl/",
 			setup: func(t *testing.T, r *pairingRepo, initial string) (string, string) {
 				r.git(t, "switch", "-qc", "feature")
 				r.write(t, "cmd/agentctl/main.go", []byte("package main\n"), 0o644)
@@ -127,8 +132,9 @@ func TestCheckSkillPairing(t *testing.T) {
 			},
 		},
 		{
-			name:     "config surface change without skill fails",
-			wantFail: true,
+			name:       "config surface change without skill fails",
+			wantExit:   1,
+			wantOutput: "command surface changed without skills/agentctl/",
 			setup: func(t *testing.T, r *pairingRepo, initial string) (string, string) {
 				r.git(t, "switch", "-qc", "feature")
 				r.write(t, "internal/config/config.go", []byte("package config\n"), 0o644)
@@ -148,8 +154,9 @@ func TestCheckSkillPairing(t *testing.T) {
 			},
 		},
 		{
-			name:     "invalid range fails closed",
-			wantFail: true,
+			name:       "invalid range fails closed",
+			wantExit:   128,
+			wantOutput: "fatal:",
 			setup: func(_ *testing.T, _ *pairingRepo, initial string) (string, string) {
 				return "deadbeef", initial
 			},
@@ -164,12 +171,25 @@ func TestCheckSkillPairing(t *testing.T) {
 			}
 			r, initial := newPairingRepo(t, initialMessage)
 			base, head := tc.setup(t, r, initial)
-			err := r.check(t, base, head)
-			if tc.wantFail && err == nil {
-				t.Fatal("expected pairing check to fail")
+			output, err := r.check(t, base, head)
+			if tc.wantExit == 0 {
+				if err != nil {
+					t.Fatalf("pairing check failed: %v\n%s", err, output)
+				}
+				return
 			}
-			if !tc.wantFail && err != nil {
-				t.Fatalf("pairing check failed: %v", err)
+			if err == nil {
+				t.Fatalf("expected pairing check to exit %d", tc.wantExit)
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("pairing check returned non-exit error: %v", err)
+			}
+			if exitErr.ExitCode() != tc.wantExit {
+				t.Fatalf("exit = %d, want %d\n%s", exitErr.ExitCode(), tc.wantExit, output)
+			}
+			if !strings.Contains(output, tc.wantOutput) {
+				t.Fatalf("output must contain %q, got %q", tc.wantOutput, output)
 			}
 		})
 	}

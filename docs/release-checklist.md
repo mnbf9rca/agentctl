@@ -147,7 +147,37 @@ tmux server. Create a temporary `HOME`, run `agentctl skill install` with that
 an empty throwaway project and preserve any separately configured harness
 authentication needed for the live session.
 
-- [ ] `HOME="$skill_home" ./bin/agentctl skill install` reported successful
+Set up the isolated socket and fleet from the clean primary checkout. The tmux
+shim scopes every tmux command agentctl runs; `amq coop init` scopes AMQ to the
+throwaway project:
+
+```bash
+probe_top="$(git rev-parse --show-toplevel)"
+probe_root="$(mktemp -d /tmp/agentctl-skill-verify.XXXXXX)"
+original_home="$HOME"
+original_path="$PATH"
+skill_home="$probe_root/home"
+probe_project="$probe_root/project"
+probe_bin="$probe_root/bin"
+probe_socket="agentctl-skill-verify-$$"
+real_tmux="$(command -v tmux)"
+mkdir -p "$skill_home" "$probe_project" "$probe_bin"
+cat >"$probe_bin/tmux" <<EOF
+#!/usr/bin/env bash
+exec "$real_tmux" -L "$probe_socket" "\$@"
+EOF
+chmod 0755 "$probe_bin/tmux"
+export HOME="$skill_home"
+export PATH="$probe_bin:$PATH"
+cd "$probe_project"
+amq coop init --agents a,b,user
+"$probe_top/bin/agentctl" skill install
+"$probe_top/bin/agentctl" launch --session skillverify \
+  --roles a:claude,b:codex --dir "$probe_project"
+"$probe_top/bin/agentctl" attach --session skillverify
+```
+
+- [ ] `"$probe_top/bin/agentctl" skill install` reported successful
       installs under both `$skill_home/.claude/skills/agentctl/` and
       `$skill_home/.agents/skills/agentctl/`
 - [ ] The stub fleet ran only on its named throwaway tmux socket, both harnesses
@@ -160,6 +190,18 @@ authentication needed for the live session.
       until an operator repairs the ambiguity with raw tmux
 - [ ] Tear down the stub fleet and its named tmux server, then remove the
       temporary project and `HOME`; no process or skill-probe file survived
+
+After the observations, tear down only the named probe resources and restore
+the terminal environment:
+
+```bash
+"$probe_top/bin/agentctl" kill --session skillverify
+"$real_tmux" -L "$probe_socket" kill-server 2>/dev/null || true
+cd "$probe_top"
+export HOME="$original_home"
+export PATH="$original_path"
+rm -rf -- "$probe_root"
+```
 
 ## --measure (only when `internal/tmuxx.payloadDelay` changes)
 
@@ -180,7 +222,7 @@ gh pr create --base release --head main \
   --title "Release v$(hack/next-version.sh)" \
   --body-file .github/PULL_REQUEST_TEMPLATE/release-promotion.md
 ```
-- [ ] The correct box is ticked — "Checklist run" (Parts A–B passed, evidence
+- [ ] The correct box is ticked — "Checklist run" (Parts A–C passed, evidence
       committed on main) or "Checklist not required"
 - [ ] The `Version:` line is filled in with `hack/next-version.sh`'s output
 
