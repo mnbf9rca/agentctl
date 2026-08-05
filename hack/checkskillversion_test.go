@@ -143,6 +143,50 @@ func TestCheckSkillVersionRejectsMalformedMetadataContent(t *testing.T) {
 	}
 }
 
+func TestCheckSkillVersionRejectsQuotedVersionKey(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n  \"version\": \"0.2.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected quoted version key to fail")
+	}
+	if !strings.Contains(stderr, "unsupported key syntax") {
+		t.Fatalf("stderr must reject quoted key syntax, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsQuotedMetadataKey(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n\"metadata\": { version: \"0.2.0\" }\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected quoted metadata key to fail")
+	}
+	if !strings.Contains(stderr, "unsupported key syntax") {
+		t.Fatalf("stderr must reject quoted key syntax, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsIndentedOpeningDelimiter(t *testing.T) {
+	skill := "  ---\nmetadata:\n  version: \"0.3.0\"\n---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected indented opening delimiter to fail")
+	}
+	if !strings.Contains(stderr, "does not start on line 1") {
+		t.Fatalf("stderr must reject indented opening delimiter, got %q", stderr)
+	}
+}
+
+func TestCheckSkillVersionRejectsIndentedClosingDelimiter(t *testing.T) {
+	skill := "---\nmetadata:\n  version: \"0.3.0\"\n  ---\n"
+	stderr, err := runSkillVersionCheck(t, skill, "0.3.0")
+	if err == nil {
+		t.Fatal("expected indented closing delimiter to fail")
+	}
+	if !strings.Contains(stderr, "is not a mapping") {
+		t.Fatalf("stderr must reject indented closing delimiter, got %q", stderr)
+	}
+}
+
 func TestCheckSkillVersionRejectsMissingMetadataVersion(t *testing.T) {
 	stderr, err := runSkillVersionCheck(t, "---\nmetadata:\n  owner: agentctl\n---\n", "0.3.0")
 	if err == nil {

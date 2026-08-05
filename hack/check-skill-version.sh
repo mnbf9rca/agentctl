@@ -16,10 +16,10 @@ if ! skill_version="$(awk '
     exit
   }
   NR == 1 {
-    if (trim($0) != "---") fail("skill frontmatter does not start on line 1")
+    if ($0 != "---") fail("skill frontmatter does not start on line 1")
     next
   }
-  trim($0) == "---" {
+  $0 == "---" {
     closed = 1
     exit
   }
@@ -36,6 +36,9 @@ if ! skill_version="$(awk '
       fail("frontmatter line " NR " is not a mapping")
     }
     key = substr(line, 1, colon - 1)
+    if (key !~ /^[A-Za-z0-9_-]+$/) {
+      fail("frontmatter line " NR " has unsupported key syntax")
+    }
     if (key != "version") next
     if (version_seen) fail("multiple metadata.version")
     version_seen = 1
@@ -63,6 +66,9 @@ if ! skill_version="$(awk '
       fail("frontmatter line " NR " is not a mapping")
     }
     key = substr($0, 1, colon - 1)
+    if (key !~ /^[A-Za-z0-9_-]+$/) {
+      fail("frontmatter line " NR " has unsupported key syntax")
+    }
     value = trim(substr($0, colon + 1))
     in_metadata = 0
     if (key != "metadata") next
