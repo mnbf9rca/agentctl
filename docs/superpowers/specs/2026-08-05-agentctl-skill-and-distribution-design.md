@@ -64,25 +64,36 @@ version the skill documents. No harness-specific fields; neither harness enforce
 
 SKILL.md covers, in order:
 
-1. **Agent command surface**: `status` (including `--json`), `clear`, `compact`, `kill`,
+1. **Self-identification before any command**: every agentctl-launched window carries
+   `AGENTCTL_ROLE` (own role), `AGENTCTL_SESSION` (own fleet), and `AGENTCTL_MANAGED`
+   in its environment (product spec §13.2 row 5a), alongside the AMQ identity `AM_ME`/
+   `AM_SESSION` set by `amq coop exec` and tmux's `TMUX_PANE`. The agent verifies who
+   and where it is from these before issuing commands: `AGENTCTL_SESSION` is what a bare
+   invocation resolves to (it sits second in §4.1 precedence), so inside a pane, bare
+   commands act on the agent's own fleet, and targeting any other fleet requires an
+   explicit `--session`. `AM_SESSION` disagreeing with `AGENTCTL_SESSION` means the
+   environment is not what the agent assumes — stop and report rather than target. The
+   skill also states the limit: these variables are advisory identity fixed at exec
+   time, the basis of the accident guards, not a permission boundary.
+2. **Agent command surface**: `status` (including `--json`), `clear`, `compact`, `kill`,
    and the session resolution order (product spec §4.1).
-2. **Reading `status` as claims**: `missing`, `dead`, `ambiguous`, `unmanaged`, `running`
+3. **Reading `status` as claims**: `missing`, `dead`, `ambiguous`, `unmanaged`, `running`
    are distinct factual claims (product spec §6.3); liveness must not be inferred from
    anything else. Full table in `references/status-states.md`.
-3. **Operational rules the binary does not enforce**, each stated with its reason:
+4. **Operational rules the binary does not enforce**, each stated with its reason:
    no control commands to a role not released back to you; none while the fleet
    saturates the host (SECURITY.md residual 1); delivery is not execution — verify by
    observing subsequent behaviour, not exit 0; the self-target guard is an accident
    guard, not a permission boundary.
-4. **Context-hygiene policy** (from #78's AMENDED 2026-08-04 section): `clear` between
+5. **Context-hygiene policy** (from #78's AMENDED 2026-08-04 section): `clear` between
    unrelated tasks and wedged workers; `compact` for same-subsystem continuity, mid-task
    context pressure, and the reviewer mid-batch; never mid review-fix loop or under host
    saturation; confirm the reset before the next dispatch. Stated with its corollary:
    routine clearing is only safe because dispatch messages are self-contained.
-5. **Deliberate can't-dos**: no arbitrary keystrokes, no free-text payloads, no AMQ
+6. **Deliberate can't-dos**: no arbitrary keystrokes, no free-text payloads, no AMQ
    state access, no per-window restart until #79's successor lands.
-6. **Operator-only surface**: `launch` and `attach`, one line each.
-7. **Exit-code branching**: pointer to `references/exit-codes.md`.
+7. **Operator-only surface**: `launch` and `attach`, one line each.
+8. **Exit-code branching**: pointer to `references/exit-codes.md`.
 
 ### 3.3 Machine-readable conventions
 
