@@ -98,6 +98,9 @@ func TestRunSkillInstallMapsUnownedRefusalAndForce(t *testing.T) {
 	if !strings.Contains(stdout.String(), targets[0].Dir+": installed") || !strings.Contains(stdout.String(), targets[1].Dir+": current") {
 		t.Fatalf("forced install stdout = %q, want installed first target and current second target", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), offending+": removed\n") {
+		t.Fatalf("forced install stdout = %q, want removed path %q", stdout.String(), offending)
+	}
 	if _, err := os.Stat(offending); !os.IsNotExist(err) {
 		t.Fatalf("offending file survives forced replacement: %v", err)
 	}

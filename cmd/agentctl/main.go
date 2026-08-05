@@ -67,7 +67,8 @@ var commandUsage = map[string]string{
 	"skill": "Usage: agentctl skill install [--force] | agentctl skill status\n\n" +
 		"install writes this binary's embedded agent skill to ~/.claude/skills/agentctl\n" +
 		"and ~/.agents/skills/agentctl; it refuses to overwrite files it cannot prove\n" +
-		"it wrote (--force overrides). status reports current|stale|modified|absent|unmanaged\n" +
+		"it wrote. --force replaces an unowned target and reports every removed file.\n" +
+		"status reports current|stale|modified|absent|unmanaged\n" +
 		"per target.\n",
 	"version": "Usage: agentctl version\n",
 }

@@ -272,6 +272,31 @@ func TestInstallRefusesSymlinkedTargetDirectoryWithoutFollowingIt(t *testing.T) 
 	}
 }
 
+func TestInstallForceReportsEveryFileRemovedWhileReplacingTarget(t *testing.T) {
+	base := t.TempDir()
+	target := Target{Harness: "claude", Dir: filepath.Join(base, "agentctl")}
+	files := []string{
+		filepath.Join(target.Dir, "mine.txt"),
+		filepath.Join(target.Dir, "nested", "other.txt"),
+	}
+	for _, filename := range files {
+		if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, []byte("operator-owned\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	outcomes, err := Install(testTree(map[string]string{"SKILL.md": "shipped\n"}), "agentctl", "0.3.0", []Target{target}, true)
+	if err != nil {
+		t.Fatalf("Install(force): %v", err)
+	}
+	if got := outcomes[0]; got.Action != "installed" || !reflect.DeepEqual(got.Removed, files) {
+		t.Fatalf("force outcome = %#v, want installed with removed files %#v", got, files)
+	}
+}
+
 func TestInstallReportsSuccessfulFirstTargetWhenSecondTargetFails(t *testing.T) {
 	home := t.TempDir()
 	targets := Targets(home)

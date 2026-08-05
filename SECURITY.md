@@ -66,9 +66,10 @@ agentctl writes files only under `$HOME/.claude/skills/agentctl/` and
 `agentctl skill install` (directories `0755`, files `0644`, plus a
 `.agentctl-skill.json` manifest recording the version and SHA-256 of every
 file written). Installs are manifest-checked and refuse to overwrite files
-agentctl cannot prove it wrote, absent `--force`. No launch, control,
-status, or kill path writes to the filesystem; `launch` reads the manifests
-(only) to report skill/binary version skew. The skill content is a
+agentctl cannot prove it wrote. When ownership cannot be proved, `--force`
+replaces the target directory and reports every removed file. No launch,
+control, status, or kill path writes to the filesystem; `launch` reads the
+manifests (only) to report skill/binary version skew. The skill content is a
 build-time constant; target paths are fixed with no caller-supplied
 components; a failed `$HOME` resolution is a refusal, not a fallback.
 Otherwise agentctl creates no persistent files (no database, no state

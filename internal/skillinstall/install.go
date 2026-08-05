@@ -72,12 +72,20 @@ func installTarget(tree fs.FS, root string, next Manifest, target Target, force 
 
 	writePaths := manifestWritePaths(target.Dir, next)
 	if replace {
+		removed, err := replacementFiles(target.Dir)
+		if err != nil {
+			failure := fmt.Errorf("enumerate unowned target %q before replacement: %w", target.Dir, err)
+			outcome.Action = "failed"
+			outcome.Detail = describeWriteFailure(failure, writePaths, outcome.Written)
+			return outcome, failure
+		}
 		if err := os.RemoveAll(target.Dir); err != nil {
 			failure := fmt.Errorf("remove unowned target %q: %w", target.Dir, err)
 			outcome.Action = "failed"
 			outcome.Detail = describeWriteFailure(failure, writePaths, outcome.Written)
 			return outcome, failure
 		}
+		outcome.Removed = append(outcome.Removed, removed...)
 		existing = nil
 	}
 
@@ -143,6 +151,20 @@ func installTarget(tree fs.FS, root string, next Manifest, target Target, force 
 	outcome.Written = append(outcome.Written, filepath.Join(target.Dir, ManifestName))
 	outcome.Action = "installed"
 	return outcome, nil
+}
+
+func replacementFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			files = append(files, filename)
+		}
+		return nil
+	})
+	return files, err
 }
 
 func inspectTarget(dir string, next Manifest) (*Manifest, bool, error) {
