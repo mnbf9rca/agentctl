@@ -61,14 +61,18 @@ post-detach session-state report beginning with
 
 ### Relaunch a missing role
 
-The wrapper resolves `relverify` to its exact tmux session ID, resolves role
-`b` to its exact window and pane IDs, and prints the resolved ID in this setup
-command:
+Relaunch deliberately creates a **new process**. It does not preserve the old
+conversation, context, or scrollback. The wrapper resolves `relverify` to its
+exact tmux session ID, resolves role `b` to its exact window and pane IDs, and
+records the original pane ID before printing the resolved window ID in this
+setup command:
 
 ```text
 tmux kill-window -t @ID
 ```
 
+- [ ] In the codex tab, type junk without pressing Enter; answer `y` when it is
+      ready for the relaunch process-discontinuity check
 - [ ] The wrapper ran that exact-ID removal, then ran
       `./bin/agentctl status --session relverify` and printed `RELAUNCH PASS
       (role b reported missing after exact-ID removal)`
@@ -79,10 +83,34 @@ tmux kill-window -t @ID
       agentctl: relaunched b in relverify: window @ID, pane %ID, harness codex (stored), model default (stored), effort high (stored), dir REPO_ROOT (stored)
       ```
 
+- [ ] The wrapper compared the resolved pane IDs and printed `RELAUNCH PASS
+      (role b pane changed from %OLD to %NEW)`. Reusing `%OLD` is a release
+      failure
 - [ ] A second `./bin/agentctl status --session relverify` printed `RELAUNCH
       PASS (role b restored to running)`
-- [ ] In the relaunched codex tab, wait for the TUI to show its ready input
-      surface; answer `y` only after observing it
+- [ ] Answer `y` to the wrapper's single observation prompt only when its exact
+      claim is visible:
+
+      ```text
+      One of the fleet's harnesses was terminated, and agentctl relaunched it from
+      the fleet's stored configuration. The new pane is a new process: its harness,
+      model and effort carry over; its conversation does not, so the junk you typed
+      is gone.
+
+      Do you see a fresh, ready codex input surface with no trace of that junk?
+      ```
+
+The pane-ID inequality is the machine proof of process discontinuity. Junk
+absence alone is nearly tautological because a new pane trivially has no input
+history; its value is direct human observability when paired with that machine
+proof. Together they distinguish a new process holding role `b` from the old
+process merely being reattached, and they guard any future restart command that
+might reuse a pane.
+
+The provenance line proves **CONFIG CONTINUITY**: harness, model, effort, and
+directory came from the fleet's stored configuration. The pane-ID and junk
+check proves **PROCESS DISCONTINUITY**: this is genuinely a new process with no
+surviving conversation. Neither half alone is the relaunch contract.
 
 ### Automated teardown and evidence
 
@@ -91,7 +119,10 @@ tmux kill-window -t @ID
       the last session and the server exited. Both are expected absence results;
       the wrapper recorded which occurred in `docs/release-verification-notes.md`,
       no matching tmux process remained, and it printed `ALL VERIFIED — evidence appended`
-- [ ] `docs/release-verification-notes.md` committed
+- [ ] Commit `docs/release-verification-notes.md` as the **last** step of the
+      ceremony, only after the attach-narration restyle has merged and the full
+      checklist has been rerun against the shipped output. Never commit
+      provisional evidence from an earlier run
 
 Every prompt accepts exactly `y` or `n`. Empty input and other text re-prompt; `n`
 fails closed after teardown is attempted.

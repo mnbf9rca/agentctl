@@ -236,7 +236,7 @@ case "$1" in
       echo 'relverify a claude default default %5 2.1.220 running'
       if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
         if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-          echo 'relverify b codex default high %12 codex running'
+          echo "relverify b codex default high ${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12} codex running"
         else
           echo 'relverify b codex default high %9 codex running'
         fi
@@ -266,7 +266,8 @@ case "$1" in
     ;;
   relaunch)
     touch "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
-    echo "agentctl: relaunched b in relverify: window @11, pane %12, harness codex (stored), model default (stored), effort high (stored), dir $PWD (stored)"
+    pane_id=${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}
+    echo "agentctl: relaunched b in relverify: window @11, pane $pane_id, harness codex (stored), model default (stored), effort high (stored), dir $PWD (stored)"
     ;;
   kill)
     rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
@@ -291,7 +292,7 @@ case "$1" in
   list-windows)
     if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
       if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-        printf '@11\t%%12\tb\n'
+        printf '@11\t%s\tb\n' "${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}"
       else
         printf '@8\t%%9\tb\n'
       fi
@@ -394,15 +395,15 @@ func (fixture liveFixture) tmuxCalls(t *testing.T) []string {
 
 func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8))
+	output, err := fixture.run(t, strings.Repeat("y\n", 9))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
 	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
 		t.Fatalf("output missing completion marker:\n%s", output)
 	}
-	if got := strings.Count(output, "recorded: y"); got != 8 {
-		t.Fatalf("recorded y count = %d, want 8\n%s", got, output)
+	if got := strings.Count(output, "recorded: y"); got != 9 {
+		t.Fatalf("recorded y count = %d, want 9\n%s", got, output)
 	}
 	notes, err := os.ReadFile(filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
 	if err != nil {
@@ -431,7 +432,7 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 
 func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8))
+	output, err := fixture.run(t, strings.Repeat("y\n", 9))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
@@ -479,12 +480,52 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"- Relaunch: PASS (stored codex/default/high provenance); codex ready: recorded y",
+		"- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: recorded y",
 		"- Teardown status: exit 3 (session absent; other tmux sessions remained)",
 	} {
 		if !strings.Contains(string(notes), want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
 		}
+	}
+}
+
+func TestLiveVerificationPairsNewPaneWithFreshInputObservation(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"In the codex tab, type junk into the input box again; do NOT press Enter.",
+		"RELAUNCH PASS (role b pane changed from %9 to %12)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	script, readErr := os.ReadFile(filepath.Join(fixture.dir, "hack/release-verify.sh"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	wantPrompt := `One of the fleet's harnesses was terminated, and agentctl relaunched it from
+the fleet's stored configuration. The new pane is a new process: its harness,
+model and effort carry over; its conversation does not, so the junk you typed
+is gone.
+
+Do you see a fresh, ready codex input surface with no trace of that junk?`
+	if !strings.Contains(string(script), wantPrompt) {
+		t.Fatalf("release verifier missing final relaunch prompt:\n%s", wantPrompt)
+	}
+}
+
+func TestLiveVerificationRejectsReusedRelaunchPaneID(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_RELAUNCHED_PANE_ID=%9")
+	if err == nil {
+		t.Fatalf("release verification accepted reused pane ID:\n%s", output)
+	}
+	if !strings.Contains(output, "RELAUNCH FAIL (recreated role b reused original pane %9)") {
+		t.Fatalf("output missing reused-pane failure:\n%s", output)
 	}
 }
 
@@ -544,7 +585,7 @@ func TestLiveVerificationRefusesExistingSessionWithoutKilling(t *testing.T) {
 
 func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure")
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure")
 	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (agentctl status") {
 		t.Fatalf("unexpected status failure was not rejected: err=%v\n%s", err, output)
 	}
@@ -552,7 +593,7 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 
 func TestLiveVerificationAcceptsNoServerStatusAsAbsent(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: tmux list sessions: exit status 1: no server running")
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: tmux list sessions: exit status 1: no server running")
 	if err != nil {
 		t.Fatalf("no-server status was not accepted as absence: %v\n%s", err, output)
 	}
@@ -567,7 +608,7 @@ func TestLiveVerificationAcceptsNoServerStatusAsAbsent(t *testing.T) {
 
 func TestLiveVerificationRejectsPgrepFailure(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_PGREP_CODE=2")
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_PGREP_CODE=2")
 	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (pgrep exited 2)") {
 		t.Fatalf("pgrep failure was not rejected: err=%v\n%s", err, output)
 	}
@@ -575,7 +616,7 @@ func TestLiveVerificationRejectsPgrepFailure(t *testing.T) {
 
 func TestLiveVerificationWaitsForTmuxAttachClientToExit(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_PGREP_CODES=0,1")
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_PGREP_CODES=0,1")
 	if err != nil {
 		t.Fatalf("transient tmux survivor was not given time to exit: %v\n%s", err, output)
 	}
@@ -586,7 +627,7 @@ func TestLiveVerificationWaitsForTmuxAttachClientToExit(t *testing.T) {
 
 func TestLiveVerificationPromptsRejectInvalidInput(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, "\nmaybe\n"+strings.Repeat("y\n", 8))
+	output, err := fixture.run(t, "\nmaybe\n"+strings.Repeat("y\n", 9))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
