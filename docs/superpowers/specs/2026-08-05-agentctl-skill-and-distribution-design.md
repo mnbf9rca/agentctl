@@ -50,7 +50,7 @@ own issue contracts; marketplace or npx packaging (rejected, §2).
 skills/agentctl/
   SKILL.md            # ≤150 lines; the budget is enforced by the contract test
   references/
-    status-states.md  # full semantics table for the five status states
+    status-states.md  # full semantics table for the six status states
     exit-codes.md     # exit-code table (§3.3)
 ```
 
@@ -77,7 +77,8 @@ SKILL.md covers, in order:
    time, the basis of the accident guards, not a permission boundary.
 2. **Agent command surface**: `status` (including `--json`), `clear`, `compact`, `kill`,
    and the session resolution order (product spec §4.1).
-3. **Reading `status` as claims**: `missing`, `dead`, `ambiguous`, `unmanaged`, `running`
+3. **Reading `status` as claims**: `ambiguous`, `unmanaged`, `missing`, `dead`,
+   `unexpected-process`, `running` — the §6.3 precedence order —
    are distinct factual claims (product spec §6.3); liveness must not be inferred from
    anything else. Full table in `references/status-states.md`.
 4. **Operational rules the binary does not enforce**, each stated with its reason:
