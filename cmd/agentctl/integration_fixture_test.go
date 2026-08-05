@@ -411,6 +411,7 @@ func (f *integrationFixture) installStubs() {
 	}
 
 	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f.t.Setenv("HOME", f.t.TempDir())
 	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
 	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
 

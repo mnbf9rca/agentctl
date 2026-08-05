@@ -60,6 +60,7 @@ Commands:
   clear     deliver /clear to a role
   compact   deliver /compact to a role
   kill      terminate a managed fleet
+  skill     install or inspect the embedded agent skill
   version   report this binary's build identity
 `
 	tests := []struct {
