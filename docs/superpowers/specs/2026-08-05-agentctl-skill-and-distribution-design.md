@@ -103,9 +103,9 @@ The contract test (§5.1) parses these conventions, so the skill must maintain t
 - Every documented invocation appears in a fenced code block as a line starting
   `agentctl `; flags appear in their `-flag` spelling.
 - `references/exit-codes.md` holds one table whose first column is the numeric code and
-  whose second column is the constant name (`exitOK`, `exitUsage`, `exitSession`,
-  `exitRole`, `exitUnsafe`, `exitTmux`, `exitMissingExecutable`, `exitLaunch`, plus any
-  added later).
+  whose second column is the constant name (`exitOK`, `exitUnclassified`, `exitUsage`,
+  `exitSession`, `exitRole`, `exitUnsafe`, `exitTmux`, `exitMissingExecutable`,
+  `exitLaunch`, plus any added later).
 - `references/status-states.md` names each status state in a backticked table cell.
 
 ## 4. Embedding and the `skill` command group (#80)
@@ -136,15 +136,21 @@ Partial-write failure reports every path written and every path not written (§1
 exits `exitUnclassified` (1). Usage errors exit `exitUsage` (2). No other command writes
 these paths; `launch`, control commands, and `status` never install or repair the skill.
 
+Files listed in the target's existing manifest but absent from the tree being installed
+are removed by the install — they are provably agentctl's — and every removal is
+reported by path (§1.1). A manifest-listed file whose hash no longer matches falls under
+the ownership rule above, not silent deletion.
+
 There is no uninstall subcommand in v1; the manifest makes manual removal safe and
 auditable. YAGNI until someone asks.
 
 ### 4.3 `agentctl skill status`
 
-Reports, per target directory, one factual claim: `current` (manifest present, version
-equals binary, hashes match), `stale` (manifest present, version differs), `modified`
-(manifest present, hashes differ), `absent` (no directory or no manifest), or
-`unmanaged` (directory present, no manifest). Exit 0 whenever the report was produced;
+Reports, per target directory, one factual claim, evaluated in this order with the
+first match winning: `absent` (no target directory), `unmanaged` (directory present, no
+manifest), `stale` (manifest version differs from the binary — content comparison
+across versions is not meaningful), `modified` (version matches, hashes differ),
+`current` (version matches, hashes match). Exit 0 whenever the report was produced;
 the state lives in the output, mirroring `status` semantics. This answers #80's "does
 this skill match this binary?" acceptance question in one command.
 
@@ -154,7 +160,11 @@ After a successful `launch`, agentctl checks the two manifests (its own files, n
 else). If a manifest exists and its version differs from the binary, launch prints one
 line to stderr: the installed version, the binary version, and the remediation command.
 If no manifest exists anywhere, launch stays silent — never installed means never opted
-in, and nagging is not a factual claim anyone needs. This is the only skill-related
+in, and nagging is not a factual claim anyone needs. A manifest that exists but cannot
+be read or parsed produces one stderr line stating that fact — never silence, and never
+a claimed version (§1.1). The notice lines print after the launch confirmation output
+(#121), as the final stderr lines; the launch exit code is unchanged in every case — a
+skill-notice failure is never a launch failure. This is the only skill-related
 behaviour attached to any other command.
 
 ## 5. Drift gates
@@ -191,11 +201,17 @@ skill.
 
 A `hack/` script (shellcheck-clean, exercised by a Go test like the other hack scripts)
 diffs the PR range: if `cmd/agentctl/**` or `internal/**` paths that define the command
-surface changed and `skills/agentctl/**` did not, the check fails unless the PR body
-carries the literal token `[skill-unaffected]`. The override exists because surface-
-neutral refactors under those paths are common; it is cheap, explicit, and visible to
-the reviewer gate. This catches the human failure (touched the CLI, forgot the doc);
-§5.1 catches the mechanical one.
+surface changed and `skills/agentctl/**` did not, the check fails unless a commit
+message within the PR range carries the literal token `[skill-unaffected]`. The
+override lives in commit messages, not the PR body: a body is attacker-editable free
+text that can change after a green run, while a commit message is immutable per head
+SHA and re-triggers CI when it changes. The script reads the messages itself
+(`git log` over the range); the workflow passes only refs, via `env:`, and never
+interpolates event text into `run:`. The check executes only on `pull_request` events —
+on push (including the squash merge, which may not carry the token) it is skipped. The
+override exists because surface-neutral refactors under those paths are common; it is
+cheap, explicit, and visible to the reviewer gate. This catches the human failure
+(touched the CLI, forgot the doc); §5.1 catches the mechanical one.
 
 ### 5.4 Live verification (release checklist)
 

@@ -469,6 +469,7 @@ type Outcome struct {
 	Action  string   // "installed", "current", "refused", "failed"
 	Detail  string   // refusal/failure cause; offending path first
 	Written []string // §1.1: every path written even on later failure
+	Removed []string // manifest-listed files the new tree no longer ships
 }
 
 var ErrUnowned = errors.New("existing files not written by agentctl")
@@ -479,7 +480,10 @@ func Install(tree fs.FS, root, version string, targets []Target, force bool) ([]
 - [ ] **Step 1: Failing tests** against a `t.TempDir()` home, in this order:
   fresh install writes all files 0644, dirs 0755, manifest present, action
   `installed`; re-run → `current` with zero writes (assert mtimes unchanged);
-  version bump → overwrite when hashes match old manifest; **refusals**:
+  version bump → overwrite when hashes match old manifest; old manifest lists a
+  file the new tree does not ship with its hash still matching that manifest →
+  removed and reported in `Removed` (hash mismatched → the ownership refusal
+  below, never silent deletion); **refusals**:
   directory with no manifest and a stray file → `refused`/`ErrUnowned` naming
   the stray path, nothing written; manifest present but a file hash matches
   neither old manifest nor new tree (user edit) → `refused` unless
@@ -513,10 +517,11 @@ type Report struct {
 func Status(tree fs.FS, root, version string, targets []Target) ([]Report, error)
 ```
 
-- [ ] **Step 1: Failing tests**: absent dir → `absent`; dir without manifest
-  → `unmanaged`; manifest version == binary and hashes match → `current`;
-  version differs → `stale` (report installed version); version matches but a
-  hash differs → `modified`.
+- [ ] **Step 1: Failing tests**, asserting the spec §4.3 precedence order
+  (first match wins): no directory → `absent`; directory without manifest →
+  `unmanaged`; manifest version differs → `stale` (report installed version;
+  hashes are not compared across versions); version matches but a hash
+  differs → `modified`; version and hashes match → `current`.
 - [ ] **Steps 2–4:** red, implement, green. **Commit.**
 
 ### Task 8: CLI wiring — `skill` command group
@@ -564,8 +569,12 @@ Usage strings (add to `commandUsage`; add `skill` line to `globalUsage`):
   a different version present in temp `$HOME` → stderr gains exactly one
   line: `skill: ~/.claude/skills/agentctl is 0.2.0; this binary is 0.3.0 —
   run 'agentctl skill install'` (per target, oldest first, at most one line
-  per target); no manifest anywhere → no line; manifest current → no line.
-  Launch exit code is unchanged in all three.
+  per target); no manifest anywhere → no line; manifest current → no line;
+  manifest present but unreadable/unparseable (chmod 000 or junk content) →
+  one stderr line stating the read failure, never a claimed version; the
+  notice lines are the **final** stderr lines, after the #121 confirmation
+  output. Launch exit code is unchanged in every case — a skill-notice
+  failure is never a launch failure.
 - [ ] **Steps 2–4:** red, implement (read manifests only — never hash file
   contents at launch; version comparison only), green. **Commit.**
 
@@ -591,6 +600,9 @@ directory) and writes nothing inside application repositories.
 ```
 
 - [ ] Update spec §4.2/§4.4 only if implementation deviated (report first).
+- [ ] Sequencing: #128 amends other parts of SECURITY.md on the same
+  milestone; whichever PR lands second rebases onto the other's wording
+  rather than reverting it.
 - [ ] Rebase; full gates incl. integration suite; open PR "Refs #80" (PR 3
   completes it), milestone 0.3.0; reviewer gate; detach worktree.
 
@@ -648,18 +660,41 @@ fi
 - Test: `hack/checkskillpairing_test.go` (fixture git repos in temp dirs)
 - Modify: `.github/workflows/ci.yml`
 
+Security constraints (spec §5.3, blocking finding B1 on PR #129): the
+override token lives in **commit messages within the PR range**, never the
+PR body — a body is attacker-editable free text that can change after a
+green run. The script discovers the token itself with `git log`; the
+workflow passes only SHAs, via `env:`, and **never** interpolates
+`${{ github.event.* }}` text inside `run:`.
+
 - [ ] **Step 1: Failing Go test cases** (each builds a small git repo
   fixture): change under `cmd/agentctl/` only → exit 1; change under
   `cmd/agentctl/` plus `skills/agentctl/` → exit 0; change under
-  `cmd/agentctl/` with `[skill-unaffected]` in the override text argument →
-  exit 0; change elsewhere only → exit 0; `internal/config/` change → exit 1.
-- [ ] **Step 2: Script**: args `BASE_REF HEAD_REF OVERRIDE_TEXT`;
-  `git diff --name-only "$BASE_REF"..."$HEAD_REF"`; surface paths are
-  `cmd/agentctl/` and `internal/config/`; skill path `skills/agentctl/`;
-  override token literal `[skill-unaffected]`.
-- [ ] **Step 3:** green; add a CI step in the PR-facing job passing the PR
-  body as override text from the event payload
-  (`github.event.pull_request.body`). **Commit.**
+  `cmd/agentctl/` only, with `[skill-unaffected]` in any commit message in
+  the range → exit 0; token present only in a commit outside the range →
+  exit 1; change elsewhere only → exit 0; `internal/config/` change → exit 1.
+- [ ] **Step 2: Script**: args `BASE_SHA HEAD_SHA`;
+  `git diff --name-only "$BASE_SHA".."$HEAD_SHA"` for the surface check
+  (surface paths `cmd/agentctl/` and `internal/config/`; skill path
+  `skills/agentctl/`); override check is
+  `git log --format=%B "$BASE_SHA".."$HEAD_SHA" | grep -Fq '[skill-unaffected]'`.
+- [ ] **Step 3:** green; CI wiring in the `test` job, guarded so push runs
+  skip it (the squash merge may not carry the token and must not fail the
+  required context):
+
+```yaml
+      - name: Skill pairing check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: hack/check-skill-pairing.sh "$BASE_SHA" "$HEAD_SHA"
+```
+
+  SHAs are not free text, but they still cross via `env:` — the rule is no
+  event payload in `run:`, without exceptions a future edit could widen.
+  Ensure checkout fetch-depth covers the PR range (fetch base explicitly or
+  set `fetch-depth: 0` for this step's job). **Commit.**
 
 ### Task 14: Release checklist + runbook
 
