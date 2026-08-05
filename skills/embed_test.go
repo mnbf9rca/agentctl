@@ -1,10 +1,14 @@
 package skills
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTreeCarriesSkillAndReferences(t *testing.T) {
+	skillPath := Root + "/SKILL.md"
 	for _, path := range []string{
-		"agentctl/SKILL.md",
+		skillPath,
 		"agentctl/references/status-states.md",
 		"agentctl/references/exit-codes.md",
 	} {
@@ -14,6 +18,9 @@ func TestTreeCarriesSkillAndReferences(t *testing.T) {
 		}
 		if len(content) == 0 {
 			t.Fatalf("ReadFile(%q): empty", path)
+		}
+		if path == skillPath && !strings.Contains(string(content), "name: agentctl") {
+			t.Fatalf("ReadFile(%q): missing skill name", path)
 		}
 	}
 }
