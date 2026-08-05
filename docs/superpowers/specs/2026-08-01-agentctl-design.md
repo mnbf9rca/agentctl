@@ -464,7 +464,8 @@ these. Adding that field is not a schema change: it introduces a key rather than
 **No tmux server is still exit 6.** §6.7's scope note stands for the listing: a row-1 failure exits 6 carrying tmux's
 own message, which on a machine with no server reads `no server running on <path>` and answers the question directly.
 The alternative — treating any enumeration failure as "no fleets" — would render a tool failure as an observed absence,
-and distinguishing the two would require the stderr matching §6.7 rejected on evidence. Noted here explicitly because
+and distinguishing the two would require the advisory-lookup stderr matching §6.7 rejects on evidence. Noted here
+explicitly because
 §6.7 was written when `status` addressed a fleet that must already exist, which the listing does not.
 
 ### 6.4 attach / kill
@@ -573,9 +574,9 @@ appears once, and the optional block contains commands only.
 succeeded regardless of what the probe could see afterwards, and a probe failure is reported as an unverified state
 rather than an absence. One consequence is worth stating rather than leaving to be discovered: killing the attached
 session when it is the last one takes the tmux server with it, so row 1 fails and the operator gets the unverified form
-carrying tmux's own reason. That is the §6.7 trade again — separating the two would need the stderr matching this
-design rejected on evidence — and `TmuxError` still surfaces tmux's `no server running` text, so the fact reaches the
-operator even though agentctl declines to classify it.
+carrying tmux's own reason. That is the §6.7 advisory-lookup trade again — separating the two would need the
+no-server stderr matching this design rejected on evidence — and `TmuxError` still surfaces tmux's
+`no server running` text, so the fact reaches the operator even though agentctl declines to classify it.
 
 `kill`: the full §12.6 gate — `@agentctl_managed=1` **and** `@agentctl_version=1`, anything else exit 3 — then
 `kill-session` (§13.2 row 11). Both address the resolved session ID, never a name (§13.1).
@@ -687,14 +688,23 @@ to stop — the one outcome a cancelled launch must never produce.
 | succeeds | no | create → success |
 | succeeds | yes | **exit 3**, caught by the advisory check |
 | fails (no server) | no — there cannot be one | create → success; `new-session` starts server and session atomically |
-| fails (tmux/parse) | yes | `new-session` refuses → **exit 6** carrying tmux's own `duplicate session: NAME` |
+| fails (tmux/parse) | yes | `new-session` refuses atomically → **exit 3** carrying tmux's own `duplicate session: NAME` |
 | context cancelled | — | propagate the sentinel; **no creation call** |
 | — | — | any other creation failure → exit 6 (§6.6 pre-ownership: nothing killed) |
 
-**The same condition can produce exit 3 or exit 6**, depending on whether the advisory check ran. That is deliberate,
-not a defect: exit 3 is agentctl reporting a session-state fact it observed, and exit 6 is agentctl relaying a tmux
-command that failed, carrying tmux's own message. Both are true statements about what happened (§1.1); they differ
-because what happened differs.
+**The same condition always produces exit 3**, whether the advisory check observes it or tmux atomically refuses the
+create after a race. The messages remain evidence-sensitive under §1.1: the pre-check path says
+`session "NAME" already exists`, while the raced path carries tmux's factual
+`tmux create session: exit status 1: duplicate session: NAME` rather than replacing it with an event agentctl did not
+observe.
+
+The raced classification is deliberately narrow. It applies only to the `new-session` error path, only when the
+wrapped process failure is an `*exec.ExitError` with exit code 1, and only when captured stderr is exactly the single
+line `duplicate session: NAME` for the validated requested name (with no terminator or one terminal LF/CRLF). Any
+different status, prefix, suffix, extra line, error type, or tmux wording remains the ordinary exit-6 creation failure.
+This makes a future tmux wording change degrade toward the honest unclassified-tmux outcome rather than swallowing an
+unrelated failure. Neither duplicate path rolls back: `new-session` returned no typed session ID, so agentctl owns
+nothing.
 
 Verified on tmux 3.7b (2026-08-01):
 
@@ -717,10 +727,12 @@ fall-through, so the chained form buys only rare corners while adding a novel ch
 subtlety to reason about. Recorded rather than omitted because it works, and the next person to reach for it deserves
 the evidence and the reason.
 
-**Why no stderr matching.** The two no-server states emit *different* messages — `error connecting to <path> (No such
-file or directory)` when the socket is absent, and `no server running on <path>` once a server has exited. A string
-match would have to know both, and neither is a documented contract. Falling through on *any* failure requires
-knowledge of neither.
+**Why the advisory lookup still uses no stderr matching.** The two no-server states emit *different* messages —
+`error connecting to <path> (No such file or directory)` when the socket is absent, and
+`no server running on <path>` once a server has exited. A string match would have to know both, and neither is a
+documented contract. Falling through on *any* failure requires knowledge of neither. This is separate from the bounded
+`new-session` duplicate classification above, which relies on the exact tmux 3.7b contract already verified in this
+section and fails closed to exit 6 on every near-match.
 
 **Scope.** This applies to `launch` alone. `status`, `kill` and `attach` operate on a fleet that must already exist, so
 "no server" genuinely means "nothing to act on", and §4.1's exit 6 carrying tmux's message remains correct for them.
@@ -862,9 +874,11 @@ Consequently:
   executable, not the baseline; unmanaged session renders `managed:false` with an empty agents array and exit 0 while a
   non-`1` version still exits 3; the fake `Runner` recorded **no** row-7 calls and **no** row-14 call for any role whose
   state was decided before the process probe.
-- Launch failure paths (§6.6): both exit-8 messages asserted **verbatim**, including the cleanup-failure variant with a
+- Launch failure paths (§§6.6–6.7): both exit-8 messages asserted **verbatim**, including the cleanup-failure variant with a
   cause; pre-ownership malformed creation output asserts exit 6, the `tmux ls` warning, and that the fake `Runner`
-  recorded **no** `kill-session`. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
+  recorded **no** `kill-session`; a duplicate-session refusal after an empty/failed advisory lookup asserts exit 3,
+  tmux's original message, the exact `list-sessions`/`new-session` argv, and no rollback, while exit-status/stderr
+  near-matches remain exit 6. Baseline poll (§8): t=0 attempt, cadence, and a guaranteed boundary attempt before
   timeout. Metadata stamping asserted as an exact ordered call sequence (§6.5). `--dir` pointing at a regular file
   exits 2 with no tmux call recorded.
 - Session resolution (§4.1): precedence with each higher source present; explicit-empty exits 2 without fallback while
@@ -1007,7 +1021,8 @@ Notes:
 - **Row 5a, scope.** Issued only by `launch`, once per identity variable, immediately after the first role's window is created and stamped (§6.5) and before any further window is created. `new-session -e` writes `AGENTCTL_SESSION`, `AGENTCTL_ROLE` and `AGENTCTL_MANAGED` into the *session* environment as well as into the first window; every later window agentctl creates carries its own `-e` values, so the session copy serves nothing and actively misidentifies any window an operator creates by hand — it would claim that window is the first role of a managed fleet. All three are cleared, not just the two that are false: the set is exported as one statement about one window, and leaving a third of it behind is more confusing than removing it. The session name remains discoverable from tmux itself.
 - **Row 5a does not disturb what already exists.** A process's environment is fixed when it is exec'd, so clearing the session environment cannot alter the first role's pane. This is why the clear may safely follow window creation rather than having to precede it.
 - **Row 5a failure is reported, never fatal, and never rolled back.** At this point the session, its first window, and its metadata are all correct; the only consequence of a failed clear is that a window an operator later creates by hand would inherit a stale identity. Killing a working fleet over advisory metadata would be disproportionate to that. `launch` therefore continues and exits 0, and writes one line to stderr naming the variable it could not clear and what follows from it. Silence would withhold a fact (§1.1); a non-zero exit would claim the launch failed when it did not.
-- **Row 5a is classified by exit status only.** No branch reads tmux's message text, consistent with §6.7's rejection of stderr matching on evidence.
+- **Row 5a is classified by exit status only.** No branch reads tmux's message text. Unlike row 2's exact duplicate
+  refusal, this operation has no separately verified message contract that would support a narrower classification.
 - **Rows 2–3, `-e`.** The `-e` segment is emitted in declaration order, one flag plus one `NAME=VALUE` element per
   variable, from values that already passed identifier validation; it is absent entirely when no variables are
   supplied, so the no-env argv is byte-identical to the previous rows.
