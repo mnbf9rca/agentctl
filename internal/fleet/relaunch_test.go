@@ -553,8 +553,8 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			message:   "role planner already has 1 window in epic123 (@23 dead); relaunch creates only absent role windows",
 		},
 		{
-			name:      "unmanaged metadata",
-			windows:   "@23\tplanner\t\t\t\t\t\t\t\n",
+			name:      "unmanaged without stored role",
+			windows:   "@23\tplanner\t\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateUnmanaged,
 			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
 		},

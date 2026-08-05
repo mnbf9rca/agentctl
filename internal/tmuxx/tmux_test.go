@@ -416,23 +416,23 @@ func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
 	t.Parallel()
 
 	runner := NewFakeRunner(Response{Stdout: []byte(
-		"@7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tweird name\twith tab\n" +
-			"@8\tcodex1\t1\t1\tcodex1\tcodex\t\t\tcodex\n",
+		"@7\tplanner\tplanner\tclaude\tfable\tmax\tweird name\twith tab\n" +
+			"@8\tcodex1\tcodex1\tcodex\t\t\tcodex\n",
 	)})
 	got, err := New(runner).ListWindows(context.Background(), "$4")
 	if err != nil {
 		t.Fatalf("ListWindows() error = %v", err)
 	}
 	want := []Window{
-		{ID: "@7", Name: "planner", Managed: "1", Version: "1", Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Process: "weird name\twith tab"},
-		{ID: "@8", Name: "codex1", Managed: "1", Version: "1", Role: "codex1", Harness: "codex", Model: "", Effort: "", Process: "codex"},
+		{ID: "@7", Name: "planner", Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Process: "weird name\twith tab"},
+		{ID: "@8", Name: "codex1", Role: "codex1", Harness: "codex", Model: "", Effort: "", Process: "codex"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListWindows() = %#v, want %#v", got, want)
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"list-windows", "-t", "$4", "-F",
-		"#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+		"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
 	}})
 }
 

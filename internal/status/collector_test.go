@@ -217,6 +217,12 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 			wantCallCount: 4,
 		},
 		{
+			name:          "missing stored role precedes pane probe",
+			windows:       "@7\tplanner\t\tclaude\tfable\tmax\tbaseline\n",
+			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateUnmanaged}},
+			wantCallCount: 4,
+		},
+		{
 			name:          "zero panes is missing",
 			windows:       "@7\tplanner\t1\t1\tplanner\tclaude\tfable\tmax\tbaseline\n",
 			afterWindows:  []tmuxx.Response{{}},

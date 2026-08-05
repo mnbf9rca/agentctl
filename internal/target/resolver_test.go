@@ -196,16 +196,25 @@ func TestResolverRejectsFirstInvalidWindowMetadataField(t *testing.T) {
 		name       string
 		windowLine string
 		wantWindow tmuxx.Window
+		wantError  string
 	}{
 		{
 			name:       "window unmanaged",
 			windowLine: "@4\tcodex2\t0\t1\tcodex2\tcodex\t\t\tcodex\n",
 			wantWindow: tmuxx.Window{ID: "@4", Name: "codex2", Managed: "0", Version: "1", Role: "codex2", Harness: "codex", Process: "codex"},
+			wantError:  `window @4 for role "codex2" has @agentctl_managed="0"; expected "1"`,
 		},
 		{
 			name:       "stored role mismatch",
 			windowLine: "@4\tcodex2\t1\t1\tplanner\tcodex\t\t\tcodex\n",
 			wantWindow: tmuxx.Window{ID: "@4", Name: "codex2", Managed: "1", Version: "1", Role: "planner", Harness: "codex", Process: "codex"},
+			wantError:  `window @4 named "codex2" has stored role "planner"; expected "codex2"`,
+		},
+		{
+			name:       "stored role absent",
+			windowLine: "@4\tcodex2\t\tcodex\t\t\tcodex\n",
+			wantWindow: tmuxx.Window{ID: "@4", Name: "codex2", Role: "", Harness: "codex", Process: "codex"},
+			wantError:  `window @4 named "codex2" has stored role ""; expected "codex2"`,
 		},
 	}
 
@@ -228,6 +237,9 @@ func TestResolverRejectsFirstInvalidWindowMetadataField(t *testing.T) {
 			}
 			if metadata.Session != session || metadata.Role != "codex2" || !reflect.DeepEqual(metadata.Window, test.wantWindow) {
 				t.Fatalf("WindowMetadataError = %#v, want session=%#v role=codex2 window=%#v", metadata, session, test.wantWindow)
+			}
+			if got := err.Error(); got != test.wantError {
+				t.Fatalf("Resolve() error = %q, want %q", got, test.wantError)
 			}
 			if got := len(runner.Calls); got != 3 {
 				t.Fatalf("recorded %d calls, want metadata failure before pane probe: %#v", got, runner.Calls)
