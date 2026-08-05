@@ -57,6 +57,11 @@ func ReadManifest(dir string) (Manifest, bool, error) {
 	if err := json.Unmarshal(content, &manifest); err != nil {
 		return Manifest{}, false, fmt.Errorf("parse manifest: %w", err)
 	}
+	for relative := range manifest.Files {
+		if !fs.ValidPath(relative) || relative == "." || relative == ManifestName || strings.Contains(relative, `\`) {
+			return Manifest{}, false, fmt.Errorf("parse manifest: invalid file path %q", relative)
+		}
+	}
 	return manifest, true, nil
 }
 

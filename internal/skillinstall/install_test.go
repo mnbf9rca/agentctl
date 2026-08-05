@@ -1,7 +1,9 @@
 package skillinstall
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -294,6 +296,40 @@ func TestInstallReportsSuccessfulFirstTargetWhenSecondTargetFails(t *testing.T) 
 	}
 	if got := outcomes[1]; got.Action != "failed" || got.Detail == "" {
 		t.Fatalf("second outcome = %#v, want factual failure", got)
+	}
+}
+
+func TestInstallRefusesManifestPathEscapeBeforeMutation(t *testing.T) {
+	base := t.TempDir()
+	target := Target{Harness: "claude", Dir: filepath.Join(base, "agentctl")}
+	if err := os.Mkdir(target.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside.txt")
+	outsideContent := []byte("must survive\n")
+	if err := os.WriteFile(outside, outsideContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		Version: "0.2.0",
+		Files: map[string]string{
+			"../outside.txt": fmt.Sprintf("%x", sha256.Sum256(outsideContent)),
+		},
+	}
+	if err := WriteManifest(target.Dir, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	outcomes, err := Install(testTree(map[string]string{"SKILL.md": "shipped\n"}), "agentctl", "0.3.0", []Target{target}, false)
+	if !errors.Is(err, ErrUnowned) {
+		t.Fatalf("Install() error = %v, want ErrUnowned", err)
+	}
+	if got := outcomes[0]; got.Action != "refused" || len(got.Written) != 0 || len(got.Removed) != 0 || !strings.Contains(got.Detail, ManifestName) {
+		t.Fatalf("outcome = %#v, want manifest refusal before mutation", got)
+	}
+	content, readErr := os.ReadFile(outside)
+	if readErr != nil || string(content) != string(outsideContent) {
+		t.Fatalf("outside file after refusal = %q, %v; want untouched", content, readErr)
 	}
 }
 
