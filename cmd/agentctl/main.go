@@ -18,9 +18,11 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
+	"github.com/mnbf9rca/agentctl/internal/skillinstall"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/target"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+	"github.com/mnbf9rca/agentctl/skills"
 )
 
 const (
@@ -45,6 +47,7 @@ Commands:
   clear     deliver /clear to a role
   compact   deliver /compact to a role
   kill      terminate a managed fleet
+  skill     install or inspect the embedded agent skill
   version   report this binary's build identity
 `
 
@@ -61,6 +64,11 @@ var commandUsage = map[string]string{
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
 	"kill":    "Usage: agentctl kill [--session SESSION]\n",
+	"skill": "Usage: agentctl skill install [--force] | agentctl skill status\n\n" +
+		"install writes this binary's embedded agent skill to ~/.claude/skills/agentctl\n" +
+		"and ~/.agents/skills/agentctl; it refuses to overwrite files it cannot prove\n" +
+		"it wrote (--force overrides). status reports current|stale|modified|absent|unmanaged\n" +
+		"per target.\n",
 	"version": "Usage: agentctl version\n",
 }
 
@@ -201,6 +209,9 @@ func runWithAllDependencies(
 	if !ok {
 		return usageError(stderr, fmt.Sprintf("unknown command %q", command), globalUsage)
 	}
+	if command == "skill" {
+		return runSkill(arguments[1:], stdout, stderr, usage)
+	}
 
 	if command == "launch" {
 		options, err := parseLaunch(arguments[1:])
@@ -305,6 +316,97 @@ func runWithAllDependencies(
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
+	subcommand, force, err := parseSkill(arguments)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, usage)
+		return exitOK
+	}
+	if err != nil {
+		return usageError(stderr, err.Error(), usage)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl: cannot resolve home directory: %v\n", err)
+		return exitUnclassified
+	}
+	version := buildinfo.Current()
+	targets := skillinstall.Targets(home)
+
+	switch subcommand {
+	case "install":
+		outcomes, installErr := skillinstall.Install(skills.Tree, skills.Root, version, targets, force)
+		for _, outcome := range outcomes {
+			destination := stdout
+			if outcome.Action == "failed" || outcome.Action == "refused" {
+				destination = stderr
+			}
+			if outcome.Detail == "" {
+				fmt.Fprintf(destination, "%s: %s\n", outcome.Target.Dir, outcome.Action)
+			} else {
+				fmt.Fprintf(destination, "%s: %s: %s\n", outcome.Target.Dir, outcome.Action, outcome.Detail)
+			}
+			for _, removed := range outcome.Removed {
+				fmt.Fprintf(stdout, "%s: removed\n", removed)
+			}
+		}
+		if installErr == nil {
+			return exitOK
+		}
+		if errors.Is(installErr, skillinstall.ErrUnowned) {
+			return exitUnsafe
+		}
+		return exitUnclassified
+	case "status":
+		reports, statusErr := skillinstall.Status(skills.Tree, skills.Root, version, targets)
+		for _, report := range reports {
+			installed := report.InstalledVersion
+			if installed == "" {
+				installed = "none"
+			}
+			fmt.Fprintf(stdout, "%s: %s (installed %s, binary %s)\n", report.Target.Dir, report.State, installed, version)
+		}
+		if statusErr != nil {
+			fmt.Fprintf(stderr, "agentctl: skill status: %v\n", statusErr)
+			return exitUnclassified
+		}
+		return exitOK
+	default:
+		panic(fmt.Sprintf("unreachable skill subcommand %q", subcommand))
+	}
+}
+
+func parseSkill(arguments []string) (string, bool, error) {
+	if len(arguments) == 0 {
+		return "", false, errors.New("skill requires install or status")
+	}
+	if arguments[0] == "-h" || arguments[0] == "--help" {
+		return "", false, flag.ErrHelp
+	}
+	switch arguments[0] {
+	case "install":
+		flags := cliflags.New("skill install")
+		force := flags.Bool("force", false, "replace files whose ownership cannot be proven")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return "", false, err
+		}
+		if len(flags.Args()) != 0 {
+			return "", false, errors.New("skill install accepts no positional arguments")
+		}
+		return "install", *force, nil
+	case "status":
+		if len(arguments) == 2 && (arguments[1] == "-h" || arguments[1] == "--help") {
+			return "", false, flag.ErrHelp
+		}
+		if len(arguments) != 1 {
+			return "", false, errors.New("skill status accepts no arguments")
+		}
+		return "status", false, nil
+	default:
+		return "", false, fmt.Errorf("unknown skill subcommand %q", arguments[0])
+	}
 }
 
 // confirmLaunch reports the fleet state observed after creation. Confirmation

@@ -165,12 +165,31 @@ func inspectTarget(dir string, next Manifest) (*Manifest, bool, error) {
 		return nil, false, fmt.Errorf("%s: %v: %w", filepath.Join(dir, ManifestName), err, ErrUnowned)
 	}
 	if !ok {
-		return nil, false, fmt.Errorf("%s: target directory has no manifest: %w", dir, ErrUnowned)
+		offending, err := firstTargetFile(dir)
+		if err != nil {
+			return nil, false, err
+		}
+		return nil, false, fmt.Errorf("%s: target directory has no manifest: %w", offending, ErrUnowned)
 	}
 	if err := validateOwnedFiles(dir, existing, next); err != nil {
 		return nil, false, err
 	}
 	return &existing, false, nil
+}
+
+func firstTargetFile(dir string) (string, error) {
+	offending := dir
+	err := filepath.WalkDir(dir, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("inspect unmanaged target path %q: %w", filename, walkErr)
+		}
+		if filename != dir && !entry.IsDir() {
+			offending = filename
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return offending, err
 }
 
 func validateOwnedFiles(dir string, existing, next Manifest) error {
