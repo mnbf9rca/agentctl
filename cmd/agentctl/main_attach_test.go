@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -186,19 +187,23 @@ func TestRunAttachRefusesEveryFailedOwnershipGateWithEscapeHatch(t *testing.T) {
 	}
 }
 
-const attachNotice = "agentctl: attaching session \"fleet\" (3 windows) in iTerm2…\n" +
-	"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
-	"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-	"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
-	"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
-	"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+var attachNotice = "agentctl " + buildinfo.Current() + "\n" +
+	"Attaching session \"fleet\" (3 windows) in iTerm2.\n\n" +
+	"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+	"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+	"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+	"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+	"        Prefer esc.\n\n" +
+	"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
 
-const attachNoticeWithoutCount = "agentctl: attaching session \"fleet\" in iTerm2…\n" +
-	"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
-	"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-	"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
-	"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
-	"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+var attachNoticeWithoutCount = "agentctl " + buildinfo.Current() + "\n" +
+	"Attaching session \"fleet\" in iTerm2.\n\n" +
+	"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+	"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+	"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+	"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+	"        Prefer esc.\n\n" +
+	"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
 
 const attachWindows = "@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n" +
 	"@8\tcoder\t1\t1\tcoder\tcodex\t\t\tcodex\n" +
@@ -220,22 +225,21 @@ func TestRunAttachAttemptsControlModeByResolvedIDAndReportsTheSessionStateItObse
 		{
 			name:      "session still present",
 			afterexit: tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
-			wantReport: "agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0); session $4 is still running\n" +
-				"agentctl: session \"fleet\" is still running.\n" +
-				"agentctl:   re-attach:     agentctl attach --session fleet\n" +
-				"agentctl:   check status:  agentctl status --session fleet\n" +
-				"agentctl:   stop it:       agentctl kill --session fleet\n",
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is still running.\n\n" +
+				"  re-attach:     agentctl attach --session fleet\n" +
+				"  check status:  agentctl status --session fleet\n" +
+				"  stop it:       agentctl kill --session fleet\n",
 		},
 		{
 			name:       "session gone",
 			afterexit:  tmuxx.Response{Stdout: []byte("$7\tother\n")},
-			wantReport: "agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0); session $4 is no longer present\n",
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is no longer present.\n",
 		},
 		{
 			name:      "state unverifiable",
 			afterexit: tmuxx.Response{Err: assertError("list failed")},
-			wantReport: "agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0); could not verify whether session $4 is still running: tmux list sessions: list failed\n" +
-				"agentctl:   check status:  agentctl status --session fleet\n",
+			wantReport: "Attachment to session \"fleet\" ended (tmux exit 0). Could not verify whether session $4 is still running: tmux list sessions: list failed\n\n" +
+				"  check status:  agentctl status --session fleet\n",
 		},
 	}
 	for _, tt := range tests {
@@ -293,11 +297,10 @@ func TestRunAttachOmitsWindowCountWhenItsReadFails(t *testing.T) {
 		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
 	want := attachNoticeWithoutCount +
-		"agentctl: control-mode attachment to session \"fleet\" ended (tmux exit 0); session $4 is still running\n" +
-		"agentctl: session \"fleet\" is still running.\n" +
-		"agentctl:   re-attach:     agentctl attach --session fleet\n" +
-		"agentctl:   check status:  agentctl status --session fleet\n" +
-		"agentctl:   stop it:       agentctl kill --session fleet\n"
+		"Attachment to session \"fleet\" ended (tmux exit 0). Session $4 is still running.\n\n" +
+		"  re-attach:     agentctl attach --session fleet\n" +
+		"  check status:  agentctl status --session fleet\n" +
+		"  stop it:       agentctl kill --session fleet\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}

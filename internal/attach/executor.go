@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -144,18 +145,20 @@ func writeNarration(out io.Writer, target tmuxx.Session, windowCount int) {
 	if out == nil {
 		return
 	}
+	fmt.Fprintf(out, "agentctl %s\n", buildinfo.Current())
 	if windowCount >= 0 {
 		label := "windows"
 		if windowCount == 1 {
 			label = "window"
 		}
-		fmt.Fprintf(out, "agentctl: attaching session %q (%d %s) in iTerm2…\n", target.Name, windowCount, label)
+		fmt.Fprintf(out, "Attaching session %q (%d %s) in iTerm2.\n\n", target.Name, windowCount, label)
 	} else {
-		fmt.Fprintf(out, "agentctl: attaching session %q in iTerm2…\n", target.Name)
+		fmt.Fprintf(out, "Attaching session %q in iTerm2.\n\n", target.Name)
 	}
-	fmt.Fprint(out, "agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n")
-	fmt.Fprint(out, "agentctl:   esc  detach: the tabs close and the fleet keeps running.\n")
-	fmt.Fprint(out, "agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n")
-	fmt.Fprint(out, "agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n")
-	fmt.Fprintf(out, "agentctl: detaching never stops the fleet; to stop it: agentctl kill --session %s\n", target.Name)
+	fmt.Fprint(out, "iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n")
+	fmt.Fprint(out, "  esc   detach cleanly — the tabs close and the fleet keeps running\n")
+	fmt.Fprint(out, "  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n")
+	fmt.Fprint(out, "        does not exit, so this terminal stays busy and agentctl cannot report.\n")
+	fmt.Fprint(out, "        Prefer esc.\n\n")
+	fmt.Fprintf(out, "Detaching never stops the fleet. To stop it: agentctl kill --session %s\n", target.Name)
 }

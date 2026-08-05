@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -102,7 +103,7 @@ func TestCheckEnvironmentRefusesBeforeRunningCommands(t *testing.T) {
 }
 
 func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
-	t.Parallel()
+	restoreBuildStamp(t, "0.2.0")
 
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -121,12 +122,14 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	want := "agentctl: attaching session \"fleet\" (3 windows) in iTerm2…\n" +
-		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
-		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
-		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
-		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+	want := "agentctl 0.2.0\n" +
+		"Attaching session \"fleet\" (3 windows) in iTerm2.\n\n" +
+		"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+		"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+		"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+		"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+		"        Prefer esc.\n\n" +
+		"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
 	if notice.String() != want {
 		t.Fatalf("notice = %q, want %q", notice.String(), want)
 	}
@@ -142,7 +145,7 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 }
 
 func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
-	t.Parallel()
+	restoreBuildStamp(t, "0.2.0")
 
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -157,12 +160,14 @@ func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	want := "agentctl: attaching session \"fleet\" in iTerm2…\n" +
-		"agentctl: iTerm2 will now show its Command Menu — that menu is iTerm2's, not agentctl's.\n" +
-		"agentctl:   esc  detach: the tabs close and the fleet keeps running.\n" +
-		"agentctl:   X    (uppercase) force-quit: the fleet keeps running, but the tmux client does not\n" +
-		"agentctl:        exit — this terminal stays busy and agentctl cannot report. Prefer esc.\n" +
-		"agentctl: detaching never stops the fleet; to stop it: agentctl kill --session fleet\n"
+	want := "agentctl 0.2.0\n" +
+		"Attaching session \"fleet\" in iTerm2.\n\n" +
+		"iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:\n\n" +
+		"  esc   detach cleanly — the tabs close and the fleet keeps running\n" +
+		"  X     (uppercase) force-quit — the fleet keeps running, but the tmux client\n" +
+		"        does not exit, so this terminal stays busy and agentctl cannot report.\n" +
+		"        Prefer esc.\n\n" +
+		"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
 	if narration.String() != want {
 		t.Fatalf("narration = %q, want %q", narration.String(), want)
 	}
@@ -178,7 +183,7 @@ func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
 }
 
 func TestExecuteNarratesASingleObservedWindowGrammatically(t *testing.T) {
-	t.Parallel()
+	restoreBuildStamp(t, "0.2.0")
 
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -193,9 +198,19 @@ func TestExecuteNarratesASingleObservedWindowGrammatically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if firstLine := strings.SplitN(narration.String(), "\n", 2)[0]; firstLine != "agentctl: attaching session \"fleet\" (1 window) in iTerm2…" {
-		t.Fatalf("first narration line = %q, want singular window", firstLine)
+	lines := strings.Split(narration.String(), "\n")
+	if got := lines[1]; got != "Attaching session \"fleet\" (1 window) in iTerm2." {
+		t.Fatalf("attach narration line = %q, want singular window", got)
 	}
+}
+
+func restoreBuildStamp(t *testing.T, stamp string) {
+	t.Helper()
+	previous := buildinfo.Stamp
+	buildinfo.Stamp = stamp
+	t.Cleanup(func() {
+		buildinfo.Stamp = previous
+	})
 }
 
 func TestExecuteWritesNoNoticeWhenTheOwnershipGateRefuses(t *testing.T) {

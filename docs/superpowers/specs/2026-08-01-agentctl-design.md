@@ -479,18 +479,37 @@ second shell-composition site (§12.1) and a dependency on a scripting dictionar
 explains the menu rather than fighting it. No flag switches this off; there is one attach.
 
 *The narration* is written once the environment and ownership gates have passed and before `attach-session`, so it
-never announces an attachment a refusal prevented — a refused attach writes nothing to stdout. It states that the
-session is being attached in iTerm2 and how many windows it has; that the menu about to appear is iTerm2's; that `esc`
-detaches, ending the client and whatever iTerm2 was rendering, while the fleet keeps running; that `X` is uppercase and
-force-quits; and that only `kill` stops a fleet. It deliberately does **not** say what force-quitting leaves behind —
-that is iTerm2's path, unobserved here, and §1.1 forbids asserting an outcome we have not measured however confident
-the inference. It also never asserts that windows *are* rendered as native tabs: that depends on an iTerm2 preference
-agentctl can neither set nor read.
+never announces an attachment a refusal prevented — a refused attach writes nothing to stdout. It names agentctl once
+with `buildinfo.Current()` (the same total value printed by `agentctl version`) and does not prefix every subsequent
+line. The version line is attach-specific, not a change to other commands. The block states that the session is being
+attached in iTerm2 and how many windows it has; that the menu about to appear is iTerm2's; that `esc` detaches, ending
+the client and whatever iTerm2 was rendering, while the fleet keeps running; that `X` is uppercase and force-quits;
+and that only `kill` stops a fleet:
+
+```text
+agentctl 0.2.0
+Attaching session "epic123" (2 windows) in iTerm2.
+
+iTerm2 will now show its Command Menu. That menu is iTerm2's, not agentctl's:
+
+  esc   detach cleanly — the tabs close and the fleet keeps running
+  X     (uppercase) force-quit — the fleet keeps running, but the tmux client
+        does not exit, so this terminal stays busy and agentctl cannot report.
+        Prefer esc.
+
+Detaching never stops the fleet. To stop it: agentctl kill --session epic123
+```
+
+It deliberately contains no success claim: `attach-session` has not run yet. It also does **not** say what
+force-quitting leaves behind — that is iTerm2's path, unobserved here, and §1.1 forbids asserting an outcome we have
+not measured however confident the inference. It never asserts that windows *are* rendered as native tabs either:
+that depends on an iTerm2 preference agentctl can neither set nor read.
 
 *The window count* is the one new fact the narration carries, read once after the ownership gate with §13.2 row 8. That
 completes attach's read set: row 6 for the ownership gate, row 8 for the count, row 13 to attach, row 1 for the
 post-exit probe — no other read, and no new argv shape. A failed row-8 read **omits the count and says nothing else
-about it**; a guessed or defaulted number would be a claim about a fleet agentctl did not manage to observe.
+about it**; a guessed or defaulted number would be a claim about a fleet agentctl did not manage to observe. Only the
+second line changes in that case: `Attaching session "epic123" in iTerm2.`
 
 *The state report* is one line written **if and when the control-mode client exits**, naming what agentctl observed:
 the session is still running, is no longer present, or its state could not be verified and why. Presence is decided by
@@ -517,6 +536,29 @@ is itself a claim that the suggested action is available:
 | still running | re-attach, check status, and stop it — all three, each copy-pasteable and naming the session as the operator typed it |
 | not verifiable | check status only: agentctl does not know whether there is anything to re-attach or to stop |
 | no longer present | no block at all: proposing actions on a session observed to be absent would assert it is still there |
+
+The exact rendered variants for session `epic123`, resolved as `$4`, are:
+
+```text
+Attachment to session "epic123" ended (tmux exit 0). Session $4 is still running.
+
+  re-attach:     agentctl attach --session epic123
+  check status:  agentctl status --session epic123
+  stop it:       agentctl kill --session epic123
+```
+
+```text
+Attachment to session "epic123" ended (tmux exit 0). Could not verify whether session $4 is still running: CAUSE
+
+  check status:  agentctl status --session epic123
+```
+
+```text
+Attachment to session "epic123" ended (tmux exit 0). Session $4 is no longer present.
+```
+
+The report says `Attachment ... ended`, not `Detached`: control mode ending does not establish how it ended. The state
+appears once, and the optional block contains commands only.
 
 *The probe is advisory.* The exit code is unchanged in all three outcomes, because what succeeded — the attachment —
 succeeded regardless of what the probe could see afterwards, and a probe failure is reported as an unverified state
