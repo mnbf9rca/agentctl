@@ -112,7 +112,7 @@ The contract test (§5.1) parses these conventions, so the skill must maintain t
 
 ### 4.1 Embedding
 
-`skills/agentctl/` is embedded with `go:embed` from `cmd/agentctl`. The embedded tree is
+`skills/agentctl/` is embedded with `go:embed` via the `skills` package. The embedded tree is
 the only distribution artifact; there is no network fetch and no separate skill release.
 
 ### 4.2 `agentctl skill install [--force]`
