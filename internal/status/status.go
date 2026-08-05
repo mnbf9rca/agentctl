@@ -13,14 +13,19 @@ const (
 	StateAmbiguous         State = "ambiguous"
 )
 
-// States is the complete set of State values the status package can emit.
-var States = []State{
+var states = [...]State{
 	StateAmbiguous,
 	StateUnmanaged,
 	StateMissing,
 	StateDead,
 	StateUnexpectedProcess,
 	StateRunning,
+}
+
+// States returns the complete set of State values the status package can emit.
+// The returned slice has independent backing storage.
+func States() []State {
+	return append([]State(nil), states[:]...)
 }
 
 // Report is the versioned status document for one resolved session.
