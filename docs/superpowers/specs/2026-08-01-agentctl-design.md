@@ -262,7 +262,9 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
    (§13.1). Confirm `@agentctl_managed=1` **and** `@agentctl_version=1` (§12.6) → else exit 3.
 3. Resolve the window: `list-windows`, exact name comparison in Go, address the resulting window ID. **No name is ever
    passed to `-t`** (§13.1). Zero matches → exit 4; more than one → exit 4, fail closed (§13.5).
-4. Confirm the window is managed and its stored role matches → exit 4; exactly one pane and the pane is alive → exit 5.
+4. Confirm the stored window `@agentctl_role` exactly equals the requested role → exit 4 on absence or mismatch;
+   exactly one pane and the pane is alive → exit 5. This stored-role comparison is the sole window-ownership check
+   before pane validation; window `@agentctl_managed` and window version metadata are not read.
 5. Process identity against the recorded baseline (§8). Mismatch, empty baseline, or identity unavailable → exit 5.
 6. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5
    (`refusing to clear own pane`).
@@ -277,8 +279,9 @@ applies every rule here to each session it reports.
 
 **Reads are an allowlist.** Only §13.2 rows 6 (read session option), 8 (list windows), 9 (list panes) and 14 (process
 identity) may be issued. Row 7 (read window option) is permitted by the table but unused, because row 8's format string
-already carries every window option — tests assert it is **absent** from recorded calls, so an accidental per-window
-read loop is caught rather than merely discouraged.
+already carries every window metadata field that is collected or consumed, not every option stamped on a window —
+tests assert row 7 is **absent** from recorded calls, so an accidental per-window read loop is caught rather than
+merely discouraged.
 
 **Session-level inputs.** Every value `status` reads at session scope, in every state it can hold:
 
@@ -316,7 +319,7 @@ cause. A command did run, so exit 6 is available here in a way it is not for inp
 | Order | State | Condition |
 |---|---|---|
 | 1 | `ambiguous` | more than one window with this exact name (§13.5) |
-| 2 | `unmanaged` | window `@agentctl_managed` ≠ `1`, stored role metadata mismatches, **or more than one pane** |
+| 2 | `unmanaged` | stored window `@agentctl_role` does not exactly equal the roster role, **or more than one pane** |
 | 3 | `missing` | no window with this exact name, or the window has zero panes |
 | 4 | `dead` | pane reports `pane_dead` |
 | 5 | `unexpected-process` | observed executable ≠ stored baseline, **or** the baseline is empty, **or** identity is unavailable for an alive pane |
@@ -599,6 +602,11 @@ means before any *window option*, never before any window.
 5. session `@agentctl_dir`
 6. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
    `@agentctl_effort`, the baseline poll, and finally `@agentctl_process`.
+
+The stamped window `@agentctl_managed` marker is advisory metadata and remains part of that fixed stamping contract;
+it is not consumed as a window-ownership gate. The stored `@agentctl_role` is the sole window-ownership evidence.
+Agentctl writes it only during per-window stamping and never during session stamping, so a handmade window cannot
+inherit it from the session by construction.
 
 `@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
 After the first role reaches that fully stamped state, `launch` clears the three identity variables from the session
@@ -1070,8 +1078,11 @@ Notes:
 ### 13.3 Format-string and option-read rules
 
 - **Window collection format** (row 8), fields in this order:
-  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_managed}⟨TAB⟩#{@agentctl_version}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_effort}⟨TAB⟩#{@agentctl_process}`
-  Parse with `strings.SplitN(line, "\t", 9)`.
+  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_effort}⟨TAB⟩#{@agentctl_process}`
+  Parse with `strings.SplitN(line, "\t", 7)`.
+- **Managed/version fields are absent by construction.** Row 8 and the `tmuxx.Window` data model do not carry the
+  inherited session `@agentctl_managed` or `@agentctl_version` expansions. Window `@agentctl_managed` remains stamped
+  as advisory metadata (§6.5); the prior window-version data-model field was removed rather than promoted to a gate.
 - **Unconstrained values go last.** Every field except `@agentctl_process` is charset-validated or allowlisted. `@agentctl_process`
   comes from `ps -o comm=` and may contain spaces (a value `weird name` was verified to round-trip intact), so it is
   placed last and absorbs any residue — a delimiter inside it cannot shift another field.
@@ -1080,9 +1091,10 @@ Notes:
   violating §5. With `-v` the raw value is printed verbatim.
 - **`-q` is required on reads.** Without it, an unset option is `invalid option: NAME` on stderr with exit 1; with it,
   the result is empty output and exit 0.
-- **Unset and set-to-empty are indistinguishable** (both empty, exit 0). This is acceptable and deliberate: the gate
-  options `@agentctl_managed`, `@agentctl_version` and `@agentctl_process` are never legitimately empty, so empty means
-  fail closed. `@agentctl_model` and `@agentctl_effort` are legitimately empty (§12.7) and gate nothing.
+- **Unset and set-to-empty are indistinguishable** (both empty, exit 0). This is acceptable and deliberate: the
+  session-gate options `@agentctl_managed` and `@agentctl_version`, the window-ownership field `@agentctl_role`, and
+  the process baseline `@agentctl_process` are never legitimately empty, so empty means fail closed.
+  `@agentctl_model` and `@agentctl_effort` are legitimately empty (§12.7) and gate nothing.
 - `#{@name}` user-option interpolation in `-F` is verified working on tmux 3.7b; unset options render empty without error.
 
 ### 13.4 Consequences for tests
