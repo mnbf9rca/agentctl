@@ -174,7 +174,12 @@ func runWithRelaunchDependencies(ctx context.Context, arguments []string, stdout
 }
 
 func runWith(arguments []string, stdout, stderr io.Writer, launch launchDependencies) int {
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{launch: launch})
+	client := tmuxx.New(launch.runner)
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{
+		launch:    launch,
+		resolver:  session.New(client, nil),
+		collector: statuspkg.NewCollector(client),
+	})
 }
 
 func runWithAllDependencies(
@@ -215,7 +220,10 @@ func runWithAllDependencies(
 		}
 		deps.launch.fleet.Stderr = stderr
 		err = fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
-		return launchResult(stderr, err, usage)
+		if code := launchResult(stderr, err, usage); code != exitOK {
+			return code
+		}
+		return confirmLaunch(ctx, stdout, stderr, deps.resolver, deps.collector, options.session)
 	}
 
 	options, err := parseCommand(command, arguments[1:])
@@ -253,16 +261,7 @@ func runWithAllDependencies(
 		return resolverError(stderr, usage, err)
 	}
 	if command == "status" {
-		report, err := deps.collector.Collect(ctx, resolved.Name, resolved.ID)
-		if err != nil {
-			return statusError(stderr, err)
-		}
-		if options.json {
-			err = statuspkg.WriteJSON(stdout, report)
-		} else {
-			err = statuspkg.WriteTable(stdout, report)
-		}
-		if err != nil {
+		if err := writeSelectedStatus(ctx, stdout, deps.collector, resolved, options.json); err != nil {
 			return statusError(stderr, err)
 		}
 		return exitOK
@@ -306,6 +305,45 @@ func runWithAllDependencies(
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+// confirmLaunch reports the fleet state observed after creation. Confirmation
+// is advisory: once Launch succeeds, a later observation failure cannot
+// truthfully reclassify the fleet launch as failed.
+func confirmLaunch(
+	ctx context.Context,
+	stdout, stderr io.Writer,
+	resolver sessionResolver,
+	collector statusCollector,
+	sessionName string,
+) int {
+	target, err := resolver.Resolve(ctx, &sessionName)
+	if err == nil {
+		err = writeSelectedStatus(ctx, stdout, collector, target, false)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", sessionName, err)
+	}
+	return exitOK
+}
+
+// writeSelectedStatus is the single-session collection and rendering path
+// shared by status --session and post-launch confirmation.
+func writeSelectedStatus(
+	ctx context.Context,
+	stdout io.Writer,
+	collector statusCollector,
+	target tmuxx.Session,
+	asJSON bool,
+) error {
+	report, err := collector.Collect(ctx, target.Name, target.ID)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return statuspkg.WriteJSON(stdout, report)
+	}
+	return statuspkg.WriteTable(stdout, report)
 }
 
 // statusAll reports every session for a status command without --session.
