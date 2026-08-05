@@ -4,10 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/skills"
@@ -52,6 +61,42 @@ func fencedCommands(lines []string) []string {
 		}
 	}
 	return commands
+}
+
+func markdownInvocations(tree fs.FS, root string) ([]documentedInvocation, error) {
+	var invocations []documentedInvocation
+	err := fs.WalkDir(tree, root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || path.Ext(filePath) != ".md" {
+			return nil
+		}
+		raw, err := fs.ReadFile(tree, filePath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", filePath, err)
+		}
+		var lines []string
+		scanner := bufio.NewScanner(bytes.NewReader(raw))
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("scan %s: %w", filePath, err)
+		}
+		for _, line := range fencedCommands(lines) {
+			invocation, err := parseDocumentedInvocation(line)
+			if err != nil {
+				return fmt.Errorf("%s: %w", filePath, err)
+			}
+			invocations = append(invocations, invocation)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return invocations, nil
 }
 
 func parseDocumentedInvocation(invocation string) (documentedInvocation, error) {
@@ -311,6 +356,264 @@ func parseVersionScalar(value string) (string, error) {
 	return value, nil
 }
 
+type sourceConstant struct {
+	name  string
+	value string
+}
+
+func sourceConstants(filename string, source []byte, prefix string) ([]sourceConstant, error) {
+	parsed, err := parser.ParseFile(token.NewFileSet(), filename, source, 0)
+	if err != nil {
+		return nil, err
+	}
+	var constants []sourceConstant
+	for _, declaration := range parsed.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		for _, specification := range general.Specs {
+			values := specification.(*ast.ValueSpec)
+			for index, identifier := range values.Names {
+				if !strings.HasPrefix(identifier.Name, prefix) {
+					continue
+				}
+				if index >= len(values.Values) {
+					return nil, fmt.Errorf("%s: %s has no explicit evaluable value", filename, identifier.Name)
+				}
+				value, err := constantLiteral(values.Values[index])
+				if err != nil {
+					return nil, fmt.Errorf("%s: %s: %w", filename, identifier.Name, err)
+				}
+				constants = append(constants, sourceConstant{name: identifier.Name, value: value})
+			}
+		}
+	}
+	return constants, nil
+}
+
+func constantLiteral(expression ast.Expr) (string, error) {
+	switch value := expression.(type) {
+	case *ast.BasicLit:
+		switch value.Kind {
+		case token.INT:
+			parsed, err := strconv.ParseInt(value.Value, 0, 64)
+			if err != nil {
+				return "", err
+			}
+			return strconv.FormatInt(parsed, 10), nil
+		case token.STRING:
+			parsed, err := strconv.Unquote(value.Value)
+			if err != nil {
+				return "", err
+			}
+			return parsed, nil
+		default:
+			return "", fmt.Errorf("literal kind %s is not an integer or string", value.Kind)
+		}
+	case *ast.ParenExpr:
+		return constantLiteral(value.X)
+	case *ast.UnaryExpr:
+		if value.Op != token.ADD && value.Op != token.SUB {
+			return "", fmt.Errorf("operator %s is not evaluable", value.Op)
+		}
+		literal, err := constantLiteral(value.X)
+		if err != nil {
+			return "", err
+		}
+		integer, err := strconv.ParseInt(literal, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("unary operand %q is not an integer", literal)
+		}
+		if value.Op == token.SUB {
+			integer = -integer
+		}
+		return strconv.FormatInt(integer, 10), nil
+	default:
+		return "", fmt.Errorf("expression %T is not a supported constant literal", expression)
+	}
+}
+
+func packageConstants(directory, prefix string) ([]sourceConstant, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]string)
+	var constants []sourceConstant
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(directory, entry.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		declared, err := sourceConstants(path, raw, prefix)
+		if err != nil {
+			return nil, err
+		}
+		for _, constant := range declared {
+			if first, duplicate := seen[constant.name]; duplicate {
+				return nil, fmt.Errorf("duplicate constant %s in %s and %s", constant.name, first, path)
+			}
+			seen[constant.name] = path
+			constants = append(constants, constant)
+		}
+	}
+	return constants, nil
+}
+
+func sourceDirectories(t *testing.T) (string, string) {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate skill_contract_test.go")
+	}
+	commandDirectory := filepath.Dir(filename)
+	return commandDirectory, filepath.Join(commandDirectory, "..", "..", "internal", "status")
+}
+
+func exitConstantsFromSource(t *testing.T) map[string]int {
+	t.Helper()
+	commandDirectory, _ := sourceDirectories(t)
+	declared, err := packageConstants(commandDirectory, "exit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	constants := make(map[string]int, len(declared))
+	for _, constant := range declared {
+		value, err := strconv.Atoi(constant.value)
+		if err != nil {
+			t.Fatalf("exit constant %s value %q is not numeric: %v", constant.name, constant.value, err)
+		}
+		constants[constant.name] = value
+	}
+	return constants
+}
+
+func stateConstantsFromSource(t *testing.T) map[string]status.State {
+	t.Helper()
+	_, statusDirectory := sourceDirectories(t)
+	declared, err := packageConstants(statusDirectory, "State")
+	if err != nil {
+		t.Fatal(err)
+	}
+	constants := make(map[string]status.State, len(declared))
+	for _, constant := range declared {
+		constants[constant.name] = status.State(constant.value)
+	}
+	return constants
+}
+
+func agentCommandInventory(registry map[string]parsedCommandSpec) map[string]map[string]struct{} {
+	inventory := make(map[string]map[string]struct{})
+	for command, specification := range registry {
+		if !specification.agentFacing {
+			continue
+		}
+		flags := make(map[string]struct{}, len(specification.flags))
+		for _, registered := range specification.flags {
+			flags["--"+registered.name] = struct{}{}
+		}
+		inventory[command] = flags
+	}
+	return inventory
+}
+
+func compareAgentDocumentation(invocations []documentedInvocation, registry map[string]parsedCommandSpec) []string {
+	expected := agentCommandInventory(registry)
+	documented := make(map[string]map[string]struct{})
+	var mismatches []string
+	for _, invocation := range invocations {
+		expectedFlags, knownCommand := expected[invocation.command]
+		if !knownCommand {
+			mismatches = append(mismatches, fmt.Sprintf("skill documents non-agent command %q", invocation.command))
+		}
+		for _, flag := range invocation.flags {
+			if _, ok := expectedFlags[flag]; !ok {
+				mismatches = append(mismatches, fmt.Sprintf("skill documents non-agent flag %s %s", invocation.command, flag))
+			}
+		}
+		if documented[invocation.command] == nil {
+			documented[invocation.command] = make(map[string]struct{})
+		}
+		for _, flag := range invocation.flags {
+			documented[invocation.command][flag] = struct{}{}
+		}
+	}
+	for command, expectedFlags := range expected {
+		documentedFlags, ok := documented[command]
+		if !ok {
+			mismatches = append(mismatches, fmt.Sprintf("agent command %q is undocumented", command))
+			continue
+		}
+		for flag := range expectedFlags {
+			if _, ok := documentedFlags[flag]; !ok {
+				mismatches = append(mismatches, fmt.Sprintf("agent flag %s %s is undocumented", command, flag))
+			}
+		}
+	}
+	return mismatches
+}
+
+func compareExitConstants(declared, documented map[string]int) []string {
+	var mismatches []string
+	for name, value := range declared {
+		documentedValue, ok := documented[name]
+		if !ok {
+			mismatches = append(mismatches, fmt.Sprintf("exit constant %s is undocumented", name))
+		} else if documentedValue != value {
+			mismatches = append(mismatches, fmt.Sprintf("exit constant %s is %d; documentation says %d", name, value, documentedValue))
+		}
+	}
+	for name := range documented {
+		if _, ok := declared[name]; !ok {
+			mismatches = append(mismatches, fmt.Sprintf("documented exit constant %s is undeclared", name))
+		}
+	}
+	return mismatches
+}
+
+func compareStateConstants(declared map[string]status.State, accessor []status.State, documented map[status.State]struct{}) []string {
+	var mismatches []string
+	declaredValues := make(map[status.State]string)
+	for name, state := range declared {
+		if first, duplicate := declaredValues[state]; duplicate {
+			mismatches = append(mismatches, fmt.Sprintf("State constants %s and %s both declare %q", first, name, state))
+			continue
+		}
+		declaredValues[state] = name
+		if _, ok := documented[state]; !ok {
+			mismatches = append(mismatches, fmt.Sprintf("declared state %s=%q is undocumented", name, state))
+		}
+	}
+	for state := range documented {
+		if _, ok := declaredValues[state]; !ok {
+			mismatches = append(mismatches, fmt.Sprintf("documented state %q has no State constant", state))
+		}
+	}
+
+	accessorValues := make(map[status.State]struct{}, len(accessor))
+	for _, state := range accessor {
+		if _, duplicate := accessorValues[state]; duplicate {
+			mismatches = append(mismatches, fmt.Sprintf("status.States() reports duplicate state %q", state))
+			continue
+		}
+		accessorValues[state] = struct{}{}
+		if _, ok := declaredValues[state]; !ok {
+			mismatches = append(mismatches, fmt.Sprintf("status.States() returns undeclared state %q", state))
+		}
+	}
+	for state, name := range declaredValues {
+		if _, ok := accessorValues[state]; !ok {
+			mismatches = append(mismatches, fmt.Sprintf("State constant %s=%q is missing from status.States()", name, state))
+		}
+	}
+	return mismatches
+}
+
 func TestSkillBudget(t *testing.T) {
 	t.Run("SKILL.md line count", func(t *testing.T) {
 		if lines := len(skillLines(t, skills.Root+"/SKILL.md")); lines > 150 {
@@ -346,6 +649,110 @@ func TestMetadataVersionParsingRejectsInvalidFrontmatter(t *testing.T) {
 				t.Fatal("parseMetadataVersion() error = nil, want rejection")
 			}
 		})
+	}
+}
+
+func TestSourceConstantInventoryIncludesSyntheticDeclarations(t *testing.T) {
+	for name, test := range map[string]struct {
+		source string
+		prefix string
+		want   sourceConstant
+	}{
+		"exit": {
+			source: "package main\nconst (\nexitOK = 0\nexitSynthetic = 9\n)\n",
+			prefix: "exit",
+			want:   sourceConstant{name: "exitSynthetic", value: "9"},
+		},
+		"state": {
+			source: "package status\ntype State string\nconst StateSynthetic State = \"synthetic\"\n",
+			prefix: "State",
+			want:   sourceConstant{name: "StateSynthetic", value: "synthetic"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			constants, err := sourceConstants(name+".go", []byte(test.source), test.prefix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, constant := range constants {
+				if constant == test.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("sourceConstants() = %#v, missing %#v", constants, test.want)
+			}
+		})
+	}
+
+	t.Run("unsupported expression fails closed", func(t *testing.T) {
+		_, err := sourceConstants("exit.go", []byte("package main\nconst exitSynthetic = 1 << 2\n"), "exit")
+		if err == nil {
+			t.Fatal("sourceConstants() error = nil, want unevaluable declaration rejection")
+		}
+	})
+
+	t.Run("synthetic exit enters comparison", func(t *testing.T) {
+		constants, err := sourceConstants("exit.go", []byte("package main\nconst (\nexitOK = 0\nexitSynthetic = 9\n)\n"), "exit")
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := make(map[string]int)
+		for _, constant := range constants {
+			value, err := strconv.Atoi(constant.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			declared[constant.name] = value
+		}
+		mismatches := compareExitConstants(declared, map[string]int{"exitOK": 0})
+		if !containsMismatch(mismatches, "exit constant exitSynthetic is undocumented") {
+			t.Fatalf("compareExitConstants() = %#v, want synthetic declaration drift", mismatches)
+		}
+	})
+
+	t.Run("synthetic state enters comparisons", func(t *testing.T) {
+		constants, err := sourceConstants("status.go", []byte("package status\ntype State string\nconst (\nStateRunning State = \"running\"\nStateSynthetic State = \"synthetic\"\n)\n"), "State")
+		if err != nil {
+			t.Fatal(err)
+		}
+		declared := make(map[string]status.State)
+		for _, constant := range constants {
+			declared[constant.name] = status.State(constant.value)
+		}
+		mismatches := compareStateConstants(declared, []status.State{status.StateRunning}, map[status.State]struct{}{status.StateRunning: {}})
+		if !containsMismatch(mismatches, `declared state StateSynthetic="synthetic" is undocumented`) ||
+			!containsMismatch(mismatches, `State constant StateSynthetic="synthetic" is missing from status.States()`) {
+			t.Fatalf("compareStateConstants() = %#v, want synthetic declaration drift", mismatches)
+		}
+	})
+}
+
+func containsMismatch(mismatches []string, want string) bool {
+	for _, mismatch := range mismatches {
+		if mismatch == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestMarkdownInvocationWalkIncludesReferences(t *testing.T) {
+	tree := fstest.MapFS{
+		"agentctl/SKILL.md":              {Data: []byte("```\nagentctl status --json\n```\n")},
+		"agentctl/references/control.md": {Data: []byte("```sh\nagentctl clear --session SESSION ROLE\n```\n")},
+	}
+	invocations, err := markdownInvocations(tree, "agentctl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	for _, invocation := range invocations {
+		commands = append(commands, invocation.command)
+	}
+	if !reflect.DeepEqual(commands, []string{"status", "clear"}) {
+		t.Fatalf("markdownInvocations() commands = %#v, want root and reference commands", commands)
 	}
 }
 
@@ -398,61 +805,54 @@ func TestDocumentedInvocationsPreserveExactArgv(t *testing.T) {
 
 func TestDocumentedAgentCommandContract(t *testing.T) {
 	t.Run("fenced agent commands and flags match the binary", func(t *testing.T) {
-		expected := map[string]map[string]struct{}{
-			"status":  {"--session": {}, "--json": {}},
-			"clear":   {"--session": {}},
-			"compact": {"--session": {}},
-			"kill":    {"--session": {}},
+		invocations, err := markdownInvocations(skills.Tree, skills.Root)
+		if err != nil {
+			t.Fatal(err)
 		}
-
-		documented := make(map[string]map[string]struct{})
-		for _, line := range fencedCommands(skillLines(t, skills.Root+"/SKILL.md")) {
-			invocation, err := parseDocumentedInvocation(line)
-			if err != nil {
-				t.Error(err)
-				continue
-			}
+		for _, invocation := range invocations {
 			if _, ok := commandUsage[invocation.command]; !ok {
 				t.Errorf("skill documents %q; not in commandUsage", invocation.command)
 			}
-			expectedFlags, knownCommand := expected[invocation.command]
-			if !knownCommand {
-				t.Errorf("skill documents agent command %q; it is not in the agent-facing command contract", invocation.command)
-			}
-			for _, flag := range invocation.flags {
-				if _, ok := expectedFlags[flag]; !ok {
-					t.Errorf("skill documents %s %s; it is not in the agent-facing flag contract", invocation.command, flag)
-				}
-			}
 			if _, err := parseCommand(invocation.command, substituteDocumentedMetavariables(invocation.argv)); err != nil {
 				if isUnknownFlagError(err) {
-					t.Errorf("skill documents unsupported flag in %q: %v", line, err)
+					t.Errorf("skill documents unsupported flag in %s %#v: %v", invocation.command, invocation.argv, err)
 					continue
 				}
-				t.Errorf("parseCommand rejects documented invocation %q: %v", line, err)
-			}
-
-			if documented[invocation.command] == nil {
-				documented[invocation.command] = make(map[string]struct{})
-			}
-			for _, flag := range invocation.flags {
-				documented[invocation.command][flag] = struct{}{}
+				t.Errorf("parseCommand rejects documented invocation %s %#v: %v", invocation.command, invocation.argv, err)
 			}
 		}
-
-		for command, expectedFlags := range expected {
-			documentedFlags, ok := documented[command]
-			if !ok {
-				t.Errorf("agent-facing command %q is undocumented in fenced invocations", command)
-				continue
-			}
-			for flag := range expectedFlags {
-				if _, ok := documentedFlags[flag]; !ok {
-					t.Errorf("agent-facing flag %s %s is undocumented in fenced invocations", command, flag)
-				}
-			}
+		for _, mismatch := range compareAgentDocumentation(invocations, parsedCommandRegistry) {
+			t.Error(mismatch)
 		}
 	})
+}
+
+func TestParsedCommandRegistryCouplesParserAndAgentDocumentation(t *testing.T) {
+	original := parsedCommandRegistry["status"]
+	mutated := original
+	mutated.flags = append(append([]parsedFlagSpec(nil), original.flags...), parsedFlagSpec{
+		name: "synthetic", kind: parsedFlagBool, usage: "synthetic review mutation",
+	})
+	parsedCommandRegistry["status"] = mutated
+	t.Cleanup(func() { parsedCommandRegistry["status"] = original })
+
+	if _, err := parseCommand("status", []string{"--synthetic"}); err != nil {
+		t.Fatalf("parseCommand() rejected production-registered synthetic flag: %v", err)
+	}
+	invocations, err := markdownInvocations(skills.Tree, skills.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatches := compareAgentDocumentation(invocations, parsedCommandRegistry)
+	found := false
+	for _, mismatch := range mismatches {
+		if strings.Contains(mismatch, "status --synthetic is undocumented") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("compareAgentDocumentation() = %#v, want registered synthetic flag drift", mismatches)
+	}
 }
 
 func TestTableParsersRejectMalformedAndDuplicateRows(t *testing.T) {
@@ -497,29 +897,13 @@ func TestTableParsersRejectMalformedAndDuplicateRows(t *testing.T) {
 
 func TestExitCodeTableMatchesConstants(t *testing.T) {
 	t.Run("exit-code reference and binary constants match", func(t *testing.T) {
-		constants := map[string]int{
-			"exitOK": exitOK, "exitUnclassified": exitUnclassified,
-			"exitUsage": exitUsage, "exitSession": exitSession,
-			"exitRole": exitRole, "exitUnsafe": exitUnsafe,
-			"exitTmux": exitTmux, "exitMissingExecutable": exitMissingExecutable,
-			"exitLaunch": exitLaunch,
-		}
+		constants := exitConstantsFromSource(t)
 		documented, err := parseExitCodeTable(skillLines(t, skills.Root+"/references/exit-codes.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for name, code := range constants {
-			got, ok := documented[name]
-			if !ok {
-				t.Errorf("exit constant %s undocumented in exit-codes.md", name)
-			} else if got != code {
-				t.Errorf("exit-codes.md says %s=%d; binary says %d", name, got, code)
-			}
-		}
-		for name := range documented {
-			if _, ok := constants[name]; !ok {
-				t.Errorf("exit-codes.md documents %s; no such binary constant", name)
-			}
+		for _, mismatch := range compareExitConstants(constants, documented) {
+			t.Error(mismatch)
 		}
 	})
 }
@@ -541,21 +925,8 @@ func TestStatusStatesMatch(t *testing.T) {
 			t.Fatalf("status.States() returned shared mutable storage: fresh first state = %q, want %q", fresh[0], first)
 		}
 
-		binary := make(map[status.State]struct{}, len(states))
-		for _, state := range status.States() {
-			if _, duplicate := binary[state]; duplicate {
-				t.Errorf("status.States() reports duplicate state %q", state)
-				continue
-			}
-			binary[state] = struct{}{}
-			if _, ok := documented[state]; !ok {
-				t.Errorf("status-states.md missing binary state %q", state)
-			}
-		}
-		for state := range documented {
-			if _, ok := binary[state]; !ok {
-				t.Errorf("status-states.md documents state %q; status package cannot emit it", state)
-			}
+		for _, mismatch := range compareStateConstants(stateConstantsFromSource(t), status.States(), documented) {
+			t.Error(mismatch)
 		}
 	})
 }

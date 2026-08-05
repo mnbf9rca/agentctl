@@ -510,59 +510,98 @@ type commandOptions struct {
 	directory  *string
 }
 
-func parseCommand(command string, arguments []string) (commandOptions, error) {
-	flags := cliflags.New(command)
-	sessionValue := flags.String("session", "", "session name")
+type parsedFlagKind uint8
 
-	var roles, models *string
-	var harness, model, effort, directory *string
-	var jsonOutput *bool
-	switch command {
-	case "launch":
-		roles = flags.String("roles", "", "role and harness assignments")
-		models = flags.String("models", "", "role and model assignments")
-		flags.String("dir", "", "working directory")
-	case "status":
-		jsonOutput = flags.Bool("json", false, "emit JSON")
-	case "relaunch":
-		harness = flags.String("harness", "", "harness override")
-		model = flags.String("model", "", "model override")
-		effort = flags.String("effort", "", "effort override")
-		directory = flags.String("dir", "", "working directory override")
+const (
+	parsedFlagString parsedFlagKind = iota
+	parsedFlagBool
+)
+
+type parsedFlagSpec struct {
+	name  string
+	kind  parsedFlagKind
+	usage string
+}
+
+type parsedCommandSpec struct {
+	agentFacing bool
+	flags       []parsedFlagSpec
+}
+
+var parsedCommandRegistry = map[string]parsedCommandSpec{
+	"attach": {
+		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+	},
+	"status": {
+		agentFacing: true,
+		flags: []parsedFlagSpec{
+			{name: "session", kind: parsedFlagString, usage: "session name"},
+			{name: "json", kind: parsedFlagBool, usage: "emit JSON"},
+		},
+	},
+	"clear": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+	},
+	"compact": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+	},
+	"kill": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, usage: "session name"}},
+	},
+	"relaunch": {
+		flags: []parsedFlagSpec{
+			{name: "session", kind: parsedFlagString, usage: "session name"},
+			{name: "harness", kind: parsedFlagString, usage: "harness override"},
+			{name: "model", kind: parsedFlagString, usage: "model override"},
+			{name: "effort", kind: parsedFlagString, usage: "effort override"},
+			{name: "dir", kind: parsedFlagString, usage: "working directory override"},
+		},
+	},
+	"version": {},
+}
+
+func parseCommand(command string, arguments []string) (commandOptions, error) {
+	specification, ok := parsedCommandRegistry[command]
+	if !ok {
+		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
+	}
+	flags := cliflags.New(command)
+	stringValues := make(map[string]*string)
+	boolValues := make(map[string]*bool)
+	for _, registered := range specification.flags {
+		switch registered.kind {
+		case parsedFlagString:
+			stringValues[registered.name] = flags.String(registered.name, "", registered.usage)
+		case parsedFlagBool:
+			boolValues[registered.name] = flags.Bool(registered.name, false, registered.usage)
+		default:
+			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown kind", command, registered.name)
+		}
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
-	options := commandOptions{session: *sessionValue, sessionSet: flags.WasSet("session")}
-	if jsonOutput != nil {
+	options := commandOptions{}
+	if sessionValue := stringValues["session"]; sessionValue != nil {
+		options.session = *sessionValue
+		options.sessionSet = flags.WasSet("session")
+	}
+	if jsonOutput := boolValues["json"]; jsonOutput != nil {
 		options.json = *jsonOutput
 	}
 	if command == "relaunch" {
-		options.harness = suppliedValue(flags, "harness", harness)
-		options.model = suppliedValue(flags, "model", model)
-		options.effort = suppliedValue(flags, "effort", effort)
-		options.directory = suppliedValue(flags, "dir", directory)
+		options.harness = suppliedValue(flags, "harness", stringValues["harness"])
+		options.model = suppliedValue(flags, "model", stringValues["model"])
+		options.effort = suppliedValue(flags, "effort", stringValues["effort"])
+		options.directory = suppliedValue(flags, "dir", stringValues["dir"])
 	}
 
 	positional := flags.Args()
 	switch command {
-	case "launch":
-		if !options.sessionSet {
-			return commandOptions{}, errors.New("--session is required")
-		}
-		if err := config.ValidateSessionName(options.session); err != nil {
-			return commandOptions{}, err
-		}
-		if *roles == "" {
-			return commandOptions{}, errors.New("--roles is required")
-		}
-		if flags.WasSet("models") && *models == "" {
-			return commandOptions{}, errors.New("--models must not be empty")
-		}
-		if len(positional) != 0 {
-			return commandOptions{}, errors.New("launch accepts no positional arguments")
-		}
 	case "clear", "compact", "relaunch":
 		if len(positional) != 1 {
 			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
