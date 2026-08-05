@@ -8,6 +8,25 @@ put to an independent refuter before reaching the report.
 
 Claims verified: 100. Candidate findings raised: 34. Refuted: 27. Surviving: 7.
 
+## Reading notes
+
+Two clarifications on the generated entries below, added after review. The
+entries themselves are left as recorded.
+
+- **`decodeFleet` validates non-empty fields.** Entries describing
+  `@agentctl_fleet` as "re-validated field by field" are accurate for the role
+  name and harness, which are always checked, but the model and effort checks
+  are guarded by `if fields[2] != ""` and `if fields[3] != ""`
+  (`internal/fleet/relaunch.go:564-573`). An empty field is the encoding of a
+  defaulted model or effort, so skipping it is correct — `EncodeFleet` writes
+  the empty string for exactly that case — but "field by field" reads slightly
+  stronger than the code. Nothing unvalidated reaches a harness argv either
+  way: `Spec.ModelArgs` and `Spec.EffortArgs` render no arguments at all for an
+  empty value (`internal/harness/harness.go:46-59`).
+- **Line numbers pin to `ec615b9`.** Every `file:line` citation was taken
+  against `origin/main` at `ec615b9`. Later commits move them; the surrounding
+  quoted code is the durable identifier.
+
 ## The quoting layer end-to-end (shellq → harness.AgentArgv → fleet.agentCommand → tmuxx.NewSession/NewWindow)
 
 - **"The only shell-interpreted string in the system (the window command tmux runs) is assembled by a dedicated ... quoting layer" — shellq.Join has exactly one non-test call site and it is the window command.**
