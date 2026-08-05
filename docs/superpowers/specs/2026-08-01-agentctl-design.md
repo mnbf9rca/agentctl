@@ -244,11 +244,11 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
    lookup — until the `amq coop exec → exec(harness)` chain has completed, and store the result as `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
 7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
    report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
-8. After every role has launched successfully, resolve the just-launched session by its explicit name and run the same
-   roster-driven collection and human-table rendering as `agentctl status --session S`. This is a fresh observation,
-   not a rendering of the launch request: a role already missing, dead, unmanaged, or otherwise degraded is reported
-   in that observed state. Those rows do not change exit 0, because the fleet launch itself succeeded. If session
-   resolution, collection, or rendering cannot complete, write
+8. After every role has launched successfully, reuse the typed session ID returned by `new-session` and run the same
+   roster-driven collection and human-table rendering as `agentctl status --session S`; do not re-resolve the session
+   by name. This is a fresh observation, not a rendering of the launch request: a role already missing, dead, unmanaged,
+   or otherwise degraded is reported in that observed state. Those rows do not change exit 0, because the fleet launch
+   itself succeeded. If collection or rendering cannot complete, write
    `agentctl: session "S" launched, but post-launch status could not be confirmed: CAUSE` to stderr and still exit 0;
    the confirmation is advisory and cannot truthfully reclassify or roll back an already-successful launch.
 

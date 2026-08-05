@@ -443,7 +443,7 @@ func TestStatusAllTreatsReportPresenceSeparatelyFromSchemaValue(t *testing.T) {
 	}
 }
 
-func TestRunLaunchRequiresAndValidatesExplicitSessionBeforeResolving(t *testing.T) {
+func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
@@ -453,7 +453,7 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionBeforeResolving(t *testing.
 		{name: "missing", args: []string{"launch", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "empty", args: []string{"launch", "--session=", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "invalid", args: []string{"launch", "--session", "INVALID", "--roles", "planner:claude"}, wantCode: exitUsage},
-		{name: "valid", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, wantCode: exitOK, wantResolve: 1},
+		{name: "valid", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, wantCode: exitOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

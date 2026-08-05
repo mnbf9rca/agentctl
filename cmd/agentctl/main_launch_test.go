@@ -162,7 +162,6 @@ func TestRunLaunchSuccessRendersObservedStatus(t *testing.T) {
 
 func TestRunLaunchRendersObservedMissingRoleWithoutChangingSuccess(t *testing.T) {
 	responses := append(launchOneRoleResponses(""),
-		tmuxx.Response{Stdout: []byte("$17\tfleet\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
@@ -187,7 +186,7 @@ func TestRunLaunchRendersObservedMissingRoleWithoutChangingSuccess(t *testing.T)
 }
 
 func TestRunLaunchReportsUnverifiedConfirmationWithoutChangingSuccess(t *testing.T) {
-	responses := append(launchOneRoleResponses(""), tmuxx.Response{})
+	responses := append(launchOneRoleResponses(""), tmuxx.Response{Err: errors.New("observation failed")})
 	runner := tmuxx.NewFakeRunner(responses...)
 	var stdout, stderr bytes.Buffer
 
@@ -199,7 +198,7 @@ func TestRunLaunchReportsUnverifiedConfirmationWithoutChangingSuccess(t *testing
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
-	want := "agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: session \"fleet\" not found\n"
+	want := "agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: tmux show session option: observation failed\n"
 	if got := stderr.String(); got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
@@ -430,7 +429,6 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_effort", ""}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_process", "codex"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},
@@ -475,7 +473,6 @@ func launchTwoRoleResponses() []tmuxx.Response {
 
 func healthyPostLaunchResponses() []tmuxx.Response {
 	return []tmuxx.Response{
-		{Stdout: []byte("$17\tfleet\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("planner\n")},
@@ -487,7 +484,6 @@ func healthyPostLaunchResponses() []tmuxx.Response {
 
 func healthyMultiRolePostLaunchResponses() []tmuxx.Response {
 	return []tmuxx.Response{
-		{Stdout: []byte("$17\tfleet\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("planner,reviewer\n")},
@@ -501,7 +497,6 @@ func healthyMultiRolePostLaunchResponses() []tmuxx.Response {
 
 func postLaunchStatusCalls() []tmuxx.Call {
 	return []tmuxx.Call{
-		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},

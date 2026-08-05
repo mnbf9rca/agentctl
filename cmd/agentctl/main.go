@@ -219,11 +219,11 @@ func runWithAllDependencies(
 			return usageError(stderr, err.Error(), usage)
 		}
 		deps.launch.fleet.Stderr = stderr
-		err = fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
+		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
 		if code := launchResult(stderr, err, usage); code != exitOK {
 			return code
 		}
-		return confirmLaunch(ctx, stdout, stderr, deps.resolver, deps.collector, options.session)
+		return confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
 	}
 
 	options, err := parseCommand(command, arguments[1:])
@@ -313,16 +313,12 @@ func runWithAllDependencies(
 func confirmLaunch(
 	ctx context.Context,
 	stdout, stderr io.Writer,
-	resolver sessionResolver,
 	collector statusCollector,
-	sessionName string,
+	target tmuxx.Session,
 ) int {
-	target, err := resolver.Resolve(ctx, &sessionName)
-	if err == nil {
-		err = writeSelectedStatus(ctx, stdout, collector, target, false)
-	}
+	err := writeSelectedStatus(ctx, stdout, collector, target, false)
 	if err != nil {
-		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", sessionName, err)
+		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", target.Name, err)
 	}
 	return exitOK
 }

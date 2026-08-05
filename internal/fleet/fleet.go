@@ -158,30 +158,31 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 	}
 }
 
-// Launch performs preflight before taking any tmux action. A nil directory
-// uses the invocation working directory; a non-nil value must name a directory.
-func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) error {
+// Launch performs preflight before taking any tmux action and returns the exact
+// session created by this invocation. A nil directory uses the invocation
+// working directory; a non-nil value must name a directory.
+func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) (tmuxx.Session, error) {
 	if len(fleet.Roles) == 0 {
-		return fmt.Errorf("fleet must contain at least one role")
+		return tmuxx.Session{}, fmt.Errorf("fleet must contain at least one role")
 	}
 	if err := preflight.CheckExecutables(fleet, l.lookPath); err != nil {
-		return err
+		return tmuxx.Session{}, err
 	}
 	directoryName, err := l.resolveDirectory(directory)
 	if err != nil {
-		return err
+		return tmuxx.Session{}, err
 	}
 	sessions, err := l.tmux.ListSessions(ctx)
 	if errors.Is(err, context.Canceled) {
-		return context.Canceled
+		return tmuxx.Session{}, context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
+		return tmuxx.Session{}, context.DeadlineExceeded
 	}
 	if err == nil {
 		for _, existing := range sessions {
 			if existing.Name == session {
-				return &SessionExistsError{Name: session}
+				return tmuxx.Session{}, &SessionExistsError{Name: session}
 			}
 		}
 	}
@@ -189,28 +190,28 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {
 		if errors.Is(err, tmuxx.ErrCreationOutput) {
-			return &CreationError{Session: session, Cause: err}
+			return tmuxx.Session{}, &CreationError{Session: session, Cause: err}
 		}
-		return err
+		return tmuxx.Session{}, err
 	}
 	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles, directoryName); err != nil {
-		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
-		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	l.clearSessionIdentity(ctx, createdSession.SessionID)
 
 	for _, role := range fleet.Roles[1:] {
 		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directoryName)
 		if err != nil {
-			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 		if err := l.stampWindow(ctx, createdWindow.WindowID, createdWindow.PanePID, role); err != nil {
-			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 	}
-	return nil
+	return tmuxx.Session{ID: createdSession.SessionID, Name: session}, nil
 }
 
 func (l Launcher) clearSessionIdentity(ctx context.Context, sessionID tmuxx.SessionID) {
