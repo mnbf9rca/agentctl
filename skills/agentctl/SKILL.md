@@ -58,38 +58,48 @@ on exit.
 
 ## 4. Rules the binary does not enforce
 
-- **Do not send `clear`/`compact` to a role that has not been released back
-  to you.** Mid-task, it destroys work in progress.
+- **Never reset a role that is still working on a task.** A mid-task `clear`
+  or `compact` destroys its working context and work in progress. Reset only
+  when the current task is finished — its result has been delivered or
+  control explicitly handed back — or when you deliberately abandon that
+  work.
 - **Do not issue control commands while the fleet is saturating the host.**
   agentctl cannot detect saturation without inferring machine state, which
   its design forbids; the obligation is yours.
 - **Delivery is not execution.** Exit 0 proves tmux accepted the keys, not
-  that the agent's TUI ran the command. Verify by observing the role's
-  subsequent behaviour (message ping or `status`), never by trusting exit 0.
+  that the agent's TUI ran the command. Use an AMQ message ping and `status`
+  only for the facts they can establish. To verify the reset itself, take the
+  pane ID from `status --json` and inspect the screen read-only:
+
+  ```tmux
+  tmux capture-pane -p -t PANE
+  ```
+
+  Confirm the captured screen shows that the TUI actually reset.
+  `capture-pane` is observation only. Never write to a sibling with raw tmux;
+  doing so bypasses every guard agentctl provides.
 - **The self-target guard is an accident guard.** It stops you wiping your
   own context by mistake; it is not a security boundary.
 
 ## 5. Context hygiene for clear and compact
 
-- `clear` between unrelated tasks (default for build workers), after a PR is
-  opened and handed off, between batches (all roles), and for any wedged or
-  confused worker — instead of arguing with it.
-- `compact` when continuity has value: the next task continues the same
-  subsystem, context pressure mid-task, and a reviewer role mid-batch —
-  never `clear` a reviewer while a PR batch is in flight; cross-PR
-  consistency lives in its context. Clear the reviewer at batch end.
-- Never send either mid review-fix loop or while the fleet saturates the
-  host. Confirm the reset (ping or `status`) before dispatching the next
-  task.
-- Corollary: routine clearing is only safe because dispatch messages are
-  self-contained. Keep them self-contained; the two rules come as a pair.
+- `clear` after a finished task when the next task is unrelated, or when you
+  deliberately abandon work by a wedged or confused role.
+- `compact` after a finished task when the next task continues the same
+  subject and the prior context remains useful.
+- Never send either while the role is still working or while the fleet
+  saturates the host. Confirm the reset as described above before assigning
+  the next task.
+- Keep every new task description self-contained so clearing prior context
+  does not discard information the role still needs.
 
 ## 6. What agentctl deliberately cannot do
 
 No arbitrary keystrokes or free-text payloads (the payload registry is
 closed and argument-free), no reading or writing AMQ state, no attaching for
-you, no agent-initiated per-window restart (`relaunch` stays operator-only
-until #79's successor lands), no machine-state inference. Do not ask.
+you, no agent-initiated per-window restart, no machine-state inference.
+`relaunch` is operator-only because role recovery is a fleet-level decision;
+report a missing sibling to the operator instead of trying to repair it.
 
 ## 7. Branch on exit codes, not prose
 
