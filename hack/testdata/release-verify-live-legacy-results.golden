@@ -1,0 +1,16 @@
+### 2026-08-03
+
+- agentctl: `agentctl version 0.1.2 (abc1234)`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.220 (Claude Code)`
+- codex-cli: `codex-cli 0.146.0 (research preview)`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `testdata/release-verify-live-legacy-artifact`
+- Probes: all four completed, no surviving throwaway server
+- Attach: operator confirmed: y
+- Claude clear: operator confirmed: y
+- Codex clear: operator confirmed: y
+- Compact (claude): operator confirmed: y
+- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
+- Teardown check: PASS

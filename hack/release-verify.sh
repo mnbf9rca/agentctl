@@ -139,9 +139,21 @@ PART_C_REAL_TMUX=''
 PART_C_SOCKET=''
 PART_C_ORIGINAL_HOME=''
 PART_C_ORIGINAL_PATH=''
+PART_C_HOME=''
+PART_C_PROJECT=''
+PART_C_BIN=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
 PART_C_ACTIVE=0
+part_c_kill_session() {
+  (
+    cd "$PART_C_PROJECT" || exit 1
+    HOME="$PART_C_HOME" \
+      PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH" \
+      "$PART_C_TOP/bin/agentctl" kill --session skillverify
+  )
+}
+
 part_c_teardown() {
   local teardown_status=0
   local socket_output
@@ -150,7 +162,7 @@ part_c_teardown() {
     return 0
   fi
   if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
-    if "$PART_C_TOP/bin/agentctl" kill --session skillverify; then
+    if part_c_kill_session; then
       printf 'PART C CLEANUP PASS (skillverify killed)\n'
       PART_C_SESSION_OWNED=0
     else
@@ -163,9 +175,14 @@ part_c_teardown() {
     if [ "$socket_status" -eq 0 ]; then
       printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
       PART_C_SOCKET_ARMED=0
+      if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
+        printf 'PART C CLEANUP OBSERVED (named tmux socket removal proves skillverify absent)\n'
+        PART_C_SESSION_OWNED=0
+      fi
     elif printf '%s\n' "$socket_output" | grep -qF 'no server running'; then
       printf 'PART C CLEANUP OBSERVED (named tmux socket already absent)\n'
       PART_C_SOCKET_ARMED=0
+      PART_C_SESSION_OWNED=0
     else
       printf 'PART C CLEANUP FAIL (named tmux socket kill-server exited %s): %s\n' "$socket_status" "$socket_output" >&2
       teardown_status=1
@@ -186,7 +203,7 @@ part_c_teardown() {
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
   printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
-  if [ -n "$PART_C_ROOT" ]; then
+  if [ -n "$PART_C_ROOT" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
     if rm -rf -- "$PART_C_ROOT"; then
       printf 'PART C CLEANUP PASS (temporary root removed)\n'
       PART_C_ROOT=''
@@ -194,8 +211,10 @@ part_c_teardown() {
       printf 'PART C CLEANUP FAIL (remove temporary root %s)\n' "$PART_C_ROOT" >&2
       teardown_status=1
     fi
+  elif [ -n "$PART_C_ROOT" ]; then
+    printf 'PART C CLEANUP OBSERVED (temporary root retained for owned-resource cleanup retry)\n'
   fi
-  if [ "$teardown_status" -eq 0 ]; then
+  if [ "$teardown_status" -eq 0 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ -z "$PART_C_ROOT" ]; then
     PART_C_ACTIVE=0
   fi
   return "$teardown_status"
@@ -212,6 +231,8 @@ part_c_abort() {
 cleanup_exit_trap() {
   local original_status=$?
   local cleanup_status=0
+  local final_status
+  trap - EXIT
   if ! part_c_teardown; then
     printf 'release-verify: Part C cleanup failed during exit\n' >&2
     cleanup_status=1
@@ -220,10 +241,11 @@ cleanup_exit_trap() {
     printf 'release-verify: Part B cleanup failed during exit\n' >&2
     cleanup_status=1
   fi
+  final_status=$original_status
   if [ "$cleanup_status" -ne 0 ]; then
-    return 1
+    final_status=1
   fi
-  return "$original_status"
+  exit "$final_status"
 }
 
 STATUS_EXIT=0
@@ -339,22 +361,34 @@ render_results() {
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
 
   if [ "$mode" = verify-live ]; then
-    if [ -n "$(field part_a_result "$metadata")" ]; then
-      printf -- '- Part A: %s\n' "$(field part_a_result "$metadata")"
+    part_a_result=$(field part_a_result "$metadata")
+    part_b_detach_attestation=$(field part_b_detach_attestation "$metadata")
+    if [ -n "$part_a_result" ]; then
+      [ -n "$part_b_detach_attestation" ] || die 'live metadata new schema is missing part_b_detach_attestation'
+      printf -- '- Part A: %s\n' "$part_a_result"
       printf -- '- Part B: %s\n' "$(field part_b_result "$metadata")"
       printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
     fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
-    printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
-    printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
-    printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
-    printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-    printf -- '- Checkpoint B.C9 relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
-      "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
-    printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$(field part_b_detach_attestation "$metadata")"
-    if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
-      printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
-      printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+    if [ -n "$part_a_result" ]; then
+      printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
+      printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
+      printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
+      printf -- '- Checkpoint B.C9 relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+        "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+      printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
+      if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
+        printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+        printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+      fi
+    else
+      printf -- '- Attach: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      printf -- '- Claude clear: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
+      printf -- '- Codex clear: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
+      printf -- '- Compact (claude): operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
+      printf -- '- Relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+        "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
     fi
     case "$(field teardown_status_exit "$metadata")" in
       3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;

@@ -25,6 +25,7 @@ func TestRenderResultsMatchesGolden(t *testing.T) {
 	}{
 		{"measure", "testdata/release-verify-measure-artifact", "testdata/release-verify-measure-results.golden"},
 		{"verify live", "testdata/release-verify-live-artifact", "testdata/release-verify-live-results.golden"},
+		{"verify live legacy", "testdata/release-verify-live-legacy-artifact", "testdata/release-verify-live-legacy-results.golden"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -305,6 +306,21 @@ case "$1" in
     ;;
   kill)
     if [ "$3" = skillverify ]; then
+      code=0
+      if [ -n "${AGENTCTL_TEST_PART_C_KILL_CODES:-}" ]; then
+        calls=0
+        [ ! -e "$AGENTCTL_TEST_PART_C_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_C_KILL_CALLS")
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_C_KILL_CALLS"
+        IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_C_KILL_CODES"
+        index=$((calls - 1))
+        [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
+        code=${codes[$index]}
+      fi
+      if [ "$code" -ne 0 ]; then
+        echo 'simulated skillverify kill failure' >&2
+        exit "$code"
+      fi
       rm -f "$AGENTCTL_TEST_SKILL_OWNED"
       touch "$AGENTCTL_TEST_SKILL_KILLED"
     else
@@ -438,6 +454,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILLED", filepath.Join(t.TempDir(), "skill-killed"))
+	t.Setenv("AGENTCTL_TEST_PART_C_KILL_CALLS", filepath.Join(t.TempDir(), "skill-kill-calls"))
 	t.Setenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED", filepath.Join(t.TempDir(), "skill-socket-killed"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS", filepath.Join(t.TempDir(), "skill-kill-server-calls"))
 	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
@@ -648,6 +665,37 @@ func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) 
 	}
 }
 
+func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing.T) {
+	fixture := newLiveFixture(t)
+	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
+	writeTestFile(t, bashEnvironment, []byte(`cat() {
+  if [ "${AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH:-0}" = 1 ] && [ -e "$AGENTCTL_TEST_OWNED" ]; then
+    echo 'simulated zero-status exit after Part B launch' >&2
+    set +e
+    exit 0
+  fi
+  command /bin/cat "$@"
+}
+`), 0o644)
+	output, err := fixture.run(t, "",
+		"BASH_ENV="+bashEnvironment,
+		"AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH=1",
+		"AGENTCTL_TEST_PART_B_KILL_CODE=17",
+	)
+	if err == nil {
+		t.Fatalf("zero-status operation with failed cleanup returned success:\n%s", output)
+	}
+	for _, want := range []string{
+		"simulated zero-status exit after Part B launch",
+		"PART B CLEANUP FAIL (relverify kill exited 17)",
+		"release-verify: Part B cleanup failed during exit",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 12))
@@ -724,6 +772,51 @@ func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testin
 			t.Fatalf("Part C agentctl boundary could reach the real HOME or unshimmed tmux context: %q", record)
 		}
 	}
+}
+
+func TestLiveVerificationPartCKillRetryUsesPinnedIsolatedEnvironment(t *testing.T) {
+	fixture := newLiveFixture(t)
+	originalHome := os.Getenv("HOME")
+	originalPath := os.Getenv("PATH")
+	output, err := fixture.run(t, strings.Repeat("y\n", 10)+"n\n",
+		"AGENTCTL_TEST_PART_C_KILL_CODES=17,0",
+		"AGENTCTL_TEST_SKILL_KILL_SERVER_CODES=18,0",
+	)
+	if err == nil {
+		t.Fatalf("release verification accepted Part C checkpoint refusal:\n%s", output)
+	}
+	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
+	partCRoot := filepath.Dir(skillHome)
+	wantProject := filepath.Join(partCRoot, "project")
+	wantPathPrefix := filepath.Join(partCRoot, "bin") + string(os.PathListSeparator)
+	var killRecords []string
+	for _, record := range strings.Split(strings.TrimSpace(readTestFile(t, fixture.agentctlEnvironmentLog)), "\n") {
+		if strings.HasPrefix(record, "kill --session skillverify\t") {
+			killRecords = append(killRecords, record)
+		}
+	}
+	if len(killRecords) != 2 {
+		t.Fatalf("Part C kill environment records = %d, want 2:\n%s", len(killRecords), strings.Join(killRecords, "\n"))
+	}
+	for index, record := range killRecords {
+		fields := strings.Split(record, "\t")
+		if len(fields) != 4 {
+			t.Fatalf("Part C kill environment record %d malformed: %q", index, record)
+		}
+		if fields[1] != wantProject || fields[2] != skillHome || !strings.HasPrefix(fields[3], wantPathPrefix) {
+			t.Fatalf("Part C kill retry %d escaped captured context: %q; want cwd=%q HOME=%q PATH prefix=%q", index, record, wantProject, skillHome, wantPathPrefix)
+		}
+		if fields[2] == originalHome || fields[3] == originalPath {
+			t.Fatalf("Part C kill retry %d reached the real HOME or default PATH: %q", index, record)
+		}
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Part C ownership survived the observed successful retry: %v", statErr)
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_KILLED")); statErr != nil {
+		t.Fatalf("Part C successful retry was not observed: %v", statErr)
+	}
+	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
 }
 
 func TestLiveVerificationPartCRejectCleansOnlyNamedResources(t *testing.T) {
