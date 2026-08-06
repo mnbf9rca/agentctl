@@ -136,8 +136,10 @@ surviving conversation. Neither half alone is the relaunch contract.
 - [ ] The verifier killed `relverify`; `./bin/agentctl status --session relverify`
       exited `3` when other tmux sessions remained or `6` when `relverify` was
       the last session and the server exited. Both are expected absence results;
-      the verifier recorded which occurred in `docs/release-verification-notes.md`,
-      no matching tmux process remained, and it printed `ALL VERIFIED — evidence appended`
+      no matching tmux process remained. After successful Parts A–C, the
+      verifier appends its evidence block immediately below `## Results history`
+      in `docs/release-verification-notes.md`; a missing marker or failed append
+      is a verifier failure. It then prints `ALL VERIFIED — evidence appended`.
 - [ ] Commit `docs/release-verification-notes.md` as the **last** step of the
       ceremony, only after the attach-narration restyle has merged and the full
       checklist has been rerun against the shipped output. Never commit
