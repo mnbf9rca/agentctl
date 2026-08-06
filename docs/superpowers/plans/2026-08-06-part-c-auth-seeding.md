@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Make the isolated Part C walkthrough start authenticated harnesses after explicit filename-only consent, while retaining a guided manual-sign-in path and deleting every copied credential on all exits.
+**Goal:** Make the isolated Part C walkthrough seed every empirically proven HOME credential after explicit filename-only consent, guide the remaining sign-ins, and delete every copied credential on all exits.
 
-**Architecture:** Keep the real HOME isolated from every harness process. Inspect only a fixed allowlist of harness auth files under the captured real HOME, print only their ~/ names, and either copy them with restrictive modes after consent or guide manual sign-in. Remove the temporary HOME independently of tmux/session cleanup so a retained retry root contains no credentials.
+**Architecture:** Keep the real HOME isolated from every harness process. On macOS, offer only the empirically proven `~/.codex/auth.json`, print only that ~/ name, and copy it with restrictive modes after consent. Claude has no proven HOME-file seed and always receives guided interactive sign-in; declining Codex seeding offers fully manual sign-in. Remove the temporary HOME independently of tmux/session cleanup so a retained retry root contains no credentials.
 
 **Tech Stack:** Bash 3.2-compatible release tooling, Go standard-library fixture tests, macOS Keychain-backed Claude Code, codex-cli auth files, tmux named sockets, AMQ.
 
@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: PART_C_ORIGINAL_HOME, PART_C_HOME, ask, and part_c_abort.
-- Produces: PART_C_AUTH_MODE (seeded or manual) and an isolated HOME containing only consented allowlist files.
+- Produces: PART_C_AUTH_MODE (`codex-seeded` or `manual`) and an isolated HOME containing only the consented proven Codex file.
 
 - [ ] **Step 1: Make the fixture auth-safe**
 
@@ -37,29 +37,27 @@ Create a mode-0700 fake operator HOME containing literal fake auth files and set
 
 - [ ] **Step 2: Write the failing consent-yes test**
 
-Add TestLiveVerificationPartCConsentSeedsOnlyNamedAuthFiles. Assert the transcript lists exactly the present allowlist filenames before consent, contains no fake body, and launch observes only .claude.json and .codex/auth.json at mode 600 beneath mode-700 parents.
+Add TestLiveVerificationPartCConsentSeedsOnlyProvenCodexAuthFile. Assert the transcript lists exactly the proven Codex filename before consent, states Claude requires interactive sign-in, contains no fake body, rejects both Claude lookalike paths, and launch observes only .codex/auth.json at mode 600 beneath mode-700 parents.
 
 - [ ] **Step 3: Capture RED**
 
 Run:
 
 ~~~bash
-GOCACHE=/tmp/agentctl-go-cache go test ./hack -run TestLiveVerificationPartCConsentSeedsOnlyNamedAuthFiles -count=1 -v
+GOCACHE=/tmp/agentctl-go-cache go test ./hack -run TestLiveVerificationPartCConsentSeedsOnlyProvenCodexAuthFile -count=1 -v
 ~~~
 
 Expected: FAIL because no consent prompt or auth copies exist.
 
 - [ ] **Step 4: Implement the fixed allowlist**
 
-Enumerate only these present source/destination pairs:
+Enumerate only this proven source/destination pair:
 
 ~~~text
-~/.claude.json              -> PART_C_HOME/.claude.json
-~/.claude/.credentials.json -> PART_C_HOME/.claude/.credentials.json
 ~/.codex/auth.json          -> PART_C_HOME/.codex/auth.json
 ~~~
 
-Print source names, call ask once, create required directories with install -d -m 0700, and copy files with install -m 0600. Any copy error aborts through Part C teardown.
+Print the source name, call ask once, create the required directory with install -d -m 0700, and copy the file with install -m 0600. Any copy error aborts through Part C teardown. Never present or copy a Claude file without a new successful sufficiency probe.
 
 - [ ] **Step 5: Capture GREEN**
 
@@ -142,11 +140,11 @@ git commit -S -m "Remove Part C credentials on every exit"
 
 **Interfaces:**
 - Consumes: empirical auth-path findings and new metadata fields.
-- Produces: operator instructions and persisted evidence distinguishing seeded/manual auth.
+- Produces: operator instructions and persisted evidence distinguishing `codex-seeded` from fully manual auth.
 
-- [ ] **Step 1: Finish the signed-in Claude probe**
+- [ ] **Step 1: Record the bounded harness probes**
 
-From a signed-in real HOME, compare auth-status exit/logged-in boolean for empty HOME and .claude.json-only HOME, discarding all other output. Reconfirm codex current/empty/auth.json-only. Remove every probe root with a validated trap.
+Compare only auth-status exits/logged-in booleans, discarding all other output. Codex current/empty/auth.json-only proves auth.json sufficient. From an authenticated Claude source HOME, empty HOME, `.claude.json`-only, `settings.json`-only, and both candidates together remain logged out; macOS Keychain storage therefore leaves guided interactive sign-in as the fail-closed branch. Remove every probe root with a validated trap.
 
 - [ ] **Step 2: Post standalone issue evidence**
 
@@ -154,7 +152,7 @@ Record only versions, candidate filenames, safe status booleans/exit codes, clea
 
 - [ ] **Step 3: Add concise script evidence comments**
 
-Name probe date/tool versions and why each fixed filename is included. Distinguish macOS Keychain credentials from HOME-scoped Claude state.
+Name probe date/tool versions and why only the Codex filename is included. Distinguish macOS Keychain credentials from non-credential Claude HOME state.
 
 - [ ] **Step 4: Update results schema and goldens**
 
@@ -162,7 +160,7 @@ Render Part C auth mode and C.C1 attestation. Update current goldens; keep legac
 
 - [ ] **Step 5: Update checklist and SECURITY.md**
 
-Document filename-only consent, seeded/manual paths, C.C1-C.C3, permissions, and cleanup. Document the fixed allowlist, explicit consent, no-content output, and independent credential-HOME deletion.
+Document filename-only consent, codex-seeded/manual paths, C.C1-C.C3, permissions, and cleanup. Document the one-file fixed allowlist, explicit consent, no-content output, mandatory fresh-HOME Claude sign-in, and independent credential-HOME deletion.
 
 - [ ] **Step 6: Run focused gates and commit**
 
@@ -211,4 +209,3 @@ Send the exact run URL to reviewer via AMQ. Fix every finding in this PR, rerun,
 - [ ] **Step 6: Reply to planner**
 
 Send PR URL, signed head, exact CI run, reviewer comment, and detached-worktree status on the original dispatch.
-

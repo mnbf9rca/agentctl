@@ -171,22 +171,39 @@ fails closed after teardown is attempted.
 ## Part C — Follow the verifier's live skill-discovery walkthrough
 
 The verifier creates a separate stub fleet on a named throwaway tmux socket,
-an empty temporary project, and a temporary `HOME`. It installs the release
-candidate skill and launches both harnesses with that same temporary `HOME`.
-It must never use the default tmux server or the operator's real `HOME`.
+an empty temporary project, and a mode-`0700` temporary `HOME`. The macOS probe
+proved only `~/.codex/auth.json` sufficient for file-based seeding; Claude Code
+uses the macOS Keychain, and neither `~/.claude.json` nor another HOME file was
+proved sufficient. The verifier therefore never offers or copies a Claude file.
+If the proven Codex file exists, the verifier prints that exact filename and
+asks once for consent before copying it with mode `0600`; its contents are never
+printed. Claude Code still requires guided interactive sign-in in the fresh
+HOME. If Codex copy consent is declined, the verifier copies nothing and asks
+whether to continue with guided manual sign-in for both harnesses. Declining
+both paths fails Part C before AMQ initialization, skill installation, or fleet
+launch. Harness processes receive only the temporary `HOME`; they never receive
+the operator's real `HOME`.
 
-- [ ] While attached, wait for both harnesses to reach a ready prompt. In the
+- [ ] At checkpoint C.C1, answer `y` only if both harnesses reached
+      authenticated ready prompts. On the `codex-seeded` path, complete Claude
+      Code onboarding/sign-in while attached and verify codex reached its ready
+      prompt from the copied `auth.json` without manual sign-in. On the manual
+      path, complete both harness sign-ins while attached before answering this
+      checkpoint
+- [ ] At checkpoint C.C2, in the
       Claude Code tab, type `/skills`, press Enter, find `agentctl` in the
       displayed inventory, and press `esc` to close it. Repeat those exact
       inventory actions in the codex tab. After detaching back to the verifier,
-      answer `y` at checkpoint C.C1 only if both inventories listed `agentctl`
+      answer `y` only if both inventories listed `agentctl`
 - [ ] Ask each harness the verifier's exact `ambiguous` question. After both
       answers are visible and the attachment has returned to the verifier,
       compare them with the quoted status-states meaning and answer `y` at
-      checkpoint C.C2 only if both match
+      checkpoint C.C3 only if both match
 - [ ] After the observations, press `esc`, not uppercase `X`, and wait for the
       post-detach report. The verifier tears down only its named probe fleet and
-      socket, restores `HOME` and `PATH`, and removes its temporary root.
+      socket, restores `HOME` and `PATH`, and removes the credential-bearing
+      temporary `HOME` on every exit. If named-resource cleanup requires a
+      retry, any retained outer root contains no copied credentials
 
 ## Manual fallback for Parts A–C
 
@@ -194,6 +211,10 @@ This appendix is for troubleshooting a verifier failure or interruption, not
 the normal release path. Do not paste these blocks during a successful normal
 walkthrough: the verifier owns the resources it creates and performs cleanup.
 In particular, never point Part C at the default tmux server or a real `HOME`.
+The normal verifier owns the filename-only consent and secure-copy mechanism.
+For manual troubleshooting, copy no authentication files: complete both
+harness sign-ins after attaching to the isolated fleet, then continue with the
+inventory and status-meaning observations.
 
 Set up the isolated socket and fleet from the clean primary checkout. The tmux
 shim scopes every tmux command agentctl runs; `amq coop init` scopes AMQ to the

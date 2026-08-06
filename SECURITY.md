@@ -77,6 +77,25 @@ directory) and writes nothing inside application repositories. It relies on
 tmux's default private socket (`0700` directory) and AMQ's documented
 `0700`/`0600` permissions for session data created by `amq coop exec`.
 
+The developer-facing `hack/release-verify.sh` Part C walkthrough is separate
+from agentctl's production file-writing surface. For its isolated live harness
+check on macOS, it may copy only the existing fixed path
+`~/.codex/auth.json` from the operator's captured real HOME. A 2026-08-06 probe
+proved that file sufficient for codex-cli 0.146.1. Claude Code 2.1.223 uses the
+macOS Keychain; empty HOME, `.claude.json`-only, `settings.json`-only, and both
+files together all remained logged out despite an authenticated source HOME.
+No HOME file set was therefore proved sufficient, so the verifier copies no
+Claude file and guides interactive Claude sign-in in the fresh HOME. It
+prints the Codex filename only and requires an explicit `y` before copying;
+`n` copies nothing and offers guided manual sign-in for both harnesses. The
+temporary HOME and credential-parent directory are `0700`, the copied file is
+`0600`, and no credential contents are written to output or evidence. Teardown
+removes that credential-bearing HOME as an independent obligation on success,
+failure, refusal, interrupt, and abort, before an outer retry root can be
+retained. The verifier refuses success if credential-HOME removal is not
+observed; its tests use fake auth files under a fake source HOME, including
+unseeded Claude lookalike files that must never cross the launch boundary.
+
 ## Reporting a vulnerability
 
 Please open a GitHub security advisory (or a private report to the repository owner) rather than a public issue for anything exploitable. Include the agentctl, tmux, amq, and harness versions involved. Reports about risks explicitly accepted above are welcome as ordinary issues if you believe the assessment is wrong.
