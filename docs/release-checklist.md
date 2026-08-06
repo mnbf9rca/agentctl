@@ -11,7 +11,15 @@ a linked worktree. The launched panes inherit the tmux server environment, and
 AMQ auto-discovers the primary checkout's repo-local `.agent-mail`; a linked
 worktree instead needs `AMQ_GLOBAL_ROOT` propagated into that server.
 
-## Part A — Run the wrapper
+The normal path for Parts A–C is the release verifier. It numbers each action,
+prints the exact command and expected observation before every human
+checkpoint, and records each `y` or `n` confirmation as an operator claim. It
+automatically tears down the Part B and Part C resources on success, refusal,
+interrupt, or failure. Answer every prompt exactly `y` or `n`; empty input and
+other text re-prompt. `n` is a named failing operator claim, not a way to skip
+a judgment, and the verifier fails closed after attempting teardown.
+
+## Part A — Start the verifier
 
 Resolve the release version and prove that the embedded skill documents that
 same version before building release artifacts:
@@ -23,26 +31,26 @@ hack/check-skill-version.sh "$release_version"
 
 - [ ] The skill version check exited 0 and printed no mismatch or missing-version error
 
+Start the default interactive walkthrough:
+
 ```bash
 bash hack/release-verify.sh
 ```
 - [ ] `PROBES PASS` printed; all four probes completed and no throwaway server survived
-- [ ] The wrapper ran `./bin/agentctl launch --session relverify --roles
+- [ ] The verifier ran `./bin/agentctl launch --session relverify --roles
       a:claude,b:codex --efforts b:high` successfully
 
-## Part B — Watch the live release-candidate delivery path
+## Part B — Follow the verifier's live release-candidate walkthrough
 
-From Window 2, run the bare command printed after `Attach from Window 2 with:`:
-
-```bash
-./bin/agentctl attach --session relverify
-```
+The verifier launches `relverify` with `a:claude,b:codex` and effort `high`
+for `b`. In Window 2, run the bare attach command it prints.
 - [ ] The narration starts with `agentctl: attaching session "relverify" (2 windows)
       in iTerm2…` when the advisory window-count read succeeds, and warns that
       the Command Menu belongs to iTerm2. If `(2 windows)` is omitted, record
       the advisory read failure in `docs/release-verification-notes.md`; omission
       is not a release failure and agentctl never guesses the count
-- [ ] Window 2 shows the claude and codex tabs; answer `y` at the attach prompt
+- [ ] Window 2 shows the claude and codex tabs; answer `y` at the verifier's
+      attach prompt
 
 Keep this attachment open through the live checks below. After the last visual
 check, press `esc` to detach cleanly; **do not use uppercase `X`**. The
@@ -55,25 +63,25 @@ post-detach session-state report beginning with
 ### Claude clear
 
 - [ ] In the claude tab, type junk without pressing Enter; answer `y` when ready
-- [ ] Watch the wrapper run `./bin/agentctl clear --session relverify a`; answer
+- [ ] Watch the verifier run `./bin/agentctl clear --session relverify a`; answer
       `y` only if junk cleared, `/clear` executed, and the conversation reset
 
 ### Codex clear
 
 - [ ] In the codex tab, type junk without pressing Enter; answer `y` when ready
-- [ ] Watch the wrapper run `./bin/agentctl clear --session relverify b`; answer
+- [ ] Watch the verifier run `./bin/agentctl clear --session relverify b`; answer
       `y` only if junk cleared, `/clear` executed, and the conversation reset
 
 ### Compact spot check
 
 - [ ] In the claude tab, type junk without pressing Enter; answer `y` when ready
-- [ ] Watch the wrapper run `./bin/agentctl compact --session relverify a`; answer
+- [ ] Watch the verifier run `./bin/agentctl compact --session relverify a`; answer
       `y` only if junk cleared, `/compact` executed, and the conversation compacted
 
 ### Relaunch a missing role
 
 Relaunch deliberately creates a **new process**. It does not preserve the old
-conversation, context, or scrollback. The wrapper resolves `relverify` to its
+conversation, context, or scrollback. The verifier resolves `relverify` to its
 exact tmux session ID, resolves role `b` to its exact window and pane IDs, and
 records the original pane ID before printing the resolved window ID in this
 setup command:
@@ -84,22 +92,22 @@ tmux kill-window -t @ID
 
 - [ ] In the codex tab, type junk without pressing Enter; answer `y` when it is
       ready for the relaunch process-discontinuity check
-- [ ] The wrapper ran that exact-ID removal, then ran
+- [ ] The verifier ran that exact-ID removal, then ran
       `./bin/agentctl status --session relverify` and printed `RELAUNCH PASS
       (role b reported missing after exact-ID removal)`
-- [ ] The wrapper ran `./bin/agentctl relaunch --session relverify b` and printed
+- [ ] The verifier ran `./bin/agentctl relaunch --session relverify b` and printed
       exactly this line, substituting the observed IDs and primary-checkout root:
 
       ```text
       agentctl: relaunched b in relverify: window @ID, pane %ID, harness codex (stored), model default (stored), effort high (stored), dir REPO_ROOT (stored)
       ```
 
-- [ ] The wrapper compared the resolved pane IDs and printed `RELAUNCH PASS
+- [ ] The verifier compared the resolved pane IDs and printed `RELAUNCH PASS
       (role b pane changed from %OLD to %NEW)`. Reusing `%OLD` is a release
       failure
 - [ ] A second `./bin/agentctl status --session relverify` printed `RELAUNCH
       PASS (role b restored to running)`
-- [ ] Answer `y` to the wrapper's single observation prompt only when its exact
+- [ ] Answer `y` to the verifier's single observation prompt only when its exact
       claim is visible:
 
       ```text
@@ -125,10 +133,10 @@ surviving conversation. Neither half alone is the relaunch contract.
 
 ### Automated teardown and evidence
 
-- [ ] The wrapper killed `relverify`; `./bin/agentctl status --session relverify`
+- [ ] The verifier killed `relverify`; `./bin/agentctl status --session relverify`
       exited `3` when other tmux sessions remained or `6` when `relverify` was
       the last session and the server exited. Both are expected absence results;
-      the wrapper recorded which occurred in `docs/release-verification-notes.md`,
+      the verifier recorded which occurred in `docs/release-verification-notes.md`,
       no matching tmux process remained, and it printed `ALL VERIFIED — evidence appended`
 - [ ] Commit `docs/release-verification-notes.md` as the **last** step of the
       ceremony, only after the attach-narration restyle has merged and the full
@@ -138,14 +146,26 @@ surviving conversation. Neither half alone is the relaunch contract.
 Every prompt accepts exactly `y` or `n`. Empty input and other text re-prompt; `n`
 fails closed after teardown is attempted.
 
-## Part C — Verify live skill discovery and meaning
+## Part C — Follow the verifier's live skill-discovery walkthrough
 
-Use a separate stub fleet on a throwaway tmux socket; never use the default
-tmux server. Create a temporary `HOME`, run `agentctl skill install` with that
-`HOME`, and launch the Claude Code and codex harnesses under test with the same
-`HOME` so each harness sees only the release candidate's installed skill. Use
-an empty throwaway project and preserve any separately configured harness
-authentication needed for the live session.
+The verifier creates a separate stub fleet on a named throwaway tmux socket,
+an empty temporary project, and a temporary `HOME`. It installs the release
+candidate skill and launches both harnesses with that same temporary `HOME`.
+It must never use the default tmux server or the operator's real `HOME`.
+
+- [ ] At the verifier's checkpoints, both harnesses reached a ready prompt,
+      each skill inventory listed `agentctl`, and both answers about
+      `ambiguous` match the status-states reference below.
+- [ ] After the observations, press `esc`, not uppercase `X`, and wait for the
+      post-detach report. The verifier tears down only its named probe fleet and
+      socket, restores `HOME` and `PATH`, and removes its temporary root.
+
+## Manual fallback for Parts A–C
+
+This appendix is for troubleshooting a verifier failure or interruption, not
+the normal release path. Do not paste these blocks during a successful normal
+walkthrough: the verifier owns the resources it creates and performs cleanup.
+In particular, never point Part C at the default tmux server or a real `HOME`.
 
 Set up the isolated socket and fleet from the clean primary checkout. The tmux
 shim scopes every tmux command agentctl runs; `amq coop init` scopes AMQ to the
