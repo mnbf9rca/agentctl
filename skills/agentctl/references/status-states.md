@@ -1,6 +1,6 @@
 # status states
 
-Evaluated in precedence order; first match wins (product spec §6.3).
+Evaluated in precedence order; first match wins.
 
 | Order | State | The claim it makes | What it does not claim |
 |---|---|---|---|
