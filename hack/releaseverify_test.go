@@ -196,6 +196,7 @@ type liveFixture struct {
 	amqLog                 string
 	skillRootLog           string
 	environmentLog         string
+	evidenceDirLog         string
 }
 
 func newLiveFixture(t *testing.T) liveFixture {
@@ -224,6 +225,7 @@ func newLiveFixture(t *testing.T) liveFixture {
 	amqLog := filepath.Join(t.TempDir(), "amq.log")
 	skillRootLog := filepath.Join(t.TempDir(), "skill-root.log")
 	environmentLog := filepath.Join(t.TempDir(), "environment.log")
+	evidenceDirLog := filepath.Join(t.TempDir(), "evidence-dir.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
 	agentctlRoleB := filepath.Join(t.TempDir(), "role-b")
@@ -414,6 +416,15 @@ printf '%s|%s|%s|%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AMQ_LOG"
 [ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --agents ] && [ "$4" = a,b,user ] || exit 64
 `
 	writeTestFile(t, filepath.Join(dir, "stubs/amq"), []byte(amq), 0o755)
+	mktemp := `#!/usr/bin/env bash
+set -u
+created=$(/usr/bin/mktemp "$@") || exit $?
+case "$*" in
+  "-d /tmp/agentctl-release-verify.XXXXXX") printf '%s\n' "$created" >"$AGENTCTL_TEST_EVIDENCE_DIR_LOG" ;;
+esac
+printf '%s\n' "$created"
+`
+	writeTestFile(t, filepath.Join(dir, "stubs/mktemp"), []byte(mktemp), 0o755)
 	pgrep := `#!/usr/bin/env bash
 case "$*" in
   *agentctl-probe-*) exit 1 ;;
@@ -448,6 +459,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_AMQ_LOG", amqLog)
 	t.Setenv("AGENTCTL_TEST_SKILL_ROOT_LOG", skillRootLog)
 	t.Setenv("AGENTCTL_TEST_ENVIRONMENT_LOG", environmentLog)
+	t.Setenv("AGENTCTL_TEST_EVIDENCE_DIR_LOG", evidenceDirLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
@@ -467,6 +479,7 @@ esac
 		amqLog:                 amqLog,
 		skillRootLog:           skillRootLog,
 		environmentLog:         environmentLog,
+		evidenceDirLog:         evidenceDirLog,
 	}
 }
 
@@ -665,6 +678,32 @@ func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) 
 	}
 }
 
+func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n")
+	if err == nil {
+		t.Fatalf("release verification passed after B.C10 rejection:\n%s", output)
+	}
+	evidenceDir := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	t.Cleanup(func() { _ = os.RemoveAll(evidenceDir) })
+	metadataPath := filepath.Join(evidenceDir, "verify-live", "metadata.txt")
+	metadata := readTestFile(t, metadataPath)
+	wantResult := "part_b_result=FAIL — operator refused checkpoint B.C10"
+	if !strings.Contains(metadata, wantResult) || strings.Contains(metadata, "part_b_result=PASS") {
+		t.Fatalf("rejected Part B metadata is not fail-closed.\n--- metadata ---\n%s", metadata)
+	}
+
+	command := exec.Command("bash", "hack/release-verify.sh", "--render-results", filepath.Join(evidenceDir, "versions.txt"), filepath.Join(evidenceDir, "verify-live"))
+	command.Dir = fixture.dir
+	rendered, renderErr := command.CombinedOutput()
+	if renderErr != nil {
+		t.Fatalf("render rejected Part B artifact: %v\n%s", renderErr, rendered)
+	}
+	if !strings.Contains(string(rendered), "- Part B: FAIL — operator refused checkpoint B.C10") || strings.Contains(string(rendered), "- Part B: PASS") {
+		t.Fatalf("renderer fabricated Part B success after B.C10 rejection:\n%s", rendered)
+	}
+}
+
 func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
@@ -718,6 +757,8 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 		"Keep the Window 2 attachment open",
 		"return to Window 1 to answer each numbered checkpoint",
 		"Return to Window 2, press esc to detach cleanly; do not use uppercase X",
+		"The verifier will attach this Window 1 to the isolated skill fleet now.",
+		"While attached, use these concrete actions:",
 		"In the Claude Code tab, type /skills",
 		"In the codex tab, type /skills",
 		"find agentctl in the displayed skill inventory",
@@ -737,6 +778,31 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 	}
 	if strings.Contains(output, "[PASS B.3] claude clear delivery command completed") {
 		t.Fatalf("delivery action was presented as a checkpoint outcome:\n%s", output)
+	}
+	for _, impossible := range []string{"Before attaching, inspect both skill inventories", "Attach to the isolated skill fleet with:"} {
+		if strings.Contains(output, impossible) {
+			t.Fatalf("output gives impossible or operator-owned Part C attach guidance %q:\n%s", impossible, output)
+		}
+	}
+}
+
+func TestLiveVerificationRequiresAMQBeforePartB(t *testing.T) {
+	fixture := newLiveFixture(t)
+	if err := os.Remove(filepath.Join(fixture.dir, "stubs", "amq")); err != nil {
+		t.Fatal(err)
+	}
+	runCommand(t, fixture.dir, "git", "add", "stubs/amq")
+	runCommand(t, fixture.dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", "remove amq stub")
+	pathWithoutAMQ := filepath.Join(fixture.dir, "stubs") + string(os.PathListSeparator) + "/usr/bin:/bin"
+	output, err := fixture.run(t, strings.Repeat("y\n", 10), "PATH="+pathWithoutAMQ)
+	if err == nil {
+		t.Fatalf("release verification passed without amq:\n%s", output)
+	}
+	if !strings.Contains(output, "required command not found: amq") {
+		t.Fatalf("missing amq was not rejected in preflight:\n%s", output)
+	}
+	if strings.Contains(output, "=== Part B") || strings.Contains(output, "[CHECKPOINT B.C1]") {
+		t.Fatalf("Part B began before the missing amq dependency was reported:\n%s", output)
 	}
 }
 

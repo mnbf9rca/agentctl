@@ -48,6 +48,8 @@ field() {
 
 ASK_ANSWER=''
 ASK_RESULT=''
+FAILED_CHECKPOINT_ID=''
+FAILED_CHECKPOINT_RESULT=''
 ask() {
   local question=$1
   local answer
@@ -107,9 +109,13 @@ checkpoint() {
     return 0
   fi
   if [ "$ASK_RESULT" = n ]; then
+    FAILED_CHECKPOINT_ID=$checkpoint_id
+    FAILED_CHECKPOINT_RESULT=refused
     printf '[CHECKPOINT FAIL %s] operator refused checkpoint: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
     return 1
   fi
+  FAILED_CHECKPOINT_ID=$checkpoint_id
+  FAILED_CHECKPOINT_RESULT=input
   printf '[CHECKPOINT FAIL %s] checkpoint input failed: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
   return 2
 }
@@ -582,7 +588,7 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-for cmd_name in tmux claude codex; do
+for cmd_name in tmux claude codex amq; do
   command -v "$cmd_name" >/dev/null 2>&1 || die "required command not found: $cmd_name"
 done
 
@@ -1035,7 +1041,18 @@ EOF
   fi
 
   PART_A_RESULT='PASS — automated probes and isolation checks completed'
-  PART_B_RESULT='PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10'
+  PART_B_RESULT='FAIL — Part B did not complete'
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    PART_B_RESULT='PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10'
+  elif [ "$FAILED_CHECKPOINT_RESULT" = refused ]; then
+    case "$FAILED_CHECKPOINT_ID" in
+      B.C*) PART_B_RESULT="FAIL — operator refused checkpoint $FAILED_CHECKPOINT_ID" ;;
+    esac
+  elif [ "$FAILED_CHECKPOINT_RESULT" = input ]; then
+    case "$FAILED_CHECKPOINT_ID" in
+      B.C*) PART_B_RESULT="FAIL — checkpoint input failed at $FAILED_CHECKPOINT_ID" ;;
+    esac
+  fi
   PART_C_RESULT='FAIL — not run'
   PART_C_SKILL_ATTESTATION=''
   PART_C_MEANING_ATTESTATION=''
@@ -1085,7 +1102,10 @@ EOF
     fi
     PART_C_SESSION_OWNED=1
     cat <<EOF
-Before attaching, inspect both skill inventories with these concrete actions:
+The verifier will attach this Window 1 to the isolated skill fleet now. It runs:
+  $PART_C_TOP/bin/agentctl attach --session skillverify
+
+While attached, use these concrete actions:
 
 1. In the Claude Code tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
 2. In the codex tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
@@ -1097,9 +1117,6 @@ Then ask each harness exactly:
 Expected meaning: more than one window has the role's exact name, no window is
 selected as real, and role-targeted \`clear\` and \`compact\` refuse until an
 operator repairs the ambiguity with raw tmux.
-
-Attach to the isolated skill fleet with:
-  $PART_C_TOP/bin/agentctl attach --session skillverify
 
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
