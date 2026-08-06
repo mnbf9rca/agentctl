@@ -92,23 +92,45 @@ part_header() { printf '\n=== Part %s — %s ===\n' "$1" "$2"; }
 step_start() { printf '\n[%s] %s\n' "$1" "$2"; }
 step_pass() { printf '[PASS %s] %s\n' "$1" "$2"; }
 step_fail() { printf '[FAIL %s] %s\n' "$1" "$2" >&2; }
+action_pass() { printf '[ACTION PASS %s] %s\n' "$1" "$2"; }
+action_fail() { printf '[ACTION FAIL %s] %s\n' "$1" "$2" >&2; }
 
 checkpoint() {
-  local checkpoint_name=$1
-  local expected_output=$2
-  local prompt=$3
-  printf 'Checkpoint: %s\n' "$checkpoint_name"
+  local checkpoint_id=$1
+  local checkpoint_name=$2
+  local expected_output=$3
+  local prompt=$4
+  printf '\n[CHECKPOINT %s] %s\n' "$checkpoint_id" "$checkpoint_name"
   printf 'Expected output:\n> %s\n' "$expected_output"
   if ask "$prompt"; then
-    printf 'operator confirmed: %s\n' "$checkpoint_name"
+    printf '[CHECKPOINT PASS %s] operator confirmed: %s\n' "$checkpoint_id" "$checkpoint_name"
     return 0
   fi
   if [ "$ASK_RESULT" = n ]; then
-    printf 'operator refused checkpoint: %s\n' "$checkpoint_name" >&2
+    printf '[CHECKPOINT FAIL %s] operator refused checkpoint: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
     return 1
   fi
-  printf 'checkpoint input failed: %s\n' "$checkpoint_name" >&2
+  printf '[CHECKPOINT FAIL %s] checkpoint input failed: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
   return 2
+}
+
+PART_B_TOP=''
+PART_B_SESSION=''
+PART_B_SESSION_OWNED=0
+part_b_teardown() {
+  local kill_status=0
+  if [ "$PART_B_SESSION_OWNED" -eq 0 ]; then
+    return 0
+  fi
+  if "$PART_B_TOP/bin/agentctl" kill --session "$PART_B_SESSION"; then
+    printf 'PART B CLEANUP PASS (%s kill exited 0)\n' "$PART_B_SESSION"
+    PART_B_SESSION_OWNED=0
+    return 0
+  else
+    kill_status=$?
+  fi
+  printf 'PART B CLEANUP FAIL (%s kill exited %s)\n' "$PART_B_SESSION" "$kill_status" >&2
+  return 1
 }
 
 PART_C_ROOT=''
@@ -119,9 +141,14 @@ PART_C_ORIGINAL_HOME=''
 PART_C_ORIGINAL_PATH=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
+PART_C_ACTIVE=0
 part_c_teardown() {
   local teardown_status=0
   local socket_output
+  local socket_status=0
+  if [ "$PART_C_ACTIVE" -eq 0 ]; then
+    return 0
+  fi
   if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
     if "$PART_C_TOP/bin/agentctl" kill --session skillverify; then
       printf 'PART C CLEANUP PASS (skillverify killed)\n'
@@ -133,7 +160,6 @@ part_c_teardown() {
   fi
   if [ "$PART_C_SOCKET_ARMED" -eq 1 ]; then
     socket_output=$("$PART_C_REAL_TMUX" -L "$PART_C_SOCKET" kill-server 2>&1) || socket_status=$?
-    socket_status=${socket_status:-0}
     if [ "$socket_status" -eq 0 ]; then
       printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
       PART_C_SOCKET_ARMED=0
@@ -169,23 +195,32 @@ part_c_teardown() {
       teardown_status=1
     fi
   fi
+  if [ "$teardown_status" -eq 0 ]; then
+    PART_C_ACTIVE=0
+  fi
   return "$teardown_status"
 }
 
 part_c_abort() {
   local reason=$1
   if ! part_c_teardown; then
-    trap - EXIT
     die "$reason; Part C cleanup failed"
   fi
-  trap - EXIT
   die "$reason"
 }
 
-part_c_exit_trap() {
+cleanup_exit_trap() {
   local original_status=$?
+  local cleanup_status=0
   if ! part_c_teardown; then
     printf 'release-verify: Part C cleanup failed during exit\n' >&2
+    cleanup_status=1
+  fi
+  if ! part_b_teardown; then
+    printf 'release-verify: Part B cleanup failed during exit\n' >&2
+    cleanup_status=1
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
     return 1
   fi
   return "$original_status"
@@ -310,15 +345,16 @@ render_results() {
       printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
     fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
-    printf -- '- Attach: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
-    printf -- '- Claude clear: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
-    printf -- '- Codex clear: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
-    printf -- '- Compact (claude): operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-    printf -- '- Relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+    printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+    printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
+    printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
+    printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
+    printf -- '- Checkpoint B.C9 relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
       "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+    printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$(field part_b_detach_attestation "$metadata")"
     if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
-      printf -- '- Part C skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
-      printf -- '- Part C status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+      printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+      printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
     fi
     case "$(field teardown_status_exit "$metadata")" in
       3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
@@ -651,6 +687,7 @@ else
   CODEX_CLEAR_ATTESTATION=''
   COMPACT_ATTESTATION=''
   RELAUNCH_ATTESTATION=''
+  PART_B_DETACH_ATTESTATION=''
   RELAUNCH_CHECK=FAIL
   TEARDOWN_CHECK=FAIL
   TEARDOWN_STATUS_EXIT=''
@@ -678,10 +715,19 @@ else
 
   # This run owns relverify only after launch succeeds. Keep teardown armed
   # across every later command and attestation; explicit teardown disarms it.
-  trap './bin/agentctl kill --session relverify >/dev/null 2>&1 || true' EXIT
+  PART_B_TOP=$TOP
+  PART_B_SESSION=$LIVE_SESSION
+  PART_B_SESSION_OWNED=1
+  trap cleanup_exit_trap EXIT
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo
+    cat <<'EOF'
+
+Part B uses two iTerm2 windows. First, leave this verifier running in Window 1.
+In iTerm2, press Command-N to open a second iTerm2 window (Window 2). Run the
+attach command below in Window 2. Keep the Window 2 attachment open throughout
+the live checks. After each visual observation, return to Window 1 to answer each numbered checkpoint. The verifier will tell you when to detach later.
+EOF
     echo 'Attach from Window 2 with:'
     echo '  ./bin/agentctl attach --session relverify'
     attach_expected=$(cat <<'EOF'
@@ -692,9 +738,8 @@ advisory read failure; omission is not a release failure and agentctl never
 guesses the count.
 EOF
 )
-    if checkpoint 'attach narration' "$attach_expected" 'Is Window 2 attached and showing the claude and codex tabs?'; then
+    if checkpoint B.C1 'attach narration' "$attach_expected" 'Is Window 2 attached and showing the claude and codex tabs?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
-      step_pass B.2 'attach narration confirmed by operator'
     else
       ATTACH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -704,13 +749,13 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
-    if checkpoint 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
+    if checkpoint B.C2 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify a'
       if ./bin/agentctl clear --session "$LIVE_SESSION" a; then
         echo 'Claude clear delivery result printed above.'
-        step_pass B.3 'claude clear delivery command completed'
-        if checkpoint 'claude clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+        action_pass B.3 'claude clear delivery command completed; observed outcome pending checkpoint B.C3'
+        if checkpoint B.C3 'claude clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
           CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
         else
           CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
@@ -718,7 +763,7 @@ EOF
         fi
       else
         echo 'LIVE VERIFY FAIL (claude clear delivery failed)'
-        step_fail B.3 'claude clear delivery command failed'
+        action_fail B.3 'claude clear delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -729,13 +774,13 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the codex tab, type junk into the input box; do NOT press Enter.'
-    if checkpoint 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
+    if checkpoint B.C4 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify b'
       if ./bin/agentctl clear --session "$LIVE_SESSION" b; then
         echo 'Codex clear delivery result printed above.'
-        step_pass B.4 'codex clear delivery command completed'
-        if checkpoint 'codex clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+        action_pass B.4 'codex clear delivery command completed; observed outcome pending checkpoint B.C5'
+        if checkpoint B.C5 'codex clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
           CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
         else
           CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
@@ -743,7 +788,7 @@ EOF
         fi
       else
         echo 'LIVE VERIFY FAIL (codex clear delivery failed)'
-        step_fail B.4 'codex clear delivery command failed'
+        action_fail B.4 'codex clear delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -754,13 +799,13 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
-    if checkpoint 'claude compact setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the compact spot check?'; then
+    if checkpoint B.C6 'claude compact setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the compact spot check?'; then
       echo 'Running:'
       echo '  ./bin/agentctl compact --session relverify a'
       if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
         echo 'Claude compact delivery result printed above.'
-        step_pass B.5 'claude compact delivery command completed'
-        if checkpoint 'claude compact delivery' 'junk cleared, /compact executed, and the conversation compacted.' 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
+        action_pass B.5 'claude compact delivery command completed; observed outcome pending checkpoint B.C7'
+        if checkpoint B.C7 'claude compact delivery' 'junk cleared, /compact executed, and the conversation compacted.' 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
           COMPACT_ATTESTATION=$ASK_ANSWER
         else
           COMPACT_ATTESTATION=$ASK_ANSWER
@@ -768,7 +813,7 @@ EOF
         fi
       else
         echo 'LIVE VERIFY FAIL (claude compact delivery failed)'
-        step_fail B.5 'claude compact delivery command failed'
+        action_fail B.5 'claude compact delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -789,7 +834,7 @@ EOF
       original_window_id=$ROLE_WINDOW_ID
       original_pane_id=$ROLE_PANE_ID
       echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
-      if checkpoint 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
+    if checkpoint B.C8 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
         echo 'Running exact-ID missing-role setup:'
         printf '  tmux kill-window -t %s\n' "$original_window_id"
         if ! tmux kill-window -t "$original_window_id"; then
@@ -870,12 +915,26 @@ is gone.
 Do you see a fresh, ready codex input surface with no trace of that junk?
 EOF
 )
-    if checkpoint 'live delivery and relaunch' 'the replacement codex pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
+    if checkpoint B.C9 'live delivery and relaunch' 'the replacement codex pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
-      step_pass B.11 'live relaunch outcome confirmed by operator'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    cat <<'EOF'
+
+Return to Window 2, press esc to detach cleanly; do not use uppercase X. Wait
+for the post-detach session-state report, then return to Window 1 and confirm
+the numbered checkpoint below.
+EOF
+    if checkpoint B.C10 'Part B attachment detached' 'Window 2 printed the post-detach session-state report and returned to its shell.' 'Did Window 2 detach cleanly and print the post-detach session-state report?'; then
+      PART_B_DETACH_ATTESTATION=$ASK_ANSWER
+    else
+      PART_B_DETACH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
     fi
   fi
@@ -885,8 +944,8 @@ EOF
   echo 'Running:'
   echo '  ./bin/agentctl kill --session relverify'
   TEARDOWN_STATUS=0
-  if ! ./bin/agentctl kill --session "$LIVE_SESSION"; then
-    echo 'TEARDOWN FAIL (kill failed)'
+  if ! part_b_teardown; then
+    echo 'TEARDOWN FAIL (relverify cleanup coordinator kill failed)'
     TEARDOWN_STATUS=1
   fi
 
@@ -934,7 +993,6 @@ EOF
     esac
   done
 
-  trap - EXIT
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
     step_pass B.12 'relverify teardown checks completed'
@@ -943,7 +1001,7 @@ EOF
   fi
 
   PART_A_RESULT='PASS — automated probes and isolation checks completed'
-  PART_B_RESULT='PASS — operator confirmed: attach narration and live delivery/relaunch checkpoints'
+  PART_B_RESULT='PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10'
   PART_C_RESULT='FAIL — not run'
   PART_C_SKILL_ATTESTATION=''
   PART_C_MEANING_ATTESTATION=''
@@ -952,10 +1010,10 @@ EOF
     part_header C 'Live skill discovery and meaning'
     PART_C_TOP=$TOP
     PART_C_ROOT=$(mktemp -d /tmp/agentctl-skill-verify.XXXXXX) || die 'could not create Part C temporary root'
+  PART_C_ACTIVE=1
     PART_C_ORIGINAL_HOME=$HOME
     PART_C_ORIGINAL_PATH=$PATH
     PART_C_SOCKET="agentctl-skill-verify-$$"
-    trap part_c_exit_trap EXIT
     PART_C_REAL_TMUX=$(command -v tmux) || {
       part_c_abort 'could not resolve tmux for Part C'
     }
@@ -993,8 +1051,12 @@ EOF
     fi
     PART_C_SESSION_OWNED=1
     cat <<EOF
-Before attaching, inspect each harness's skill inventory and confirm it lists
-\`agentctl\`. Then ask each harness exactly:
+Before attaching, inspect both skill inventories with these concrete actions:
+
+1. In the Claude Code tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
+2. In the codex tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
+
+Then ask each harness exactly:
 
   What does \`ambiguous\` mean in agentctl status, and which commands refuse on it?
 
@@ -1014,7 +1076,7 @@ EOF
     fi
     step_pass C.3 'named-socket skill fleet launched and attach guidance completed'
 
-    if checkpoint 'harness lists the agentctl skill' 'both Claude Code and codex skill inventories list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
+    if checkpoint C.C1 'harness lists the agentctl skill' 'Claude Code /skills and codex /skills each list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
     else
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
@@ -1022,7 +1084,7 @@ EOF
     fi
 
     meaning_expected='ambiguous means more than one exact-name role window exists, no window is selected as real, and clear and compact refuse until raw tmux repairs it.'
-    if checkpoint 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
+    if checkpoint C.C2 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
     else
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
@@ -1033,9 +1095,8 @@ EOF
     if ! part_c_teardown; then
       die 'Part C teardown failed'
     fi
-    trap - EXIT
     step_pass C.4 'Part C resources removed and environment restored'
-    PART_C_RESULT='PASS — operator confirmed: harness lists the agentctl skill; probe answer matches references/status-states.md'
+    PART_C_RESULT='PASS — operator confirmed: numbered skill inventory and status-meaning checkpoints C.C1-C.C2'
   fi
 
   {
@@ -1053,6 +1114,7 @@ EOF
     printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
     printf 'relaunch_check=%s\n' "$RELAUNCH_CHECK"
     printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
+  printf 'part_b_detach_attestation=%s\n' "$PART_B_DETACH_ATTESTATION"
     printf 'part_c_skill_attestation=%s\n' "$PART_C_SKILL_ATTESTATION"
     printf 'part_c_meaning_attestation=%s\n' "$PART_C_MEANING_ATTESTATION"
     printf 'teardown_status_exit=%s\n' "$TEARDOWN_STATUS_EXIT"
@@ -1085,9 +1147,13 @@ fi
 cat "$BLOCK_FILE"
 
 marker='## Results history'
-if ! grep -qF "$marker" "$NOTES_FILE"; then
+marker_count=$(awk -v marker="$marker" '$0 == marker { count++ } END { print count + 0 }' "$NOTES_FILE") || {
   rm -f "$BLOCK_FILE"
-  die "marker not found in $NOTES_FILE: $marker"
+  die "could not count exact results-history markers in $NOTES_FILE"
+}
+if [ "$marker_count" -ne 1 ]; then
+  rm -f "$BLOCK_FILE"
+  die "expected exactly one line equal to $marker in $NOTES_FILE; found $marker_count"
 fi
 
 TMP_NOTES=$(mktemp) || {
@@ -1096,17 +1162,18 @@ TMP_NOTES=$(mktemp) || {
 }
 if ! awk -v marker="$marker" -v block_file="$BLOCK_FILE" '
   { print }
-  index($0, marker) == 1 && !done {
+  $0 == marker {
+    insertions++
     print ""
     while ((getline block_line < block_file) > 0) {
       print block_line
     }
     close(block_file)
-    done = 1
   }
+  END { if (insertions != 1) exit 42 }
 ' "$NOTES_FILE" >"$TMP_NOTES"; then
   rm -f "$BLOCK_FILE" "$TMP_NOTES"
-  die 'could not append evidence block'
+  die 'evidence insertion did not occur exactly once'
 fi
 mv "$TMP_NOTES" "$NOTES_FILE"
 rm -f "$BLOCK_FILE"

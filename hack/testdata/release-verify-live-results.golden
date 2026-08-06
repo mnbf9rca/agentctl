@@ -6,11 +6,17 @@
 - codex-cli: `codex-cli 0.146.0 (research preview)`
 - Mode: `verify-live`; harness: `both`
 - Artifact: `testdata/release-verify-live-artifact`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
+- Part C: PASS — operator confirmed: numbered skill inventory and status-meaning checkpoints C.C1-C.C2
 - Probes: all four completed, no surviving throwaway server
-- Attach: operator confirmed: y
-- Claude clear: operator confirmed: y
-- Codex clear: operator confirmed: y
-- Compact (claude): operator confirmed: y
-- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Checkpoint B.C1 attach narration: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Checkpoint B.C10 detach: operator confirmed: y
+- Checkpoint C.C1 skill inventory: operator confirmed: y
+- Checkpoint C.C2 status meaning: operator confirmed: y
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS

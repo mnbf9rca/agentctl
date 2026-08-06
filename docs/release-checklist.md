@@ -11,13 +11,16 @@ a linked worktree. The launched panes inherit the tmux server environment, and
 AMQ auto-discovers the primary checkout's repo-local `.agent-mail`; a linked
 worktree instead needs `AMQ_GLOBAL_ROOT` propagated into that server.
 
-The normal path for Parts A–C is the release verifier. It numbers each action,
-prints the exact command and expected observation before every human
-checkpoint, and records each `y` or `n` confirmation as an operator claim. It
-automatically tears down the Part B and Part C resources on success, refusal,
-interrupt, or failure. Answer every prompt exactly `y` or `n`; empty input and
-other text re-prompt. `n` is a named failing operator claim, not a way to skip
-a judgment, and the verifier fails closed after attempting teardown.
+The normal path for Parts A–C is the release verifier. It numbers each
+automated action and every human checkpoint, prints the exact command and
+expected observation before the checkpoint, and records each `y` or `n` as an
+operator claim. `[ACTION PASS B.N]` means only that a delivery command exited
+successfully; the separately numbered `[CHECKPOINT PASS B.CN]` is the
+operator-confirmed outcome. The verifier automatically tears down the Part B
+and Part C resources on success, refusal, interrupt, or failure. Answer every
+prompt exactly `y` or `n`; empty input and other text re-prompt. `n` is a named
+failing operator claim, not a way to skip a judgment, and the verifier fails
+closed after attempting teardown.
 
 ## Part A — Start the verifier
 
@@ -43,17 +46,21 @@ bash hack/release-verify.sh
 ## Part B — Follow the verifier's live release-candidate walkthrough
 
 The verifier launches `relverify` with `a:claude,b:codex` and effort `high`
-for `b`. In Window 2, run the bare attach command it prints.
-- [ ] The narration starts with `agentctl: attaching session "relverify" (2 windows)
+for `b`. Leave the verifier running in iTerm2 Window 1. Press `Command-N` to
+open a second iTerm2 window, then run the bare attach command printed by the
+verifier in Window 2. Keep that attachment open through checkpoint B.C9. After
+each visual observation, return to Window 1 to answer the numbered checkpoint.
+
+- [ ] At checkpoint B.C1, the narration starts with `agentctl: attaching session "relverify" (2 windows)
       in iTerm2…` when the advisory window-count read succeeds, and warns that
       the Command Menu belongs to iTerm2. If `(2 windows)` is omitted, record
       the advisory read failure in `docs/release-verification-notes.md`; omission
       is not a release failure and agentctl never guesses the count
-- [ ] Window 2 shows the claude and codex tabs; answer `y` at the verifier's
-      attach prompt
+- [ ] Window 2 shows the claude and codex tabs; return to Window 1 and answer
+      `y` at checkpoint B.C1
 
-Keep this attachment open through the live checks below. After the last visual
-check, press `esc` to detach cleanly; **do not use uppercase `X`**. The
+Keep this attachment open through the live checks below. At checkpoint B.C10,
+press `esc` to detach cleanly; **do not use uppercase `X`**. The
 [verified §3.4 contract](superpowers/specs/2026-08-01-agentctl-design.md#34-iterm2-force-quit-of-tmux-control-mode-2026-08-04)
 shows that `X` leaves the fleet running but wedges the tmux client, so the
 terminal stays busy and agentctl cannot report. After `esc`, expect the
@@ -62,21 +69,27 @@ post-detach session-state report beginning with
 
 ### Claude clear
 
-- [ ] In the claude tab, type junk without pressing Enter; answer `y` when ready
+- [ ] At checkpoint B.C2, in the claude tab type junk without pressing Enter;
+      return to Window 1 and answer `y` when ready
 - [ ] Watch the verifier run `./bin/agentctl clear --session relverify a`; answer
-      `y` only if junk cleared, `/clear` executed, and the conversation reset
+      `y` at checkpoint B.C3 only if junk cleared, `/clear` executed, and the
+      conversation reset. `[ACTION PASS B.3]` alone is not that outcome claim
 
 ### Codex clear
 
-- [ ] In the codex tab, type junk without pressing Enter; answer `y` when ready
+- [ ] At checkpoint B.C4, in the codex tab type junk without pressing Enter;
+      return to Window 1 and answer `y` when ready
 - [ ] Watch the verifier run `./bin/agentctl clear --session relverify b`; answer
-      `y` only if junk cleared, `/clear` executed, and the conversation reset
+      `y` at checkpoint B.C5 only if junk cleared, `/clear` executed, and the
+      conversation reset. `[ACTION PASS B.4]` alone is not that outcome claim
 
 ### Compact spot check
 
-- [ ] In the claude tab, type junk without pressing Enter; answer `y` when ready
+- [ ] At checkpoint B.C6, in the claude tab type junk without pressing Enter;
+      return to Window 1 and answer `y` when ready
 - [ ] Watch the verifier run `./bin/agentctl compact --session relverify a`; answer
-      `y` only if junk cleared, `/compact` executed, and the conversation compacted
+      `y` at checkpoint B.C7 only if junk cleared, `/compact` executed, and the
+      conversation compacted. `[ACTION PASS B.5]` alone is not that outcome claim
 
 ### Relaunch a missing role
 
@@ -90,8 +103,9 @@ setup command:
 tmux kill-window -t @ID
 ```
 
-- [ ] In the codex tab, type junk without pressing Enter; answer `y` when it is
-      ready for the relaunch process-discontinuity check
+- [ ] At checkpoint B.C8, in the codex tab type junk without pressing Enter;
+      return to Window 1 and answer `y` when it is ready for the relaunch
+      process-discontinuity check
 - [ ] The verifier ran that exact-ID removal, then ran
       `./bin/agentctl status --session relverify` and printed `RELAUNCH PASS
       (role b reported missing after exact-ID removal)`
@@ -107,8 +121,7 @@ tmux kill-window -t @ID
       failure
 - [ ] A second `./bin/agentctl status --session relverify` printed `RELAUNCH
       PASS (role b restored to running)`
-- [ ] Answer `y` to the verifier's single observation prompt only when its exact
-      claim is visible:
+- [ ] Answer `y` at checkpoint B.C9 only when its exact claim is visible:
 
       ```text
       One of the fleet's harnesses was terminated, and agentctl relaunched it from
@@ -131,15 +144,22 @@ directory came from the fleet's stored configuration. The pane-ID and junk
 check proves **PROCESS DISCONTINUITY**: this is genuinely a new process with no
 surviving conversation. Neither half alone is the relaunch contract.
 
-### Automated teardown and evidence
+### Detach, automated teardown, and evidence
+
+- [ ] After checkpoint B.C9 passes, return to Window 2, press `esc` to detach
+      cleanly, and do not use uppercase `X`. Wait for the post-detach
+      session-state report, return to Window 1, and answer `y` at checkpoint
+      B.C10
 
 - [ ] The verifier killed `relverify`; `./bin/agentctl status --session relverify`
       exited `3` when other tmux sessions remained or `6` when `relverify` was
       the last session and the server exited. Both are expected absence results;
       no matching tmux process remained. After successful Parts A–C, the
-      verifier appends its evidence block immediately below `## Results history`
-      in `docs/release-verification-notes.md`; a missing marker or failed append
-      is a verifier failure. It then prints `ALL VERIFIED — evidence appended`.
+      verifier requires exactly one line equal to `## Results history` in
+      `docs/release-verification-notes.md` and proves the evidence was inserted
+      once immediately below it. An absent, suffixed, substring, or duplicate
+      marker, or a failed insertion, is a verifier failure. Only a successful
+      single insertion prints `ALL VERIFIED — evidence appended`.
 - [ ] Commit `docs/release-verification-notes.md` as the **last** step of the
       ceremony, only after the attach-narration restyle has merged and the full
       checklist has been rerun against the shipped output. Never commit
@@ -155,9 +175,15 @@ an empty temporary project, and a temporary `HOME`. It installs the release
 candidate skill and launches both harnesses with that same temporary `HOME`.
 It must never use the default tmux server or the operator's real `HOME`.
 
-- [ ] At the verifier's checkpoints, both harnesses reached a ready prompt,
-      each skill inventory listed `agentctl`, and both answers about
-      `ambiguous` match the status-states reference below.
+- [ ] While attached, wait for both harnesses to reach a ready prompt. In the
+      Claude Code tab, type `/skills`, press Enter, find `agentctl` in the
+      displayed inventory, and press `esc` to close it. Repeat those exact
+      inventory actions in the codex tab. After detaching back to the verifier,
+      answer `y` at checkpoint C.C1 only if both inventories listed `agentctl`
+- [ ] Ask each harness the verifier's exact `ambiguous` question. After both
+      answers are visible and the attachment has returned to the verifier,
+      compare them with the quoted status-states meaning and answer `y` at
+      checkpoint C.C2 only if both match
 - [ ] After the observations, press `esc`, not uppercase `X`, and wait for the
       post-detach report. The verifier tears down only its named probe fleet and
       socket, restores `HOME` and `PATH`, and removes its temporary root.
