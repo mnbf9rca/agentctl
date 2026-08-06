@@ -168,8 +168,8 @@ part_c_print_seedable_auth() {
 }
 
 part_c_seed_auth() {
-  install -d -m 0700 "$PART_C_HOME/.codex" || return 1
-  install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json"
+  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
+  install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
 }
 
 part_c_kill_session() {
@@ -230,7 +230,7 @@ part_c_teardown() {
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
   printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
-  if [ -n "$PART_C_HOME" ]; then
+  if [ -n "$PART_C_ROOT" ] && [ -n "$PART_C_HOME" ]; then
     if [ -e "$PART_C_HOME" ]; then
       if rm -rf -- "$PART_C_HOME" && [ ! -e "$PART_C_HOME" ]; then
         printf 'PART C CLEANUP PASS (temporary credential HOME removed)\n'
@@ -1132,10 +1132,12 @@ EOF
     step_pass C.1 'isolated Part C filesystem is active'
 
     step_start C.2 'choose authentication path for the isolated HOME'
+    part_c_seed_offered=0
     if part_c_has_seedable_auth; then
+      part_c_seed_offered=1
       printf 'Part C can seed codex authentication from this empirically proven file:\n'
       part_c_print_seedable_auth
-      printf 'Claude Code authentication cannot be seeded from a HOME file on this macOS verifier.\n'
+      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
       printf 'Claude Code will require guided interactive sign-in in the fresh temporary HOME.\n'
       if ask 'Copy only this Codex file into the temporary Part C HOME?'; then
         if ! part_c_seed_auth; then
@@ -1145,11 +1147,17 @@ EOF
         PART_C_AUTH_MODE=codex-seeded
         step_pass C.2 'operator consented and the proven Codex authentication file was copied; Claude sign-in remains manual'
       else
-        PART_C_AUTH_MODE=manual
+        case "$ASK_RESULT" in
+          n) PART_C_AUTH_MODE=manual ;;
+          *)
+            step_fail C.2 'authentication selection input failed'
+            part_c_abort 'Part C authentication selection input failed'
+            ;;
+        esac
       fi
     else
       printf 'No proven Codex authentication file was found in the real HOME.\n'
-      printf 'Claude Code authentication cannot be seeded from a HOME file on this macOS verifier.\n'
+      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
       PART_C_AUTH_MODE=manual
     fi
 
@@ -1158,8 +1166,20 @@ EOF
       if ask 'Continue with guided manual sign-in instead?'; then
         step_pass C.2 'operator chose guided manual sign-in without copied files'
       else
-        step_fail C.2 'operator declined both authentication paths'
-        part_c_abort 'operator declined authentication copy and guided manual sign-in'
+        case "$ASK_RESULT" in
+          n)
+            if [ "$part_c_seed_offered" -eq 1 ]; then
+              step_fail C.2 'operator declined both authentication paths'
+              part_c_abort 'operator declined authentication copy and guided manual sign-in'
+            fi
+            step_fail C.2 'operator declined guided manual sign-in'
+            part_c_abort 'operator declined guided manual sign-in'
+            ;;
+          *)
+            step_fail C.2 'manual sign-in selection input failed'
+            part_c_abort 'Part C manual sign-in selection input failed'
+            ;;
+        esac
       fi
     fi
 

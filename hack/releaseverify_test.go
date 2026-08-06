@@ -25,6 +25,7 @@ func TestRenderResultsMatchesGolden(t *testing.T) {
 	}{
 		{"measure", "testdata/release-verify-measure-artifact", "testdata/release-verify-measure-results.golden"},
 		{"verify live", "testdata/release-verify-live-artifact", "testdata/release-verify-live-results.golden"},
+		{"verify live pre-auth metadata", "testdata/release-verify-live-pre-auth-artifact", "testdata/release-verify-live-pre-auth-results.golden"},
 		{"verify live legacy", "testdata/release-verify-live-legacy-artifact", "testdata/release-verify-live-legacy-results.golden"},
 	}
 	for _, tc := range cases {
@@ -199,6 +200,7 @@ type liveFixture struct {
 	environmentLog         string
 	evidenceDirLog         string
 	partCRootLog           string
+	operatorHome           string
 }
 
 const (
@@ -436,6 +438,16 @@ esac
 	writeTestFile(t, filepath.Join(dir, "stubs/tmux"), []byte(tmux), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/claude"), []byte("#!/usr/bin/env bash\necho '2.1.220 (Claude Code)'\n"), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/codex"), []byte("#!/usr/bin/env bash\necho 'codex-cli 0.146.0'\n"), 0o755)
+	install := `#!/usr/bin/env bash
+set -u
+if [ "${AGENTCTL_TEST_AUTH_INSTALL_FAIL:-0}" = 1 ]; then
+  case "$*" in
+    *codex/auth.json*) printf 'simulated install failure: %s\n' "$*" >&2; exit 1 ;;
+  esac
+fi
+exec /usr/bin/install "$@"
+`
+	writeTestFile(t, filepath.Join(dir, "stubs/install"), []byte(install), 0o755)
 	rm := `#!/usr/bin/env bash
 set -u
 printf '%s|%s|%s\n' "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_ENVIRONMENT_LOG"
@@ -522,6 +534,7 @@ esac
 		environmentLog:         environmentLog,
 		evidenceDirLog:         evidenceDirLog,
 		partCRootLog:           partCRootLog,
+		operatorHome:           operatorHome,
 	}
 }
 
@@ -858,7 +871,7 @@ func TestLiveVerificationPartCConsentSeedsOnlyProvenCodexAuthFile(t *testing.T) 
 	wantGuidance := []string{
 		"Part C can seed codex authentication from this empirically proven file:",
 		"  ~/.codex/auth.json",
-		"Claude Code authentication cannot be seeded from a HOME file on this macOS verifier.",
+		"No sufficient Claude HOME-file seed is proven for this macOS verifier.",
 		"Copy only this Codex file into the temporary Part C HOME?",
 		"The proven Codex auth.json was copied with your consent.",
 		"Did Claude Code complete interactive sign-in and codex authenticate from the seeded auth.json without manual sign-in?",
@@ -886,6 +899,53 @@ func TestLiveVerificationPartCConsentSeedsOnlyProvenCodexAuthFile(t *testing.T) 
 	}, "\n") + "\n"
 	if got := readTestFile(t, fixture.authObservationLog); got != wantObservation {
 		t.Fatalf("auth files observed at skillverify launch:\n%s\nwant:\n%s", got, wantObservation)
+	}
+}
+
+func TestLiveVerificationPartCAuthSelectionEOFIsInputFailure(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 10))
+	if err == nil {
+		t.Fatalf("release verification accepted closed auth-selection input:\n%s", output)
+	}
+	for _, want := range []string{"input closed — answer y or n", "Part C authentication selection input failed"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("closed auth-selection output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "operator declined") || strings.Contains(output, "Continue with guided manual sign-in instead?") {
+		t.Fatalf("closed auth-selection input was reported as a refusal:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCMissingSeedRefusalNamesOnlyOfferedPath(t *testing.T) {
+	fixture := newLiveFixture(t)
+	if err := os.Remove(filepath.Join(fixture.operatorHome, ".codex", "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	output, err := fixture.run(t, strings.Repeat("y\n", 10)+"n\n")
+	if err == nil {
+		t.Fatalf("release verification accepted refusal of the only available auth path:\n%s", output)
+	}
+	if !strings.Contains(output, "operator declined guided manual sign-in") {
+		t.Fatalf("missing-seed refusal did not name the offered path:\n%s", output)
+	}
+	if strings.Contains(output, "declined both authentication paths") || strings.Contains(output, "Copy only this Codex file") {
+		t.Fatalf("missing-seed refusal claimed an unoffered path:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCAuthCopyFailureHidesSourcePath(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 11), "AGENTCTL_TEST_AUTH_INSTALL_FAIL=1")
+	if err == nil {
+		t.Fatalf("release verification accepted authentication copy failure:\n%s", output)
+	}
+	if !strings.Contains(output, "Part C authentication seeding failed") {
+		t.Fatalf("copy failure output omitted fixed diagnostic:\n%s", output)
+	}
+	if strings.Contains(output, fixture.operatorHome) || strings.Contains(output, fakeCodexAuthBody) {
+		t.Fatalf("copy failure output exposed source credential data or path:\n%s", output)
 	}
 }
 

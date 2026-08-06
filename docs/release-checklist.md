@@ -173,8 +173,8 @@ fails closed after teardown is attempted.
 The verifier creates a separate stub fleet on a named throwaway tmux socket,
 an empty temporary project, and a mode-`0700` temporary `HOME`. The macOS probe
 proved only `~/.codex/auth.json` sufficient for file-based seeding; Claude Code
-uses the macOS Keychain, and neither `~/.claude.json` nor another HOME file was
-proved sufficient. The verifier therefore never offers or copies a Claude file.
+uses the macOS Keychain, and no tested HOME-file set was proved sufficient. The
+verifier therefore never offers or copies a Claude file.
 If the proven Codex file exists, the verifier prints that exact filename and
 asks once for consent before copying it with mode `0600`; its contents are never
 printed. Claude Code still requires guided interactive sign-in in the fresh
