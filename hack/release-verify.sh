@@ -8,14 +8,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  hack/release-verify.sh [--measure]
+  hack/release-verify.sh [--non-interactive] [--measure]
   hack/release-verify.sh --render-results VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --process-check VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --assert-probe PROBE_NAME OUTPUT_FILE
 
 Runs preflight and the four hack/probe-*.sh contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
-compact, relaunch, kill, and status. With --measure it runs hack/verify-injection.sh in
+compact, relaunch, kill, status, and a separate skill-discovery fleet. With
+--non-interactive each live checkpoint reads y/n from stdin while retaining all
+prompts and expected observations. With --measure it runs hack/verify-injection.sh in
 measure mode. Both paths finish with automated cleanup checks and results
 rendering.
 
@@ -51,7 +53,18 @@ ask() {
   ASK_ANSWER=''
   while true; do
     answer=''
-    if ! IFS= read -r -p "$question [y/n]: " answer; then
+    printf '%s [y/n]: ' "$question"
+    if [ "$NON_INTERACTIVE" -eq 1 ]; then
+      IFS= read -r answer || {
+        printf 'input closed — answer y or n\n' >&2
+        return 1
+      }
+    elif [ -r /dev/tty ]; then
+      IFS= read -r answer </dev/tty || {
+        printf 'input closed — answer y or n\n' >&2
+        return 1
+      }
+    elif ! IFS= read -r answer; then
       printf 'input closed — answer y or n\n' >&2
       return 1
     fi
@@ -67,6 +80,59 @@ ask() {
         ;;
     esac
   done
+}
+
+part_header() { printf '\n=== Part %s — %s ===\n' "$1" "$2"; }
+step_start() { printf '\n[%s] %s\n' "$1" "$2"; }
+step_pass() { printf '[PASS %s] %s\n' "$1" "$2"; }
+step_fail() { printf '[FAIL %s] %s\n' "$1" "$2" >&2; }
+
+checkpoint() {
+  local checkpoint_name=$1
+  local expected_output=$2
+  local prompt=$3
+  printf 'Checkpoint: %s\n' "$checkpoint_name"
+  printf 'Expected output:\n> %s\n' "$expected_output"
+  if ask "$prompt"; then
+    printf 'operator confirmed: %s\n' "$checkpoint_name"
+    return 0
+  fi
+  printf 'operator refused checkpoint: %s\n' "$checkpoint_name" >&2
+  return 1
+}
+
+PART_C_ROOT=''
+PART_C_TOP=''
+PART_C_REAL_TMUX=''
+PART_C_SOCKET=''
+PART_C_ORIGINAL_HOME=''
+PART_C_ORIGINAL_PATH=''
+PART_C_SESSION_OWNED=0
+PART_C_SOCKET_OWNED=0
+part_c_teardown() {
+  local teardown_status=0
+  if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
+    "$PART_C_TOP/bin/agentctl" kill --session skillverify || teardown_status=1
+    PART_C_SESSION_OWNED=0
+  fi
+  if [ "$PART_C_SOCKET_OWNED" -eq 1 ]; then
+    "$PART_C_REAL_TMUX" -L "$PART_C_SOCKET" kill-server 2>/dev/null || true
+    PART_C_SOCKET_OWNED=0
+  fi
+  if [ -n "$PART_C_TOP" ]; then
+    cd "$PART_C_TOP" || teardown_status=1
+  fi
+  if [ -n "$PART_C_ORIGINAL_HOME" ]; then
+    export HOME="$PART_C_ORIGINAL_HOME"
+  fi
+  if [ -n "$PART_C_ORIGINAL_PATH" ]; then
+    export PATH="$PART_C_ORIGINAL_PATH"
+  fi
+  if [ -n "$PART_C_ROOT" ]; then
+    rm -rf -- "$PART_C_ROOT"
+    PART_C_ROOT=''
+  fi
+  return "$teardown_status"
 }
 
 STATUS_EXIT=0
@@ -182,13 +248,22 @@ render_results() {
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
 
   if [ "$mode" = verify-live ]; then
+    if [ -n "$(field part_a_result "$metadata")" ]; then
+      printf -- '- Part A: %s\n' "$(field part_a_result "$metadata")"
+      printf -- '- Part B: %s\n' "$(field part_b_result "$metadata")"
+      printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
+    fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
-    printf -- '- Attach: recorded %s\n' "$(field attach_attestation "$metadata")"
-    printf -- '- Claude clear: recorded %s\n' "$(field claude_clear_attestation "$metadata")"
-    printf -- '- Codex clear: recorded %s\n' "$(field codex_clear_attestation "$metadata")"
-    printf -- '- Compact (claude): recorded %s\n' "$(field compact_attestation "$metadata")"
-    printf -- '- Relaunch: %s; fresh codex input with no junk: recorded %s\n' \
+    printf -- '- Attach: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+    printf -- '- Claude clear: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
+    printf -- '- Codex clear: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
+    printf -- '- Compact (claude): operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
+    printf -- '- Relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
       "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+    if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
+      printf -- '- Part C skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+      printf -- '- Part C status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+    fi
     case "$(field teardown_status_exit "$metadata")" in
       3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
       6) printf -- '- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)\n' ;;
@@ -358,10 +433,15 @@ if [ "${1:-}" = '--help' ] || [ "${1:-}" = '-h' ]; then
 fi
 
 MEASURE=0
-if [ "${1:-}" = '--measure' ]; then
-  MEASURE=1
+NON_INTERACTIVE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --measure) MEASURE=1 ;;
+    --non-interactive) NON_INTERACTIVE=1 ;;
+    *) die "unsupported argument: $1" ;;
+  esac
   shift
-fi
+done
 [ "$#" -eq 0 ] || die "unsupported argument: $1"
 
 # ---------------------------------------------------------------------------
@@ -383,6 +463,8 @@ done
 EVIDENCE_DIR=$(mktemp -d /tmp/agentctl-release-verify.XXXXXX) || die 'could not create evidence directory'
 VERSIONS_FILE="$EVIDENCE_DIR/versions.txt"
 
+part_header A 'Automated release checks'
+step_start A.1 'build and capture versions'
 echo '== Preflight: make build =='
 make build
 
@@ -402,13 +484,15 @@ printf 'agentctl: %s\n' "$AGENTCTL_VERSION"
 printf 'tmux:     %s\n' "$TMUX_VERSION"
 printf 'claude:   %s\n' "$CLAUDE_VERSION"
 printf 'codex:    %s\n' "$CODEX_VERSION"
+step_pass A.1 'build and version capture completed'
 
 # ---------------------------------------------------------------------------
 # 2. Probes (fully automated)
 # ---------------------------------------------------------------------------
 
-echo
+step_start A.2 'run contract probes'
 echo '== Probes =='
+probe_index=1
 for probe in "$TOP"/hack/probe-*.sh; do
   probe_name=$(basename "$probe")
   echo "-- $probe_name --"
@@ -416,10 +500,16 @@ for probe in "$TOP"/hack/probe-*.sh; do
   probe_out=$(bash "$probe" </dev/null 2>&1) || probe_status=$?
   printf '%s\n' "$probe_out"
   if [ "$probe_status" -ne 0 ]; then
+    step_fail "A.$((probe_index + 1))" "$probe_name failed"
     echo "PROBES FAIL ($probe_name: exit $probe_status)"
     exit 1
   fi
-  assert_probe_output "$probe_name" "$probe_out" || exit 1
+  if ! assert_probe_output "$probe_name" "$probe_out"; then
+    step_fail "A.$((probe_index + 1))" "$probe_name assertion failed"
+    exit 1
+  fi
+  step_pass "A.$((probe_index + 1))" "$probe_name assertion completed"
+  probe_index=$((probe_index + 1))
 done
 
 if pgrep -fl '[t]mux.*agentctl-probe-' >/dev/null 2>&1; then
@@ -427,6 +517,7 @@ if pgrep -fl '[t]mux.*agentctl-probe-' >/dev/null 2>&1; then
   exit 1
 fi
 
+step_pass "A.$((probe_index + 1))" 'no throwaway probe tmux server survived'
 echo 'PROBES PASS'
 
 # ---------------------------------------------------------------------------
@@ -492,8 +583,7 @@ if [ "$MEASURE" -eq 1 ]; then
     die "release measurement failed (verifier=$VERIFY_STATUS, cleanup=$CLEANUP_STATUS)"
   fi
 else
-  echo
-  echo '== Live product verification =='
+  part_header B 'Live release-candidate delivery'
 
   ARTIFACT_DIR="$EVIDENCE_DIR/verify-live"
   mkdir "$ARTIFACT_DIR"
@@ -521,11 +611,13 @@ else
     die "could not prove session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
   fi
 
+  step_start B.1 'launch release-candidate fleet'
   echo 'Running:'
   echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex --efforts b:high'
   if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex --efforts b:high; then
     die 'live release verification launch failed'
   fi
+  step_pass B.1 'release-candidate fleet launched'
 
   # This run owns relverify only after launch succeeds. Keep teardown armed
   # across every later command and attestation; explicit teardown disarms it.
@@ -535,8 +627,9 @@ else
     echo
     echo 'Attach from Window 2 with:'
     echo '  ./bin/agentctl attach --session relverify'
-    if ask 'Is Window 2 attached and showing the claude and codex tabs?'; then
+    if checkpoint 'attach narration' 'agentctl attach narration and the claude and codex tabs are visible.' 'Is Window 2 attached and showing the claude and codex tabs?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
+      step_pass B.2 'attach narration confirmed by operator'
     else
       ATTACH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -546,12 +639,13 @@ else
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
-    if ask 'Is the claude junk ready for agentctl clear?'; then
+    if checkpoint 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify a'
       if ./bin/agentctl clear --session "$LIVE_SESSION" a; then
         echo 'Claude clear delivery result printed above.'
-        if ask 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+        step_pass B.3 'claude clear delivery command completed'
+        if checkpoint 'claude clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
           CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
         else
           CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
@@ -569,12 +663,13 @@ else
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the codex tab, type junk into the input box; do NOT press Enter.'
-    if ask 'Is the codex junk ready for agentctl clear?'; then
+    if checkpoint 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify b'
       if ./bin/agentctl clear --session "$LIVE_SESSION" b; then
         echo 'Codex clear delivery result printed above.'
-        if ask 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
+        step_pass B.4 'codex clear delivery command completed'
+        if checkpoint 'codex clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
           CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
         else
           CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
@@ -592,12 +687,13 @@ else
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
-    if ask 'Is the claude junk ready for the compact spot check?'; then
+    if checkpoint 'claude compact setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the compact spot check?'; then
       echo 'Running:'
       echo '  ./bin/agentctl compact --session relverify a'
       if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
         echo 'Claude compact delivery result printed above.'
-        if ask 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
+        step_pass B.5 'claude compact delivery command completed'
+        if checkpoint 'claude compact delivery' 'junk cleared, /compact executed, and the conversation compacted.' 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
           COMPACT_ATTESTATION=$ASK_ANSWER
         else
           COMPACT_ATTESTATION=$ASK_ANSWER
@@ -625,12 +721,14 @@ else
       original_window_id=$ROLE_WINDOW_ID
       original_pane_id=$ROLE_PANE_ID
       echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
-      if ask 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
+      if checkpoint 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
         echo 'Running exact-ID missing-role setup:'
         printf '  tmux kill-window -t %s\n' "$original_window_id"
         if ! tmux kill-window -t "$original_window_id"; then
           echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
           LIVE_STATUS=1
+        else
+          step_pass B.6 'exact-ID role removal completed'
         fi
       else
         LIVE_STATUS=1
@@ -643,6 +741,7 @@ else
     echo '  ./bin/agentctl status --session relverify'
     if assert_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
       echo 'RELAUNCH PASS (role b reported missing after exact-ID removal)'
+      step_pass B.7 'missing-role state observed'
     else
       echo 'RELAUNCH FAIL (role b did not report missing after exact-ID removal)'
       LIVE_STATUS=1
@@ -654,6 +753,7 @@ else
     echo '  ./bin/agentctl relaunch --session relverify b'
     if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
       cat "$ARTIFACT_DIR/relaunch.stdout"
+      step_pass B.8 'relaunch command completed'
     else
       cat "$ARTIFACT_DIR/relaunch.stdout"
       echo 'RELAUNCH FAIL (agentctl relaunch failed)'
@@ -670,6 +770,7 @@ else
       LIVE_STATUS=1
     else
       printf 'RELAUNCH PASS (role b pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
+      step_pass B.9 'replacement pane ID differs from original'
       expected_relaunch="agentctl: relaunched b in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness codex (stored), model default (stored), effort high (stored), dir $TOP (stored)"
       actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
       if [ "$actual_relaunch" != "$expected_relaunch" ]; then
@@ -684,6 +785,7 @@ else
     echo '  ./bin/agentctl status --session relverify'
     if assert_role_state "$LIVE_SESSION" b running "$ARTIFACT_DIR/relaunch-running.status"; then
       echo 'RELAUNCH PASS (role b restored to running)'
+      step_pass B.10 'recreated role is running'
     else
       echo 'RELAUNCH FAIL (role b did not return to running)'
       LIVE_STATUS=1
@@ -700,9 +802,10 @@ is gone.
 Do you see a fresh, ready codex input surface with no trace of that junk?
 EOF
 )
-    if ask "$relaunch_prompt"; then
+    if checkpoint 'live delivery and relaunch' 'the replacement codex pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
+      step_pass B.11 'live relaunch outcome confirmed by operator'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -766,8 +869,94 @@ EOF
   trap - EXIT
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
+    step_pass B.12 'relverify teardown checks completed'
   else
     LIVE_STATUS=1
+  fi
+
+  PART_A_RESULT='PASS — automated probes and isolation checks completed'
+  PART_B_RESULT='PASS — operator confirmed: attach narration and live delivery/relaunch checkpoints'
+  PART_C_RESULT='FAIL — not run'
+  PART_C_SKILL_ATTESTATION=''
+  PART_C_MEANING_ATTESTATION=''
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    part_header C 'Live skill discovery and meaning'
+    PART_C_TOP=$TOP
+    PART_C_ROOT=$(mktemp -d /tmp/agentctl-skill-verify.XXXXXX) || die 'could not create Part C temporary root'
+    PART_C_ORIGINAL_HOME=$HOME
+    PART_C_ORIGINAL_PATH=$PATH
+    PART_C_SOCKET="agentctl-skill-verify-$$"
+    trap 'part_c_teardown || true' EXIT
+    PART_C_REAL_TMUX=$(command -v tmux) || {
+      part_c_teardown || true
+      die 'could not resolve tmux for Part C'
+    }
+    PART_C_HOME="$PART_C_ROOT/home"
+    PART_C_PROJECT="$PART_C_ROOT/project"
+    PART_C_BIN="$PART_C_ROOT/bin"
+
+    step_start C.1 'create isolated temporary HOME, project, and tmux shim'
+    mkdir -p "$PART_C_HOME" "$PART_C_PROJECT" "$PART_C_BIN" || {
+      part_c_teardown || true
+      die 'could not create Part C directories'
+    }
+    printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
+    chmod 0755 "$PART_C_BIN/tmux"
+    export HOME="$PART_C_HOME"
+    export PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH"
+    cd "$PART_C_PROJECT"
+    step_pass C.1 'isolated Part C environment is active'
+
+    step_start C.2 'initialize isolated AMQ and install the release-candidate skill'
+    if ! amq coop init --agents a,b,user; then
+      part_c_teardown || true
+      die 'Part C AMQ initialization failed'
+    fi
+    if ! "$PART_C_TOP/bin/agentctl" skill install; then
+      part_c_teardown || true
+      die 'Part C skill installation failed'
+    fi
+    step_pass C.2 'AMQ initialized and both skill directories installed'
+
+    step_start C.3 'launch and attach the named-socket skill fleet'
+    if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT"; then
+      part_c_teardown || true
+      die 'Part C skill fleet launch failed'
+    fi
+    PART_C_SESSION_OWNED=1
+    PART_C_SOCKET_OWNED=1
+    printf 'Attach to the isolated skill fleet with:\n  %s/bin/agentctl attach --session skillverify\n' "$PART_C_TOP"
+    if ! "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
+      part_c_teardown || true
+      die 'Part C attach guidance failed'
+    fi
+    step_pass C.3 'named-socket skill fleet launched and attach guidance completed'
+
+    if checkpoint 'harness lists the agentctl skill' 'both Claude Code and codex skill inventories list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
+      PART_C_SKILL_ATTESTATION=$ASK_ANSWER
+    else
+      PART_C_SKILL_ATTESTATION=$ASK_ANSWER
+      part_c_teardown || true
+      die 'Part C skill inventory checkpoint refused'
+    fi
+
+    meaning_expected='ambiguous means more than one exact-name role window exists; clear and compact refuse until raw tmux repairs it.'
+    if checkpoint 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
+      PART_C_MEANING_ATTESTATION=$ASK_ANSWER
+    else
+      PART_C_MEANING_ATTESTATION=$ASK_ANSWER
+      part_c_teardown || true
+      die 'Part C status-state checkpoint refused'
+    fi
+
+    step_start C.4 'tear down named-socket fleet and temporary skill root'
+    if ! part_c_teardown; then
+      die 'Part C teardown failed'
+    fi
+    trap - EXIT
+    step_pass C.4 'Part C resources removed and environment restored'
+    PART_C_RESULT='PASS — operator confirmed: harness lists the agentctl skill; probe answer matches references/status-states.md'
   fi
 
   {
@@ -775,12 +964,18 @@ EOF
     printf 'mode=verify-live\n'
     printf 'harness=both\n'
     printf 'probes=all four completed, no surviving throwaway server\n'
+
+    printf 'part_a_result=%s\n' "$PART_A_RESULT"
+    printf 'part_b_result=%s\n' "$PART_B_RESULT"
+    printf 'part_c_result=%s\n' "$PART_C_RESULT"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
     printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"
     printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
     printf 'relaunch_check=%s\n' "$RELAUNCH_CHECK"
     printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
+    printf 'part_c_skill_attestation=%s\n' "$PART_C_SKILL_ATTESTATION"
+    printf 'part_c_meaning_attestation=%s\n' "$PART_C_MEANING_ATTESTATION"
     printf 'teardown_status_exit=%s\n' "$TEARDOWN_STATUS_EXIT"
     printf 'teardown_check=%s\n' "$TEARDOWN_CHECK"
   } >"$ARTIFACT_DIR/metadata.txt"

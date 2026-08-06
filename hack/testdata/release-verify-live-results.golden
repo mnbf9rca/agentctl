@@ -7,10 +7,10 @@
 - Mode: `verify-live`; harness: `both`
 - Artifact: `testdata/release-verify-live-artifact`
 - Probes: all four completed, no surviving throwaway server
-- Attach: recorded y
-- Claude clear: recorded y
-- Codex clear: recorded y
-- Compact (claude): recorded y
-- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: recorded y
+- Attach: operator confirmed: y
+- Claude clear: operator confirmed: y
+- Codex clear: operator confirmed: y
+- Compact (claude): operator confirmed: y
+- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS
