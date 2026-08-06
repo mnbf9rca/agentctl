@@ -188,11 +188,12 @@ func TestProcessCheckRejects(t *testing.T) {
 }
 
 type liveFixture struct {
-	dir          string
-	agentctlLog  string
-	tmuxLog      string
-	amqLog       string
-	skillRootLog string
+	dir            string
+	agentctlLog    string
+	tmuxLog        string
+	amqLog         string
+	skillRootLog   string
+	environmentLog string
 }
 
 func newLiveFixture(t *testing.T) liveFixture {
@@ -219,6 +220,7 @@ func newLiveFixture(t *testing.T) liveFixture {
 	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
 	amqLog := filepath.Join(t.TempDir(), "amq.log")
 	skillRootLog := filepath.Join(t.TempDir(), "skill-root.log")
+	environmentLog := filepath.Join(t.TempDir(), "environment.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
 	agentctlRoleB := filepath.Join(t.TempDir(), "role-b")
@@ -264,6 +266,10 @@ case "$1" in
     ;;
   launch)
     if [ "$3" = skillverify ]; then
+      if [ "${AGENTCTL_TEST_PART_C_LAUNCH_FAIL:-0}" = 1 ]; then
+        echo 'skillverify launch failed' >&2
+        exit 1
+      fi
       touch "$AGENTCTL_TEST_SKILL_OWNED"
       echo 'launched skillverify'
       exit 0
@@ -312,6 +318,11 @@ case "$1" in
   -L)
     [ "$3" = kill-server ] || exit 64
     touch "$AGENTCTL_TEST_SKILL_SOCKET_KILLED"
+    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ABSENT:-0}" = 1 ]; then
+      echo 'no server running'
+      exit 1
+    fi
+    [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_CODE:-0}" -eq 0 ] || exit "$AGENTCTL_TEST_SKILL_KILL_SERVER_CODE"
     ;;
   -V)
     echo 'tmux 3.7b'
@@ -340,6 +351,16 @@ esac
 	writeTestFile(t, filepath.Join(dir, "stubs/tmux"), []byte(tmux), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/claude"), []byte("#!/usr/bin/env bash\necho '2.1.220 (Claude Code)'\n"), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/codex"), []byte("#!/usr/bin/env bash\necho 'codex-cli 0.146.0'\n"), 0o755)
+	rm := `#!/usr/bin/env bash
+set -u
+printf '%s|%s|%s\n' "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_ENVIRONMENT_LOG"
+if [ "${AGENTCTL_TEST_PART_C_RM_FAIL:-0}" = 1 ] && [ "$1" = -rf ] && [ "$2" = -- ] && case "$3" in /tmp/agentctl-skill-verify.*) true ;; *) false ;; esac; then
+  echo 'simulated Part C rm failure' >&2
+  exit 1
+fi
+exec /bin/rm "$@"
+`
+	writeTestFile(t, filepath.Join(dir, "stubs/rm"), []byte(rm), 0o755)
 	amq := `#!/usr/bin/env bash
 set -u
 printf '%s|%s|%s|%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AMQ_LOG"
@@ -378,6 +399,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_TMUX_LOG", tmuxLog)
 	t.Setenv("AGENTCTL_TEST_AMQ_LOG", amqLog)
 	t.Setenv("AGENTCTL_TEST_SKILL_ROOT_LOG", skillRootLog)
+	t.Setenv("AGENTCTL_TEST_ENVIRONMENT_LOG", environmentLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
@@ -387,7 +409,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED", filepath.Join(t.TempDir(), "skill-socket-killed"))
 	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
 	t.Setenv("PATH", filepath.Join(dir, "stubs")+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return liveFixture{dir: dir, agentctlLog: agentctlLog, tmuxLog: tmuxLog, amqLog: amqLog, skillRootLog: skillRootLog}
+	return liveFixture{dir: dir, agentctlLog: agentctlLog, tmuxLog: tmuxLog, amqLog: amqLog, skillRootLog: skillRootLog, environmentLog: environmentLog}
 }
 
 func writeTestFile(t *testing.T, path string, body []byte, mode os.FileMode) {
@@ -444,11 +466,15 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"=== Part A — Automated release checks ===",
 		"[PASS A.",
 		"=== Part B — Live release-candidate delivery ===",
+		"The Command Menu belongs to iTerm2.",
+		"advisory read failure; omission is not a release failure",
 		"Expected output:",
 		"operator confirmed:",
 		"=== Part C — Live skill discovery and meaning ===",
 		"harness lists the agentctl skill",
 		"probe answer matches references/status-states.md",
+		"no window is selected as real",
+		"press esc to detach cleanly; do not use uppercase X",
 		"ALL VERIFIED — evidence appended",
 	} {
 		if !strings.Contains(output, want) {
@@ -514,10 +540,6 @@ func TestLiveVerificationPartCRejectCleansOnlyNamedResources(t *testing.T) {
 	fixture := newLiveFixture(t)
 	originalHome := os.Getenv("HOME")
 	originalPath := os.Getenv("PATH")
-	originalDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
 	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n")
 	if err == nil {
 		t.Fatalf("release verification accepted Part C refusal:\n%s", output)
@@ -545,20 +567,37 @@ func TestLiveVerificationPartCRejectCleansOnlyNamedResources(t *testing.T) {
 		}
 	}
 	amqRecord := strings.TrimSpace(readTestFile(t, fixture.amqLog))
-	if !strings.Contains(amqRecord, "coop init --agents a,b,user|") || strings.Contains(amqRecord, "|"+originalDir+"|"+originalHome+"|"+originalPath) {
+	if !strings.Contains(amqRecord, "coop init --agents a,b,user|") || strings.Contains(amqRecord, "|"+fixture.dir+"|"+originalHome+"|"+originalPath) {
 		t.Fatalf("Part C did not use isolated cwd/HOME/PATH: %q", amqRecord)
 	}
 	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
 	if _, statErr := os.Stat(skillHome); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("temporary Part C HOME survived cleanup: %q, err=%v", skillHome, statErr)
 	}
-	if got, getwdErr := os.Getwd(); getwdErr != nil || got != originalDir || os.Getenv("HOME") != originalHome || os.Getenv("PATH") != originalPath {
-		t.Fatalf("fixture environment was not restored: cwd=%q err=%v HOME=%q PATH=%q", got, getwdErr, os.Getenv("HOME"), os.Getenv("PATH"))
+	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
+}
+
+func assertChildRestoredEnvironment(t *testing.T, fixture liveFixture, wantDir, wantHome, wantPath string) {
+	t.Helper()
+	canonicalDir, err := filepath.EvalSymlinks(wantDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := strings.FieldsFunc(strings.TrimSpace(readTestFile(t, fixture.environmentLog)), func(character rune) bool { return character == '\n' })
+	if len(records) == 0 {
+		t.Fatal("fixture did not observe a post-teardown child command")
+	}
+	got := records[len(records)-1]
+	want := canonicalDir + "|" + wantHome + "|" + wantPath
+	if got != want {
+		t.Fatalf("post-teardown child environment = %q, want %q", got, want)
 	}
 }
 
 func TestLiveVerificationPartCAttachAbortCleansResources(t *testing.T) {
 	fixture := newLiveFixture(t)
+	originalHome := os.Getenv("HOME")
+	originalPath := os.Getenv("PATH")
 	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_PART_C_ATTACH_FAIL=1")
 	if err == nil {
 		t.Fatalf("release verification accepted Part C attach failure:\n%s", output)
@@ -572,6 +611,62 @@ func TestLiveVerificationPartCAttachAbortCleansResources(t *testing.T) {
 	}
 	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED")); statErr != nil {
 		t.Fatalf("named socket cleanup missing: %v", statErr)
+	}
+	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
+}
+
+func TestLiveVerificationPartCSocketCleanupFailureIsReported(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_CODE=1")
+	if err == nil {
+		t.Fatalf("release verification accepted named-socket cleanup failure:\n%s", output)
+	}
+	if strings.Contains(output, "[PASS C.4]") || !strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
+		t.Fatalf("named-socket cleanup failure was not reported:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCSocketAlreadyAbsentIsObserved(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_ABSENT=1")
+	if err == nil {
+		t.Fatalf("release verification accepted Part C refusal:\n%s", output)
+	}
+	if !strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") || strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
+		t.Fatalf("already-absent named socket was not distinguished:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCRootRemovalFailureIsReported(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n", "AGENTCTL_TEST_PART_C_RM_FAIL=1")
+	if err == nil {
+		t.Fatalf("release verification accepted Part C root-removal failure:\n%s", output)
+	}
+	if strings.Contains(output, "[PASS C.4]") || !strings.Contains(output, "PART C CLEANUP FAIL (remove temporary root") {
+		t.Fatalf("Part C root-removal failure was not reported:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCLaunchFailureCleansNamedSocket(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_PART_C_LAUNCH_FAIL=1")
+	if err == nil {
+		t.Fatalf("release verification accepted Part C launch failure:\n%s", output)
+	}
+	if !strings.Contains(output, "Part C skill fleet launch failed") || !strings.Contains(strings.Join(fixture.tmuxCalls(t), "\n"), "-L agentctl-skill-verify-") {
+		t.Fatalf("named socket cleanup was not attempted after launch failure:\n%s\n%s", output, strings.Join(fixture.tmuxCalls(t), "\n"))
+	}
+}
+
+func TestLiveVerificationDoesNotCallRefusalOnCheckpointEOF(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 9))
+	if err == nil {
+		t.Fatalf("release verification accepted checkpoint EOF:\n%s", output)
+	}
+	if !strings.Contains(output, "input closed — answer y or n") || strings.Contains(output, "operator refused checkpoint:") {
+		t.Fatalf("checkpoint EOF was reported as refusal:\n%s", output)
 	}
 }
 

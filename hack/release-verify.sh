@@ -47,30 +47,36 @@ field() {
 }
 
 ASK_ANSWER=''
+ASK_RESULT=''
 ask() {
   local question=$1
   local answer
   ASK_ANSWER=''
+  ASK_RESULT=''
   while true; do
     answer=''
     printf '%s [y/n]: ' "$question"
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
       IFS= read -r answer || {
         printf 'input closed — answer y or n\n' >&2
-        return 1
+        ASK_RESULT=input
+        return 2
       }
     elif [ -r /dev/tty ]; then
       IFS= read -r answer </dev/tty || {
         printf 'input closed — answer y or n\n' >&2
-        return 1
+        ASK_RESULT=input
+        return 2
       }
     elif ! IFS= read -r answer; then
       printf 'input closed — answer y or n\n' >&2
-      return 1
+      ASK_RESULT=input
+      return 2
     fi
     case "$answer" in
       y|n)
         ASK_ANSWER=$answer
+        ASK_RESULT=$answer
         printf 'recorded: %s\n' "$answer"
         [ "$answer" = y ]
         return
@@ -97,8 +103,12 @@ checkpoint() {
     printf 'operator confirmed: %s\n' "$checkpoint_name"
     return 0
   fi
-  printf 'operator refused checkpoint: %s\n' "$checkpoint_name" >&2
-  return 1
+  if [ "$ASK_RESULT" = n ]; then
+    printf 'operator refused checkpoint: %s\n' "$checkpoint_name" >&2
+    return 1
+  fi
+  printf 'checkpoint input failed: %s\n' "$checkpoint_name" >&2
+  return 2
 }
 
 PART_C_ROOT=''
@@ -108,19 +118,40 @@ PART_C_SOCKET=''
 PART_C_ORIGINAL_HOME=''
 PART_C_ORIGINAL_PATH=''
 PART_C_SESSION_OWNED=0
-PART_C_SOCKET_OWNED=0
+PART_C_SOCKET_ARMED=0
 part_c_teardown() {
   local teardown_status=0
+  local socket_output
   if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
-    "$PART_C_TOP/bin/agentctl" kill --session skillverify || teardown_status=1
-    PART_C_SESSION_OWNED=0
+    if "$PART_C_TOP/bin/agentctl" kill --session skillverify; then
+      printf 'PART C CLEANUP PASS (skillverify killed)\n'
+      PART_C_SESSION_OWNED=0
+    else
+      printf 'PART C CLEANUP FAIL (skillverify kill)\n' >&2
+      teardown_status=1
+    fi
   fi
-  if [ "$PART_C_SOCKET_OWNED" -eq 1 ]; then
-    "$PART_C_REAL_TMUX" -L "$PART_C_SOCKET" kill-server 2>/dev/null || true
-    PART_C_SOCKET_OWNED=0
+  if [ "$PART_C_SOCKET_ARMED" -eq 1 ]; then
+    socket_output=$("$PART_C_REAL_TMUX" -L "$PART_C_SOCKET" kill-server 2>&1) || socket_status=$?
+    socket_status=${socket_status:-0}
+    if [ "$socket_status" -eq 0 ]; then
+      printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
+      PART_C_SOCKET_ARMED=0
+    elif printf '%s\n' "$socket_output" | grep -qF 'no server running'; then
+      printf 'PART C CLEANUP OBSERVED (named tmux socket already absent)\n'
+      PART_C_SOCKET_ARMED=0
+    else
+      printf 'PART C CLEANUP FAIL (named tmux socket kill-server exited %s): %s\n' "$socket_status" "$socket_output" >&2
+      teardown_status=1
+    fi
   fi
   if [ -n "$PART_C_TOP" ]; then
-    cd "$PART_C_TOP" || teardown_status=1
+    if cd "$PART_C_TOP"; then
+      printf 'PART C CLEANUP PASS (cwd restored)\n'
+    else
+      printf 'PART C CLEANUP FAIL (restore cwd)\n' >&2
+      teardown_status=1
+    fi
   fi
   if [ -n "$PART_C_ORIGINAL_HOME" ]; then
     export HOME="$PART_C_ORIGINAL_HOME"
@@ -128,11 +159,36 @@ part_c_teardown() {
   if [ -n "$PART_C_ORIGINAL_PATH" ]; then
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
+  printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
   if [ -n "$PART_C_ROOT" ]; then
-    rm -rf -- "$PART_C_ROOT"
-    PART_C_ROOT=''
+    if rm -rf -- "$PART_C_ROOT"; then
+      printf 'PART C CLEANUP PASS (temporary root removed)\n'
+      PART_C_ROOT=''
+    else
+      printf 'PART C CLEANUP FAIL (remove temporary root %s)\n' "$PART_C_ROOT" >&2
+      teardown_status=1
+    fi
   fi
   return "$teardown_status"
+}
+
+part_c_abort() {
+  local reason=$1
+  if ! part_c_teardown; then
+    trap - EXIT
+    die "$reason; Part C cleanup failed"
+  fi
+  trap - EXIT
+  die "$reason"
+}
+
+part_c_exit_trap() {
+  local original_status=$?
+  if ! part_c_teardown; then
+    printf 'release-verify: Part C cleanup failed during exit\n' >&2
+    return 1
+  fi
+  return "$original_status"
 }
 
 STATUS_EXIT=0
@@ -513,6 +569,7 @@ for probe in "$TOP"/hack/probe-*.sh; do
 done
 
 if pgrep -fl '[t]mux.*agentctl-probe-' >/dev/null 2>&1; then
+  step_fail "A.$((probe_index + 1))" 'throwaway probe tmux server survived'
   echo 'PROBES FAIL (throwaway probe tmux server still running)'
   exit 1
 fi
@@ -627,7 +684,15 @@ else
     echo
     echo 'Attach from Window 2 with:'
     echo '  ./bin/agentctl attach --session relverify'
-    if checkpoint 'attach narration' 'agentctl attach narration and the claude and codex tabs are visible.' 'Is Window 2 attached and showing the claude and codex tabs?'; then
+    attach_expected=$(cat <<'EOF'
+agentctl: attaching session "relverify" (2 windows) in iTerm2…
+The Command Menu belongs to iTerm2. The claude and codex tabs are visible.
+The parenthesized two-window count is advisory: if it is omitted, record the
+advisory read failure; omission is not a release failure and agentctl never
+guesses the count.
+EOF
+)
+    if checkpoint 'attach narration' "$attach_expected" 'Is Window 2 attached and showing the claude and codex tabs?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
       step_pass B.2 'attach narration confirmed by operator'
     else
@@ -653,6 +718,7 @@ else
         fi
       else
         echo 'LIVE VERIFY FAIL (claude clear delivery failed)'
+        step_fail B.3 'claude clear delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -677,6 +743,7 @@ else
         fi
       else
         echo 'LIVE VERIFY FAIL (codex clear delivery failed)'
+        step_fail B.4 'codex clear delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -701,6 +768,7 @@ else
         fi
       else
         echo 'LIVE VERIFY FAIL (claude compact delivery failed)'
+        step_fail B.5 'claude compact delivery command failed'
         LIVE_STATUS=1
       fi
     else
@@ -887,19 +955,18 @@ EOF
     PART_C_ORIGINAL_HOME=$HOME
     PART_C_ORIGINAL_PATH=$PATH
     PART_C_SOCKET="agentctl-skill-verify-$$"
-    trap 'part_c_teardown || true' EXIT
+    trap part_c_exit_trap EXIT
     PART_C_REAL_TMUX=$(command -v tmux) || {
-      part_c_teardown || true
-      die 'could not resolve tmux for Part C'
+      part_c_abort 'could not resolve tmux for Part C'
     }
+    PART_C_SOCKET_ARMED=1
     PART_C_HOME="$PART_C_ROOT/home"
     PART_C_PROJECT="$PART_C_ROOT/project"
     PART_C_BIN="$PART_C_ROOT/bin"
 
     step_start C.1 'create isolated temporary HOME, project, and tmux shim'
     mkdir -p "$PART_C_HOME" "$PART_C_PROJECT" "$PART_C_BIN" || {
-      part_c_teardown || true
-      die 'could not create Part C directories'
+      part_c_abort 'could not create Part C directories'
     }
     printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
     chmod 0755 "$PART_C_BIN/tmux"
@@ -910,26 +977,40 @@ EOF
 
     step_start C.2 'initialize isolated AMQ and install the release-candidate skill'
     if ! amq coop init --agents a,b,user; then
-      part_c_teardown || true
-      die 'Part C AMQ initialization failed'
+      step_fail C.2 'AMQ initialization failed'
+      part_c_abort 'Part C AMQ initialization failed'
     fi
     if ! "$PART_C_TOP/bin/agentctl" skill install; then
-      part_c_teardown || true
-      die 'Part C skill installation failed'
+      step_fail C.2 'skill installation failed'
+      part_c_abort 'Part C skill installation failed'
     fi
     step_pass C.2 'AMQ initialized and both skill directories installed'
 
     step_start C.3 'launch and attach the named-socket skill fleet'
     if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT"; then
-      part_c_teardown || true
-      die 'Part C skill fleet launch failed'
+      step_fail C.3 'skill fleet launch failed'
+      part_c_abort 'Part C skill fleet launch failed'
     fi
     PART_C_SESSION_OWNED=1
-    PART_C_SOCKET_OWNED=1
-    printf 'Attach to the isolated skill fleet with:\n  %s/bin/agentctl attach --session skillverify\n' "$PART_C_TOP"
+    cat <<EOF
+Before attaching, inspect each harness's skill inventory and confirm it lists
+\`agentctl\`. Then ask each harness exactly:
+
+  What does \`ambiguous\` mean in agentctl status, and which commands refuse on it?
+
+Expected meaning: more than one window has the role's exact name, no window is
+selected as real, and role-targeted \`clear\` and \`compact\` refuse until an
+operator repairs the ambiguity with raw tmux.
+
+Attach to the isolated skill fleet with:
+  $PART_C_TOP/bin/agentctl attach --session skillverify
+
+After both observations, press esc to detach cleanly; do not use uppercase X.
+Wait for the post-detach session-state report before continuing.
+EOF
     if ! "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
-      part_c_teardown || true
-      die 'Part C attach guidance failed'
+      step_fail C.3 'skill fleet attach failed'
+      part_c_abort 'Part C attach guidance failed'
     fi
     step_pass C.3 'named-socket skill fleet launched and attach guidance completed'
 
@@ -937,17 +1018,15 @@ EOF
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
     else
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
-      part_c_teardown || true
-      die 'Part C skill inventory checkpoint refused'
+      part_c_abort 'Part C skill inventory checkpoint failed'
     fi
 
-    meaning_expected='ambiguous means more than one exact-name role window exists; clear and compact refuse until raw tmux repairs it.'
+    meaning_expected='ambiguous means more than one exact-name role window exists, no window is selected as real, and clear and compact refuse until raw tmux repairs it.'
     if checkpoint 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
     else
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
-      part_c_teardown || true
-      die 'Part C status-state checkpoint refused'
+      part_c_abort 'Part C status-state checkpoint failed'
     fi
 
     step_start C.4 'tear down named-socket fleet and temporary skill root'
