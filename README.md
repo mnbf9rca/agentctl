@@ -133,7 +133,7 @@ optional model selects a harness configuration without changing the role, and an
 reasoning effort that role's harness spends. Roles omitted from `--models` or `--efforts` use their harness default,
 and no corresponding flag is passed to the harness at all.
 
-Check the fleet before acting on it:
+Launch ends by showing the fleet state it observed. Refresh that view, or request its JSON form, with:
 
 ```bash
 agentctl status --session epic123
@@ -217,6 +217,11 @@ Creates a new managed tmux session. `--session` and `--roles` are required. Supp
 `codex`. `--models` and `--efforts` are optional and may name only roles present in `--roles`. `--dir` overrides the
 invocation working directory and must name an existing directory. Launch fails rather than adopting an existing
 session.
+
+After creation succeeds, `launch` prints the same observed human-readable table as `status --session SESSION`. The
+table is collected from the managed roster and live tmux state rather than echoed from the launch arguments, so a role
+that has already disappeared is reported as `missing`. If that confirmation cannot be collected, launch reports the
+unverified confirmation on stderr but keeps exit 0 because the fleet creation itself succeeded.
 
 #### Effort levels
 

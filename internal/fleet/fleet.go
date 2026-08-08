@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,11 +36,21 @@ func (e *DirectoryError) Error() string {
 func (e *DirectoryError) Unwrap() error { return e.Err }
 
 // SessionExistsError reports that the requested session name is already in use.
-type SessionExistsError struct{ Name string }
+// Cause is present when tmux atomically refused new-session after the advisory
+// existence check missed the session.
+type SessionExistsError struct {
+	Name  string
+	Cause error
+}
 
 func (e *SessionExistsError) Error() string {
+	if e.Cause != nil {
+		return tmuxx.ClassifyError(e.Cause).Error()
+	}
 	return fmt.Sprintf("session %q already exists", e.Name)
 }
+
+func (e *SessionExistsError) Unwrap() error { return e.Cause }
 
 // CreationError reports malformed successful new-session output. It is a
 // pre-ownership error because no typed session ID was obtained.
@@ -158,59 +169,78 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 	}
 }
 
-// Launch performs preflight before taking any tmux action. A nil directory
-// uses the invocation working directory; a non-nil value must name a directory.
-func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) error {
+// Launch performs preflight before taking any tmux action and returns the exact
+// session created by this invocation. A nil directory uses the invocation
+// working directory; a non-nil value must name a directory.
+func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) (tmuxx.Session, error) {
 	if len(fleet.Roles) == 0 {
-		return fmt.Errorf("fleet must contain at least one role")
+		return tmuxx.Session{}, fmt.Errorf("fleet must contain at least one role")
 	}
 	if err := preflight.CheckExecutables(fleet, l.lookPath); err != nil {
-		return err
+		return tmuxx.Session{}, err
 	}
 	directoryName, err := l.resolveDirectory(directory)
 	if err != nil {
-		return err
+		return tmuxx.Session{}, err
 	}
 	sessions, err := l.tmux.ListSessions(ctx)
 	if errors.Is(err, context.Canceled) {
-		return context.Canceled
+		return tmuxx.Session{}, context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return context.DeadlineExceeded
+		return tmuxx.Session{}, context.DeadlineExceeded
 	}
 	if err == nil {
 		for _, existing := range sessions {
 			if existing.Name == session {
-				return &SessionExistsError{Name: session}
+				return tmuxx.Session{}, &SessionExistsError{Name: session}
 			}
 		}
 	}
 	first := fleet.Roles[0]
 	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {
-		if errors.Is(err, tmuxx.ErrCreationOutput) {
-			return &CreationError{Session: session, Cause: err}
+		if isDuplicateSessionRefusal(err, session) {
+			return tmuxx.Session{}, &SessionExistsError{Name: session, Cause: err}
 		}
-		return err
+		if errors.Is(err, tmuxx.ErrCreationOutput) {
+			return tmuxx.Session{}, &CreationError{Session: session, Cause: err}
+		}
+		return tmuxx.Session{}, err
 	}
 	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles, directoryName); err != nil {
-		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
-		return l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	l.clearSessionIdentity(ctx, createdSession.SessionID)
 
 	for _, role := range fleet.Roles[1:] {
 		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directoryName)
 		if err != nil {
-			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 		if err := l.stampWindow(ctx, createdWindow.WindowID, createdWindow.PanePID, role); err != nil {
-			return l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 	}
-	return nil
+	return tmuxx.Session{ID: createdSession.SessionID, Name: session}, nil
+}
+
+func isDuplicateSessionRefusal(err error, session string) bool {
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		return false
+	}
+	stderr := string(exitError.Stderr)
+	switch {
+	case strings.HasSuffix(stderr, "\r\n"):
+		stderr = strings.TrimSuffix(stderr, "\r\n")
+	case strings.HasSuffix(stderr, "\n"):
+		stderr = strings.TrimSuffix(stderr, "\n")
+	}
+	return stderr == "duplicate session: "+session
 }
 
 func (l Launcher) clearSessionIdentity(ctx context.Context, sessionID tmuxx.SessionID) {
@@ -305,10 +335,20 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 
 func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, error) {
 	deadline := l.now().Add(processPollTimeout)
+	previous := ""
 	for {
 		process, err := l.tmux.ProcessName(ctx, panePID)
-		if err == nil && process != "amq" {
-			return process, nil
+		if err == nil {
+			if process != "amq" {
+				if process == previous {
+					return process, nil
+				}
+				previous = process
+			} else {
+				previous = ""
+			}
+		} else {
+			previous = ""
 		}
 		if err != nil && !errors.Is(err, tmuxx.ErrProcessUnavailable) {
 			return "", err
@@ -333,8 +373,15 @@ func (l Launcher) resolveDirectory(directory *string) (string, error) {
 	if directory == nil {
 		return l.getwd()
 	}
+	if *directory == "" {
+		return "", &DirectoryError{Path: *directory, Err: fs.ErrNotExist}
+	}
+	resolved, err := filepath.Abs(*directory)
+	if err != nil {
+		return "", &DirectoryError{Path: *directory, Err: err}
+	}
 	{
-		info, err := l.stat(*directory)
+		info, err := l.stat(resolved)
 		if err != nil {
 			return "", &DirectoryError{Path: *directory, Err: err}
 		}
@@ -342,5 +389,5 @@ func (l Launcher) resolveDirectory(directory *string) (string, error) {
 			return "", &DirectoryError{Path: *directory}
 		}
 	}
-	return *directory, nil
+	return resolved, nil
 }

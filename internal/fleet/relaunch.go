@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -23,6 +24,8 @@ const (
 	// ProvenanceFlags is a value supplied by flags because the session records none.
 	ProvenanceFlags Provenance = "flags"
 )
+
+var errStoredDirectoryNotAbsolute = errors.New("path is not absolute")
 
 // RelaunchRequest is one relaunch invocation. A nil field means its option was
 // omitted; an omitted option is never the same as an empty one.
@@ -152,6 +155,32 @@ func (e *WindowPresentError) Error() string {
 		e.Role, len(e.Windows), noun, e.Session.Name, strings.Join(rendered, ", "))
 }
 
+// PostCreateWindowConflictError reports that the exact-session verification
+// after creation did not find the new window as the role's sole window.
+type PostCreateWindowConflictError struct {
+	Session         tmuxx.Session
+	Role            string
+	CreatedWindowID tmuxx.WindowID
+	WindowIDs       []tmuxx.WindowID
+}
+
+func (e *PostCreateWindowConflictError) Error() string {
+	rendered := make([]string, len(e.WindowIDs))
+	for index, windowID := range e.WindowIDs {
+		rendered[index] = string(windowID)
+	}
+	noun := "windows"
+	if len(e.WindowIDs) == 1 {
+		noun = "window"
+	}
+	observation := fmt.Sprintf("post-create verification observed role %s in %d %s in %s",
+		e.Role, len(e.WindowIDs), noun, e.Session.Name)
+	if len(rendered) > 0 {
+		observation += " (" + strings.Join(rendered, ", ") + ")"
+	}
+	return fmt.Sprintf("%s; expected only created window %s", observation, e.CreatedWindowID)
+}
+
 // StoredDirectoryError reports a recorded launch directory that cannot be used.
 type StoredDirectoryError struct {
 	Session tmuxx.Session
@@ -254,6 +283,9 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 			return RelaunchResult{}, &WindowCreationError{Role: role.Name, Cause: err}
 		}
 		return RelaunchResult{}, tmuxx.ClassifyError(err)
+	}
+	if err := l.verifyCreatedWindow(ctx, session, role.Name, created.WindowID); err != nil {
+		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
 	}
 	if err := l.stampWindow(ctx, created.WindowID, created.PanePID, role); err != nil {
 		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
@@ -368,6 +400,14 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 			Reason:  fmt.Sprintf("has %s %q whose roles do not match %s %q", optionFleet, fleetValue, optionRoles, roster),
 		}
 	}
+	if request.Directory == nil && !filepath.IsAbs(directoryValue) {
+		return config.RoleConfig{}, "", sources{}, &StoredDirectoryError{
+			Session: session,
+			Role:    request.Role,
+			Path:    directoryValue,
+			Err:     errStoredDirectoryNotAbsolute,
+		}
+	}
 
 	provenance := sources{
 		harness:         ProvenanceStored,
@@ -450,6 +490,31 @@ func (l Launcher) requireAbsentWindow(ctx context.Context, session tmuxx.Session
 	return &WindowPresentError{Session: session, Role: role, Windows: observed}
 }
 
+// verifyCreatedWindow closes the absence-check/create race before any success
+// can be reported. It addresses the session by typed ID and accepts only the
+// exact window ID returned by this invocation's NewWindow call.
+func (l Launcher) verifyCreatedWindow(ctx context.Context, session tmuxx.Session, role string, createdWindowID tmuxx.WindowID) error {
+	windows, err := l.tmux.ListWindows(ctx, session.ID)
+	if err != nil {
+		return tmuxx.ClassifyError(err)
+	}
+	windowIDs := make([]tmuxx.WindowID, 0, 1)
+	for _, window := range windows {
+		if window.Name == role {
+			windowIDs = append(windowIDs, window.ID)
+		}
+	}
+	if len(windowIDs) == 1 && windowIDs[0] == createdWindowID {
+		return nil
+	}
+	return &PostCreateWindowConflictError{
+		Session:         session,
+		Role:            role,
+		CreatedWindowID: createdWindowID,
+		WindowIDs:       windowIDs,
+	}
+}
+
 func (l Launcher) observeWindows(ctx context.Context, matches []tmuxx.Window, role string) ([]ObservedWindow, error) {
 	if len(matches) > 1 {
 		observed := make([]ObservedWindow, len(matches))
@@ -468,7 +533,7 @@ func (l Launcher) observeWindows(ctx context.Context, matches []tmuxx.Window, ro
 // observeWindow reports the state status would report for one window, in the
 // same precedence order, so a refusal never asserts more than was verified.
 func (l Launcher) observeWindow(ctx context.Context, window tmuxx.Window, role string) (status.State, error) {
-	if window.Managed != "1" || window.Role != role {
+	if window.Role != role {
 		return status.StateUnmanaged, nil
 	}
 	panes, err := l.tmux.ListPanes(ctx, window.ID)

@@ -13,6 +13,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Skill pairing check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: hack/check-skill-pairing.sh "$BASE_SHA" "$HEAD_SHA"
       - name: Environment fingerprint
         run: ./hack/ci-fingerprint.sh
       - name: Set up Go

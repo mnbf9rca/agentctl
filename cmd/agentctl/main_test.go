@@ -60,6 +60,7 @@ Commands:
   clear     deliver /clear to a role
   compact   deliver /compact to a role
   kill      terminate a managed fleet
+  skill     install or inspect the embedded agent skill
   version   report this binary's build identity
 `
 	tests := []struct {
@@ -444,14 +445,11 @@ func TestStatusAllTreatsReportPresenceSeparatelyFromSchemaValue(t *testing.T) {
 }
 
 func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing.T) {
-	resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-		t.Fatal("launch called session resolver")
-		return tmuxx.Session{}, nil
-	})
 	tests := []struct {
-		name     string
-		args     []string
-		wantCode int
+		name        string
+		args        []string
+		wantCode    int
+		wantResolve int
 	}{
 		{name: "missing", args: []string{"launch", "--roles", "planner:claude"}, wantCode: exitUsage},
 		{name: "empty", args: []string{"launch", "--session=", "--roles", "planner:claude"}, wantCode: exitUsage},
@@ -461,10 +459,26 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(launchOneRoleResponses("")...)
+			resolveCalls := 0
+			resolver := resolverFunc(func(_ context.Context, explicit *string) (tmuxx.Session, error) {
+				resolveCalls++
+				if explicit == nil || *explicit != "fleet" {
+					t.Fatalf("Resolve() explicit = %v, want fleet", explicit)
+				}
+				return tmuxx.Session{ID: "$17", Name: "fleet"}, nil
+			})
+			collector := selectedStatusCollectorStub{report: statuspkg.Report{
+				Schema: 1, Session: "fleet", Managed: true, Agents: []statuspkg.Agent{},
+			}}
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{launch: launchTestDependencies(runner), resolver: resolver})
+			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
+				launch: launchTestDependencies(runner), resolver: resolver, collector: collector,
+			})
 			if code != tt.wantCode {
 				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
+			}
+			if resolveCalls != tt.wantResolve {
+				t.Fatalf("Resolve() calls = %d, want %d", resolveCalls, tt.wantResolve)
 			}
 		})
 	}
@@ -493,6 +507,19 @@ func (s statusCollectorStub) Collect(context.Context, string, tmuxx.SessionID) (
 
 func (s statusCollectorStub) CollectAll(context.Context) (*statuspkg.SessionsReport, error) {
 	return &s.report, s.err
+}
+
+type selectedStatusCollectorStub struct {
+	report statuspkg.Report
+	err    error
+}
+
+func (s selectedStatusCollectorStub) Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error) {
+	return s.report, s.err
+}
+
+func (s selectedStatusCollectorStub) CollectAll(context.Context) (*statuspkg.SessionsReport, error) {
+	return nil, errors.New("unexpected all-sessions collection")
 }
 
 func lookupValues(values map[string]string) session.LookupEnv {
@@ -537,7 +564,7 @@ func TestRunBareStatusIgnoresAmbientSessionSourcesAndMarksCurrent(t *testing.T) 
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -570,7 +597,7 @@ func TestRunStatusAllRendersMetadataDefectsAndContinuesBeforeExitThree(t *testin
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -684,7 +711,7 @@ func TestRunStatusResolvesSessionAndRendersSelectedFormat(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 			}
@@ -820,7 +847,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("planner\n")},
-				tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
 				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 				tmuxx.Response{Stdout: []byte("claude\n")},
 				tmuxx.Response{Stdout: []byte("0\n")},
@@ -848,7 +875,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
@@ -889,7 +916,7 @@ func TestRunStatusNarrowsOnlyForExplicitSession(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)
@@ -921,7 +948,7 @@ func healthyStatusRunner() *tmuxx.FakeRunner {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\t1\t1\tplanner\tclaude\t\txhigh\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\txhigh\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)

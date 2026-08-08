@@ -17,9 +17,7 @@ func TestIntegrationLaunchStartsWithoutTmuxServer(t *testing.T) {
 		"--session", "integration-first-launch",
 		"--roles", "planner:claude",
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-first-launch")
 
 	sessions := fixture.sessions()
 	if len(sessions) != 1 || sessions[0].Name != "integration-first-launch" {
@@ -39,9 +37,7 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 		"--efforts", "planner:max,coder:high",
 		"--dir", launchDir,
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-launch")
 
 	sessions := fixture.sessions()
 	if len(sessions) != 1 || sessions[0].Name != "integration-launch" {
@@ -73,8 +69,11 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 			t.Fatalf("duplicate window for role %q: %#v", window.Name, windows)
 		}
 		seenWindows[window.Name] = true
-		if window.Managed != "1" || window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
-			t.Errorf("window metadata = %#v, want role-specific managed metadata", window)
+		if managed := fixture.windowOption(window.ID, "@agentctl_managed"); managed != "1" {
+			t.Errorf("window @agentctl_managed = %q, want \"1\"", managed)
+		}
+		if window.Role != window.Name || window.Harness != want.harness || window.Model != want.model || window.Effort != want.effort {
+			t.Errorf("window metadata = %#v, want role-specific metadata", window)
 		}
 		gotDirectory, err := os.Stat(window.Directory)
 		if err != nil {
@@ -134,9 +133,7 @@ func TestIntegrationLaunchExportsIdentityEnvironmentIntoEveryPane(t *testing.T) 
 		"--session", "integration-identity-env",
 		"--roles", "planner:claude,coder:codex",
 	)
-	if result.exitCode != 0 || result.stdout != "" || result.stderr != "" {
-		t.Fatalf("launch result = %#v, want silent success", result)
-	}
+	assertLaunchMatchesStatus(t, fixture, result, "integration-identity-env")
 
 	// planner comes from the new-session path and coder from new-window, so
 	// both creation paths are observed from inside a real pane.
@@ -191,7 +188,7 @@ func TestIntegrationLaunchRefusesExistingSessionWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestIntegrationLaunchCarriesDuplicateStderrWhenAdvisoryLookupFails(t *testing.T) {
+func TestIntegrationLaunchClassifiesDuplicateSessionWhenAdvisoryLookupFails(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	fixture.createSentinelSession("integration-raced-existing")
 	sentinel := fixture.sentinelSnapshot("integration-raced-existing")
@@ -202,8 +199,8 @@ func TestIntegrationLaunchCarriesDuplicateStderrWhenAdvisoryLookupFails(t *testi
 		"--session", "integration-raced-existing",
 		"--roles", "planner:claude,coder:codex",
 	)
-	if result.exitCode != 6 || result.stdout != "" || !strings.Contains(result.stderr, "duplicate session: integration-raced-existing") {
-		t.Fatalf("launch result = %#v, want tmux duplicate refusal with captured stderr", result)
+	if result.exitCode != 3 || result.stdout != "" || !strings.Contains(result.stderr, "duplicate session: integration-raced-existing") {
+		t.Fatalf("launch result = %#v, want existing-session classification with captured tmux stderr", result)
 	}
 	current := fixture.sentinelSnapshot("integration-raced-existing")
 	if current != sentinel {
@@ -230,5 +227,19 @@ func TestIntegrationLaunchRollsBackAfterLaterWindowFailure(t *testing.T) {
 		if session.Name == "integration-rollback" {
 			t.Fatalf("partially launched session remains after rollback: %#v", session)
 		}
+	}
+}
+
+func assertLaunchMatchesStatus(t *testing.T, fixture *integrationFixture, launch integrationResult, session string) {
+	t.Helper()
+	if launch.exitCode != 0 || launch.stdout == "" || launch.stderr != "" {
+		t.Fatalf("launch result = %#v, want successful observed status table", launch)
+	}
+	status := fixture.runAgentctl("status", "--session", session)
+	if status.exitCode != 0 || status.stderr != "" {
+		t.Fatalf("status after launch = %#v, want success", status)
+	}
+	if launch.stdout != status.stdout {
+		t.Fatalf("launch stdout = %q, want status stdout %q", launch.stdout, status.stdout)
 	}
 }

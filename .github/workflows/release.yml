@@ -55,6 +55,10 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "dry_run=$DRY_RUN" >> "$GITHUB_OUTPUT"
           echo "resolved next version: $v (dry_run=$DRY_RUN)"
+      - name: Verify skill version
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: hack/check-skill-version.sh "$RELEASE_VERSION"
       - name: Create and push tag
         if: env.DRY_RUN != 'true'
         run: |

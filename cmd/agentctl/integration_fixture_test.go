@@ -48,6 +48,13 @@ type integrationWindow struct {
 	Directory string
 }
 
+// integrationHandmadeWindow is a same-name window created directly by the
+// fixture, outside agentctl's metadata-stamping path.
+type integrationHandmadeWindow struct {
+	ID      tmuxx.WindowID
+	capture string
+}
+
 type stubInvocation struct {
 	Session     string
 	Role        string
@@ -404,6 +411,7 @@ func (f *integrationFixture) installStubs() {
 	}
 
 	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f.t.Setenv("HOME", f.t.TempDir())
 	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
 	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
 
@@ -500,24 +508,85 @@ func (f *integrationFixture) hasSession(name string) bool {
 
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
 	f.t.Helper()
-	const format = "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}\t#{pane_current_path}"
+	const format = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}\t#{pane_current_path}"
 	output := f.tmuxOutput("list-windows", "-t", string(sessionID), "-F", format)
 	lines := nonemptyLines(output)
 	windows := make([]integrationWindow, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 10)
-		if len(fields) != 10 {
+		fields := strings.SplitN(line, "\t", 8)
+		if len(fields) != 8 {
 			f.t.Fatalf("parse integration window %q: got %d fields", line, len(fields))
 		}
 		windows = append(windows, integrationWindow{
 			Window: tmuxx.Window{
-				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Managed: fields[2], Version: fields[3],
-				Role: fields[4], Harness: fields[5], Model: fields[6], Effort: fields[7], Process: fields[8],
+				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Role: fields[2], Harness: fields[3],
+				Model: fields[4], Effort: fields[5], Process: fields[6],
 			},
-			Directory: fields[9],
+			Directory: fields[7],
 		})
 	}
 	return windows
+}
+
+func (f *integrationFixture) createHandmadeWindow(sessionID tmuxx.SessionID, name string) integrationHandmadeWindow {
+	f.t.Helper()
+	capture := filepath.Join(f.captureDir, "handmade-"+name+".input")
+	output := f.tmuxOutput(
+		"new-window", "-d", "-t", string(sessionID), "-n", name,
+		"-e", integrationCaptureEnv+"="+capture,
+		"-P", "-F", "#{window_id}", "--", "exec claude",
+	)
+	windowID := strings.TrimSuffix(string(output), "\n")
+	if len(windowID) < 2 || windowID[0] != '@' {
+		f.t.Fatalf("parse handmade window creation %q: want @-prefixed window ID", output)
+	}
+	for _, digit := range windowID[1:] {
+		if digit < '0' || digit > '9' {
+			f.t.Fatalf("parse handmade window creation %q: want numeric window ID", output)
+		}
+	}
+	return integrationHandmadeWindow{ID: tmuxx.WindowID(windowID), capture: capture}
+}
+
+func (f *integrationFixture) waitHandmadeWindowReady(window integrationHandmadeWindow) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(window.capture); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			f.t.Fatalf("inspect handmade marker readiness: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.t.Fatalf("wait for handmade marker readiness at %q", window.capture)
+}
+
+func (f *integrationFixture) assertHandmadeInputRemains(window integrationHandmadeWindow, want string, quietWindow time.Duration) {
+	f.t.Helper()
+	deadline := time.Now().Add(quietWindow)
+	for {
+		data, err := os.ReadFile(window.capture)
+		if err != nil {
+			f.t.Fatalf("read handmade marker input: %v", err)
+		}
+		if got := string(data); got != want {
+			f.t.Fatalf("handmade marker input changed during quiet window: got %q, want %q", got, want)
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (f *integrationFixture) windowOption(windowID tmuxx.WindowID, name string) string {
+	f.t.Helper()
+	value, err := f.client.ShowWindowOption(context.Background(), windowID, name)
+	if err != nil {
+		f.t.Fatalf("show window option %q for %s: %v", name, windowID, err)
+	}
+	return value
 }
 
 func (f *integrationFixture) panes(windowID tmuxx.WindowID) []tmuxx.Pane {

@@ -143,11 +143,11 @@ func TestRunControlRejectsMalformedRoleBeforeSessionResolution(t *testing.T) {
 func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 	session := tmuxx.Session{ID: "$4", Name: "epic123"}
 	plannerWindow := tmuxx.Window{
-		ID: "@4", Name: "planner", Managed: "1", Version: "1", Role: "planner",
+		ID: "@4", Name: "planner", Role: "planner",
 		Harness: "codex", Model: "o3", Process: "codex",
 	}
 	reviewerWindow := tmuxx.Window{
-		ID: "@7", Name: "reviewer", Managed: "1", Version: "1", Role: "reviewer",
+		ID: "@7", Name: "reviewer", Role: "reviewer",
 		Harness: "claude", Model: "sonnet", Process: "claude",
 	}
 	plannerPane := tmuxx.Pane{ID: "%9", PID: 123, Dead: false, WindowPanes: 1}
@@ -195,22 +195,11 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 			wantError: "agentctl: refusing to send compact; role reviewer matches 2 windows in epic123 (@4, @7)\n",
 		},
 		{
-			name:      "window metadata",
-			operation: "clear",
-			role:      "planner",
-			err: &target.WindowMetadataError{Session: session, Role: "planner", Window: tmuxx.Window{
-				ID: "@4", Name: "planner", Managed: "0", Version: "1", Role: "planner",
-				Harness: "codex", Model: "o3", Process: "codex",
-			}},
-			wantCode:  exitRole,
-			wantError: "agentctl: refusing to send clear; window @4 for epic123:planner has @agentctl_managed=\"0\"; expected \"1\"\n",
-		},
-		{
 			name:      "stored role mismatch",
 			operation: "compact",
 			role:      "planner",
 			err: &target.WindowMetadataError{Session: session, Role: "planner", Window: tmuxx.Window{
-				ID: "@4", Name: "planner", Managed: "1", Version: "1", Role: "reviewer",
+				ID: "@4", Name: "planner", Role: "reviewer",
 				Harness: "codex", Model: "o3", Process: "codex",
 			}},
 			wantCode:  exitRole,
@@ -250,7 +239,7 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 			role:      "planner",
 			err: &target.ProcessIdentityError{
 				Session: session, Role: "planner", Window: tmuxx.Window{
-					ID: "@4", Name: "planner", Managed: "1", Version: "1", Role: "planner",
+					ID: "@4", Name: "planner", Role: "planner",
 					Harness: "codex", Model: "o3", Process: "",
 				}, Pane: plannerPane,
 			},
@@ -318,7 +307,7 @@ func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\t1\t1\tplanner\tcodex\to3\thigh\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{},
@@ -336,7 +325,7 @@ func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
 		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
 		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
@@ -359,7 +348,7 @@ func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *tes
 		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\t1\t1\tplanner\tcodex\to3\thigh\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{Err: errors.New("send keys failed")},
@@ -375,7 +364,7 @@ func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *tes
 		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_managed}\t#{@agentctl_version}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
 		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
 		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},

@@ -18,9 +18,11 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
+	"github.com/mnbf9rca/agentctl/internal/skillinstall"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/target"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+	"github.com/mnbf9rca/agentctl/skills"
 )
 
 const (
@@ -45,6 +47,7 @@ Commands:
   clear     deliver /clear to a role
   compact   deliver /compact to a role
   kill      terminate a managed fleet
+  skill     install or inspect the embedded agent skill
   version   report this binary's build identity
 `
 
@@ -61,6 +64,12 @@ var commandUsage = map[string]string{
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
 	"kill":    "Usage: agentctl kill [--session SESSION]\n",
+	"skill": "Usage: agentctl skill install [--force] | agentctl skill status\n\n" +
+		"install writes this binary's embedded agent skill to ~/.claude/skills/agentctl\n" +
+		"and ~/.agents/skills/agentctl; it refuses to overwrite files it cannot prove\n" +
+		"it wrote. --force replaces an unowned target and reports every removed file.\n" +
+		"status reports current|stale|modified|absent|unmanaged\n" +
+		"per target.\n",
 	"version": "Usage: agentctl version\n",
 }
 
@@ -73,8 +82,10 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 }
 
 type launchDependencies struct {
-	runner tmuxx.Runner
-	fleet  fleet.Dependencies
+	runner       tmuxx.Runner
+	fleet        fleet.Dependencies
+	skillHome    func() (string, error)
+	skillVersion func() string
 }
 
 type sessionResolver interface {
@@ -132,7 +143,11 @@ func runWithRunner(
 	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
 	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
 	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{
-		launch:     launchDependencies{runner: runner},
+		launch: launchDependencies{
+			runner:       runner,
+			skillHome:    os.UserHomeDir,
+			skillVersion: skillBinaryVersion,
+		},
 		resolver:   resolver,
 		collector:  collector,
 		killer:     kill.New(client),
@@ -174,7 +189,12 @@ func runWithRelaunchDependencies(ctx context.Context, arguments []string, stdout
 }
 
 func runWith(arguments []string, stdout, stderr io.Writer, launch launchDependencies) int {
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{launch: launch})
+	client := tmuxx.New(launch.runner)
+	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{
+		launch:    launch,
+		resolver:  session.New(client, nil),
+		collector: statuspkg.NewCollector(client),
+	})
 }
 
 func runWithAllDependencies(
@@ -196,6 +216,9 @@ func runWithAllDependencies(
 	if !ok {
 		return usageError(stderr, fmt.Sprintf("unknown command %q", command), globalUsage)
 	}
+	if command == "skill" {
+		return runSkill(arguments[1:], stdout, stderr, usage)
+	}
 
 	if command == "launch" {
 		options, err := parseLaunch(arguments[1:])
@@ -214,8 +237,13 @@ func runWithAllDependencies(
 			return usageError(stderr, err.Error(), usage)
 		}
 		deps.launch.fleet.Stderr = stderr
-		err = fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
-		return launchResult(stderr, err, usage)
+		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
+		if code := launchResult(stderr, err, usage); code != exitOK {
+			return code
+		}
+		code := confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
+		writeSkillLaunchNotices(stderr, deps.launch.skillHome, deps.launch.skillVersion)
+		return code
 	}
 
 	options, err := parseCommand(command, arguments[1:])
@@ -253,16 +281,7 @@ func runWithAllDependencies(
 		return resolverError(stderr, usage, err)
 	}
 	if command == "status" {
-		report, err := deps.collector.Collect(ctx, resolved.Name, resolved.ID)
-		if err != nil {
-			return statusError(stderr, err)
-		}
-		if options.json {
-			err = statuspkg.WriteJSON(stdout, report)
-		} else {
-			err = statuspkg.WriteTable(stdout, report)
-		}
-		if err != nil {
+		if err := writeSelectedStatus(ctx, stdout, deps.collector, resolved, options.json); err != nil {
 			return statusError(stderr, err)
 		}
 		return exitOK
@@ -306,6 +325,166 @@ func runWithAllDependencies(
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
+	subcommand, force, err := parseSkill(arguments)
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, usage)
+		return exitOK
+	}
+	if err != nil {
+		return usageError(stderr, err.Error(), usage)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl: cannot resolve home directory: %v\n", err)
+		return exitUnclassified
+	}
+	version := skillBinaryVersion()
+	targets := skillinstall.Targets(home)
+
+	switch subcommand {
+	case "install":
+		outcomes, installErr := skillinstall.Install(skills.Tree, skills.Root, version, targets, force)
+		for _, outcome := range outcomes {
+			destination := stdout
+			if outcome.Action == "failed" || outcome.Action == "refused" {
+				destination = stderr
+			}
+			if outcome.Detail == "" {
+				fmt.Fprintf(destination, "%s: %s\n", outcome.Target.Dir, outcome.Action)
+			} else {
+				fmt.Fprintf(destination, "%s: %s: %s\n", outcome.Target.Dir, outcome.Action, outcome.Detail)
+			}
+			for _, removed := range outcome.Removed {
+				fmt.Fprintf(stdout, "%s: removed\n", removed)
+			}
+		}
+		if installErr == nil {
+			return exitOK
+		}
+		if errors.Is(installErr, skillinstall.ErrUnowned) {
+			return exitUnsafe
+		}
+		return exitUnclassified
+	case "status":
+		reports, statusErr := skillinstall.Status(skills.Tree, skills.Root, version, targets)
+		for _, report := range reports {
+			installed := report.InstalledVersion
+			if installed == "" {
+				installed = "none"
+			}
+			fmt.Fprintf(stdout, "%s: %s (installed %s, binary %s)\n", report.Target.Dir, report.State, installed, version)
+		}
+		if statusErr != nil {
+			fmt.Fprintf(stderr, "agentctl: skill status: %v\n", statusErr)
+			return exitUnclassified
+		}
+		return exitOK
+	default:
+		panic(fmt.Sprintf("unreachable skill subcommand %q", subcommand))
+	}
+}
+
+func skillBinaryVersion() string {
+	return strings.TrimPrefix(buildinfo.Current(), "v")
+}
+
+func writeSkillLaunchNotices(stderr io.Writer, userHomeDir func() (string, error), currentVersion func() string) {
+	if userHomeDir == nil || currentVersion == nil {
+		return
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "skill: home directory could not be resolved: %v\n", err)
+		return
+	}
+	version := currentVersion()
+	for _, target := range skillinstall.Targets(home) {
+		manifest, ok, err := skillinstall.ReadManifest(target.Dir)
+		display := skillTargetDisplay(target)
+		if err != nil {
+			fmt.Fprintf(stderr, "skill: %s manifest could not be read: %v\n", display, err)
+			continue
+		}
+		if ok && manifest.Version != version {
+			fmt.Fprintf(stderr, "skill: %s is %s; this binary is %s — run 'agentctl skill install'\n", display, manifest.Version, version)
+		}
+	}
+}
+
+func skillTargetDisplay(target skillinstall.Target) string {
+	if target.Harness == "claude" {
+		return "~/.claude/skills/agentctl"
+	}
+	return "~/.agents/skills/agentctl"
+}
+
+func parseSkill(arguments []string) (string, bool, error) {
+	if len(arguments) == 0 {
+		return "", false, errors.New("skill requires install or status")
+	}
+	if arguments[0] == "-h" || arguments[0] == "--help" {
+		return "", false, flag.ErrHelp
+	}
+	switch arguments[0] {
+	case "install":
+		flags := cliflags.New("skill install")
+		force := flags.Bool("force", false, "replace files whose ownership cannot be proven")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return "", false, err
+		}
+		if len(flags.Args()) != 0 {
+			return "", false, errors.New("skill install accepts no positional arguments")
+		}
+		return "install", *force, nil
+	case "status":
+		if len(arguments) == 2 && (arguments[1] == "-h" || arguments[1] == "--help") {
+			return "", false, flag.ErrHelp
+		}
+		if len(arguments) != 1 {
+			return "", false, errors.New("skill status accepts no arguments")
+		}
+		return "status", false, nil
+	default:
+		return "", false, fmt.Errorf("unknown skill subcommand %q", arguments[0])
+	}
+}
+
+// confirmLaunch reports the fleet state observed after creation. Confirmation
+// is advisory: once Launch succeeds, a later observation failure cannot
+// truthfully reclassify the fleet launch as failed.
+func confirmLaunch(
+	ctx context.Context,
+	stdout, stderr io.Writer,
+	collector statusCollector,
+	target tmuxx.Session,
+) int {
+	err := writeSelectedStatus(ctx, stdout, collector, target, false)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", target.Name, err)
+	}
+	return exitOK
+}
+
+// writeSelectedStatus is the single-session collection and rendering path
+// shared by status --session and post-launch confirmation.
+func writeSelectedStatus(
+	ctx context.Context,
+	stdout io.Writer,
+	collector statusCollector,
+	target tmuxx.Session,
+	asJSON bool,
+) error {
+	report, err := collector.Collect(ctx, target.Name, target.ID)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return statuspkg.WriteJSON(stdout, report)
+	}
+	return statuspkg.WriteTable(stdout, report)
 }
 
 // statusAll reports every session for a status command without --session.
@@ -476,59 +655,141 @@ type commandOptions struct {
 	directory  *string
 }
 
-func parseCommand(command string, arguments []string) (commandOptions, error) {
-	flags := cliflags.New(command)
-	sessionValue := flags.String("session", "", "session name")
+type parsedFlagKind uint8
 
-	var roles, models *string
-	var harness, model, effort, directory *string
-	var jsonOutput *bool
-	switch command {
-	case "launch":
-		roles = flags.String("roles", "", "role and harness assignments")
-		models = flags.String("models", "", "role and model assignments")
-		flags.String("dir", "", "working directory")
-	case "status":
-		jsonOutput = flags.Bool("json", false, "emit JSON")
-	case "relaunch":
-		harness = flags.String("harness", "", "harness override")
-		model = flags.String("model", "", "model override")
-		effort = flags.String("effort", "", "effort override")
-		directory = flags.String("dir", "", "working directory override")
+const (
+	parsedFlagString parsedFlagKind = iota
+	parsedFlagBool
+)
+
+type parsedFlagTarget uint8
+
+const (
+	parsedTargetSession parsedFlagTarget = iota + 1
+	parsedTargetJSON
+	parsedTargetHarness
+	parsedTargetModel
+	parsedTargetEffort
+	parsedTargetDirectory
+)
+
+type parsedFlagSpec struct {
+	name   string
+	kind   parsedFlagKind
+	target parsedFlagTarget
+	usage  string
+}
+
+type parsedCommandSpec struct {
+	agentFacing bool
+	flags       []parsedFlagSpec
+}
+
+var parsedCommandRegistry = map[string]parsedCommandSpec{
+	"attach": {
+		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+	},
+	"status": {
+		agentFacing: true,
+		flags: []parsedFlagSpec{
+			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
+			{name: "json", kind: parsedFlagBool, target: parsedTargetJSON, usage: "emit JSON"},
+		},
+	},
+	"clear": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+	},
+	"compact": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+	},
+	"kill": {
+		agentFacing: true,
+		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+	},
+	"relaunch": {
+		flags: []parsedFlagSpec{
+			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
+			{name: "harness", kind: parsedFlagString, target: parsedTargetHarness, usage: "harness override"},
+			{name: "model", kind: parsedFlagString, target: parsedTargetModel, usage: "model override"},
+			{name: "effort", kind: parsedFlagString, target: parsedTargetEffort, usage: "effort override"},
+			{name: "dir", kind: parsedFlagString, target: parsedTargetDirectory, usage: "working directory override"},
+		},
+	},
+	"version": {},
+}
+
+func parseCommand(command string, arguments []string) (commandOptions, error) {
+	specification, ok := parsedCommandRegistry[command]
+	if !ok {
+		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
+	}
+	flags := cliflags.New(command)
+	type parsedFlagValue struct {
+		specification parsedFlagSpec
+		stringValue   *string
+		boolValue     *bool
+	}
+	values := make([]parsedFlagValue, 0, len(specification.flags))
+	for _, registered := range specification.flags {
+		value := parsedFlagValue{specification: registered}
+		switch registered.kind {
+		case parsedFlagString:
+			value.stringValue = flags.String(registered.name, "", registered.usage)
+		case parsedFlagBool:
+			value.boolValue = flags.Bool(registered.name, false, registered.usage)
+		default:
+			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown kind", command, registered.name)
+		}
+		values = append(values, value)
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
-	options := commandOptions{session: *sessionValue, sessionSet: flags.WasSet("session")}
-	if jsonOutput != nil {
-		options.json = *jsonOutput
-	}
-	if command == "relaunch" {
-		options.harness = suppliedValue(flags, "harness", harness)
-		options.model = suppliedValue(flags, "model", model)
-		options.effort = suppliedValue(flags, "effort", effort)
-		options.directory = suppliedValue(flags, "dir", directory)
+	options := commandOptions{}
+	for _, value := range values {
+		registered := value.specification
+		switch registered.target {
+		case parsedTargetSession:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s session projection requires string kind", command, registered.name)
+			}
+			options.session = *value.stringValue
+			options.sessionSet = flags.WasSet(registered.name)
+		case parsedTargetJSON:
+			if value.boolValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s JSON projection requires bool kind", command, registered.name)
+			}
+			options.json = *value.boolValue
+		case parsedTargetHarness:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s harness projection requires string kind", command, registered.name)
+			}
+			options.harness = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetModel:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s model projection requires string kind", command, registered.name)
+			}
+			options.model = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetEffort:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s effort projection requires string kind", command, registered.name)
+			}
+			options.effort = suppliedValue(flags, registered.name, value.stringValue)
+		case parsedTargetDirectory:
+			if value.stringValue == nil {
+				return commandOptions{}, fmt.Errorf("command %q flag --%s directory projection requires string kind", command, registered.name)
+			}
+			options.directory = suppliedValue(flags, registered.name, value.stringValue)
+		default:
+			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown projection target %d", command, registered.name, registered.target)
+		}
 	}
 
 	positional := flags.Args()
 	switch command {
-	case "launch":
-		if !options.sessionSet {
-			return commandOptions{}, errors.New("--session is required")
-		}
-		if err := config.ValidateSessionName(options.session); err != nil {
-			return commandOptions{}, err
-		}
-		if *roles == "" {
-			return commandOptions{}, errors.New("--roles is required")
-		}
-		if flags.WasSet("models") && *models == "" {
-			return commandOptions{}, errors.New("--models must not be empty")
-		}
-		if len(positional) != 0 {
-			return commandOptions{}, errors.New("launch accepts no positional arguments")
-		}
 	case "clear", "compact", "relaunch":
 		if len(positional) != 1 {
 			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
@@ -633,6 +894,17 @@ func relaunchError(stderr io.Writer, role, usage string, err error) int {
 	}
 	var relaunchFailure *fleet.RelaunchError
 	if errors.As(err, &relaunchFailure) {
+		var conflict *fleet.PostCreateWindowConflictError
+		if errors.As(err, &conflict) {
+			if relaunchFailure.CleanupErr != nil {
+				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; failed to remove window %s: %v\n",
+					role, conflict, relaunchFailure.WindowID, relaunchFailure.CleanupErr)
+			} else {
+				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; removed window %s\n",
+					role, conflict, relaunchFailure.WindowID)
+			}
+			return exitLaunch
+		}
 		fmt.Fprintf(stderr, "agentctl: %v\n", err)
 		return exitLaunch
 	}
@@ -692,11 +964,7 @@ func controlError(stderr io.Writer, operation, usage string, err error) int {
 	}
 	var windowMetadata *target.WindowMetadataError
 	if errors.As(err, &windowMetadata) {
-		if windowMetadata.Window.Managed != "1" {
-			controlRefusal(stderr, operation, "window %s for %s:%s has @agentctl_managed=%q; expected %q", windowMetadata.Window.ID, windowMetadata.Session.Name, windowMetadata.Role, windowMetadata.Window.Managed, "1")
-		} else {
-			controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
-		}
+		controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
 		return exitRole
 	}
 	var paneState *target.PaneStateError
