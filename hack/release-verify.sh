@@ -151,6 +151,27 @@ PART_C_BIN=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
 PART_C_ACTIVE=0
+PART_C_AUTH_MODE=''
+
+# Empirical macOS probe, 2026-08-06: codex-cli 0.146.1 was authenticated
+# with the operator HOME, unauthenticated with an empty HOME, and authenticated
+# with only .codex/auth.json copied into that empty HOME. Claude Code 2.1.223
+# was authenticated with the operator HOME but not with an empty HOME,
+# .claude.json alone, settings.json alone, or both files together. Its macOS
+# credential store is the Keychain, so no sufficient HOME-file seed is proven.
+part_c_has_seedable_auth() {
+  [ -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ]
+}
+
+part_c_print_seedable_auth() {
+  [ ! -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ] || printf '  ~/.codex/auth.json\n'
+}
+
+part_c_seed_auth() {
+  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
+  install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
+}
+
 part_c_kill_session() {
   (
     cd "$PART_C_PROJECT" || exit 1
@@ -209,6 +230,18 @@ part_c_teardown() {
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
   printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
+  if [ -n "$PART_C_ROOT" ] && [ -n "$PART_C_HOME" ]; then
+    if [ -e "$PART_C_HOME" ]; then
+      if rm -rf -- "$PART_C_HOME" && [ ! -e "$PART_C_HOME" ]; then
+        printf 'PART C CLEANUP PASS (temporary credential HOME removed)\n'
+      else
+        printf 'PART C CLEANUP FAIL (remove temporary credential HOME %s)\n' "$PART_C_HOME" >&2
+        teardown_status=1
+      fi
+    else
+      printf 'PART C CLEANUP OBSERVED (temporary credential HOME already absent)\n'
+    fi
+  fi
   if [ -n "$PART_C_ROOT" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
     if rm -rf -- "$PART_C_ROOT"; then
       printf 'PART C CLEANUP PASS (temporary root removed)\n'
@@ -385,8 +418,21 @@ render_results() {
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
       printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
       if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
-        printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
-        printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+        part_c_auth_mode=$(field part_c_auth_mode "$metadata")
+        if [ -n "$part_c_auth_mode" ]; then
+          case "$part_c_auth_mode" in
+            codex-seeded|manual) ;;
+            *) die 'live metadata has invalid part_c_auth_mode' ;;
+          esac
+          part_c_auth_attestation=$(field part_c_auth_attestation "$metadata")
+          [ -n "$part_c_auth_attestation" ] || die 'live metadata is missing part_c_auth_attestation'
+          printf -- '- Checkpoint C.C1 authentication (%s): operator confirmed: %s\n' "$part_c_auth_mode" "$part_c_auth_attestation"
+          printf -- '- Checkpoint C.C2 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+          printf -- '- Checkpoint C.C3 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+        else
+          printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+          printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+        fi
       fi
     else
       printf -- '- Attach: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
@@ -588,7 +634,7 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-for cmd_name in tmux claude codex amq; do
+for cmd_name in tmux claude codex amq install; do
   command -v "$cmd_name" >/dev/null 2>&1 || die "required command not found: $cmd_name"
 done
 
@@ -1054,6 +1100,7 @@ EOF
     esac
   fi
   PART_C_RESULT='FAIL — not run'
+  PART_C_AUTH_ATTESTATION=''
   PART_C_SKILL_ATTESTATION=''
   PART_C_MEANING_ATTESTATION=''
 
@@ -1061,7 +1108,7 @@ EOF
     part_header C 'Live skill discovery and meaning'
     PART_C_TOP=$TOP
     PART_C_ROOT=$(mktemp -d /tmp/agentctl-skill-verify.XXXXXX) || die 'could not create Part C temporary root'
-  PART_C_ACTIVE=1
+    PART_C_ACTIVE=1
     PART_C_ORIGINAL_HOME=$HOME
     PART_C_ORIGINAL_PATH=$PATH
     PART_C_SOCKET="agentctl-skill-verify-$$"
@@ -1074,30 +1121,86 @@ EOF
     PART_C_BIN="$PART_C_ROOT/bin"
 
     step_start C.1 'create isolated temporary HOME, project, and tmux shim'
-    mkdir -p "$PART_C_HOME" "$PART_C_PROJECT" "$PART_C_BIN" || {
+    install -d -m 0700 "$PART_C_HOME" || {
+      part_c_abort 'could not create Part C temporary HOME'
+    }
+    install -d -m 0755 "$PART_C_PROJECT" "$PART_C_BIN" || {
       part_c_abort 'could not create Part C directories'
     }
     printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
     chmod 0755 "$PART_C_BIN/tmux"
+    step_pass C.1 'isolated Part C filesystem is active'
+
+    step_start C.2 'choose authentication path for the isolated HOME'
+    part_c_seed_offered=0
+    if part_c_has_seedable_auth; then
+      part_c_seed_offered=1
+      printf 'Part C can seed codex authentication from this empirically proven file:\n'
+      part_c_print_seedable_auth
+      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
+      printf 'Claude Code will require guided interactive sign-in in the fresh temporary HOME.\n'
+      if ask 'Copy only this Codex file into the temporary Part C HOME?'; then
+        if ! part_c_seed_auth; then
+          step_fail C.2 'authentication file copy failed'
+          part_c_abort 'Part C authentication seeding failed'
+        fi
+        PART_C_AUTH_MODE=codex-seeded
+        step_pass C.2 'operator consented and the proven Codex authentication file was copied; Claude sign-in remains manual'
+      else
+        case "$ASK_RESULT" in
+          n) PART_C_AUTH_MODE=manual ;;
+          *)
+            step_fail C.2 'authentication selection input failed'
+            part_c_abort 'Part C authentication selection input failed'
+            ;;
+        esac
+      fi
+    else
+      printf 'No proven Codex authentication file was found in the real HOME.\n'
+      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
+      PART_C_AUTH_MODE=manual
+    fi
+
+    if [ "$PART_C_AUTH_MODE" = manual ]; then
+      printf 'No authentication files will be copied into the temporary Part C HOME.\n'
+      if ask 'Continue with guided manual sign-in instead?'; then
+        step_pass C.2 'operator chose guided manual sign-in without copied files'
+      else
+        case "$ASK_RESULT" in
+          n)
+            if [ "$part_c_seed_offered" -eq 1 ]; then
+              step_fail C.2 'operator declined both authentication paths'
+              part_c_abort 'operator declined authentication copy and guided manual sign-in'
+            fi
+            step_fail C.2 'operator declined guided manual sign-in'
+            part_c_abort 'operator declined guided manual sign-in'
+            ;;
+          *)
+            step_fail C.2 'manual sign-in selection input failed'
+            part_c_abort 'Part C manual sign-in selection input failed'
+            ;;
+        esac
+      fi
+    fi
+
     export HOME="$PART_C_HOME"
     export PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH"
     cd "$PART_C_PROJECT"
-    step_pass C.1 'isolated Part C environment is active'
 
-    step_start C.2 'initialize isolated AMQ and install the release-candidate skill'
+    step_start C.3 'initialize isolated AMQ and install the release-candidate skill'
     if ! amq coop init --agents a,b,user; then
-      step_fail C.2 'AMQ initialization failed'
+      step_fail C.3 'AMQ initialization failed'
       part_c_abort 'Part C AMQ initialization failed'
     fi
     if ! "$PART_C_TOP/bin/agentctl" skill install; then
-      step_fail C.2 'skill installation failed'
+      step_fail C.3 'skill installation failed'
       part_c_abort 'Part C skill installation failed'
     fi
-    step_pass C.2 'AMQ initialized and both skill directories installed'
+    step_pass C.3 'AMQ initialized and both skill directories installed'
 
-    step_start C.3 'launch and attach the named-socket skill fleet'
+    step_start C.4 'launch and attach the named-socket skill fleet'
     if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT"; then
-      step_fail C.3 'skill fleet launch failed'
+      step_fail C.4 'skill fleet launch failed'
       part_c_abort 'Part C skill fleet launch failed'
     fi
     PART_C_SESSION_OWNED=1
@@ -1107,27 +1210,61 @@ The verifier will attach this Window 1 to the isolated skill fleet now. It runs:
 
 While attached, use these concrete actions:
 
+EOF
+    if [ "$PART_C_AUTH_MODE" = manual ]; then
+      cat <<'EOF'
+While attached, complete these authentication steps before checking skills:
+
+1. In the Claude Code tab, complete onboarding and sign in until a ready prompt appears.
+2. In the codex tab, complete sign-in until a ready prompt appears.
+
+EOF
+    else
+      cat <<'EOF'
+The proven Codex auth.json was copied with your consent. In the Claude Code tab,
+complete onboarding and interactive sign-in until a ready prompt appears. In the
+codex tab, wait for the authenticated ready prompt; do not enter credentials.
+
+EOF
+    fi
+    cat <<'EOF'
+After both harnesses are ready:
+
 1. In the Claude Code tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
 2. In the codex tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
 
 Then ask each harness exactly:
 
-  What does \`ambiguous\` mean in agentctl status, and which commands refuse on it?
+  What does `ambiguous` mean in agentctl status, and which commands refuse on it?
 
 Expected meaning: more than one window has the role's exact name, no window is
-selected as real, and role-targeted \`clear\` and \`compact\` refuse until an
+selected as real, and role-targeted `clear` and `compact` refuse until an
 operator repairs the ambiguity with raw tmux.
 
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
 EOF
     if ! "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
-      step_fail C.3 'skill fleet attach failed'
+      step_fail C.4 'skill fleet attach failed'
       part_c_abort 'Part C attach guidance failed'
     fi
-    step_pass C.3 'named-socket skill fleet launched and attach guidance completed'
+    step_pass C.4 'named-socket skill fleet launched and attach guidance completed'
 
-    if checkpoint C.C1 'harness lists the agentctl skill' 'Claude Code /skills and codex /skills each list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
+    if [ "$PART_C_AUTH_MODE" = manual ]; then
+      auth_expected='both harnesses completed manual sign-in and reached ready prompts.'
+      auth_prompt='Did both harnesses complete manual sign-in and reach ready prompts?'
+    else
+      auth_expected='Claude Code completed interactive sign-in, and codex reached an authenticated ready prompt from the seeded auth.json without manual sign-in.'
+      auth_prompt='Did Claude Code complete interactive sign-in and codex authenticate from the seeded auth.json without manual sign-in?'
+    fi
+    if checkpoint C.C1 'harness authentication ready' "$auth_expected" "$auth_prompt"; then
+      PART_C_AUTH_ATTESTATION=$ASK_ANSWER
+    else
+      PART_C_AUTH_ATTESTATION=$ASK_ANSWER
+      part_c_abort 'Part C authentication checkpoint failed'
+    fi
+
+    if checkpoint C.C2 'harness lists the agentctl skill' 'Claude Code /skills and codex /skills each list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
     else
       PART_C_SKILL_ATTESTATION=$ASK_ANSWER
@@ -1135,19 +1272,19 @@ EOF
     fi
 
     meaning_expected='ambiguous means more than one exact-name role window exists, no window is selected as real, and clear and compact refuse until raw tmux repairs it.'
-    if checkpoint C.C2 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
+    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
     else
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
       part_c_abort 'Part C status-state checkpoint failed'
     fi
 
-    step_start C.4 'tear down named-socket fleet and temporary skill root'
+    step_start C.5 'tear down named-socket fleet and temporary skill root'
     if ! part_c_teardown; then
       die 'Part C teardown failed'
     fi
-    step_pass C.4 'Part C resources removed and environment restored'
-    PART_C_RESULT='PASS — operator confirmed: numbered skill inventory and status-meaning checkpoints C.C1-C.C2'
+    step_pass C.5 'Part C resources removed and environment restored'
+    PART_C_RESULT='PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3'
   fi
 
   {
@@ -1165,7 +1302,9 @@ EOF
     printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
     printf 'relaunch_check=%s\n' "$RELAUNCH_CHECK"
     printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
-  printf 'part_b_detach_attestation=%s\n' "$PART_B_DETACH_ATTESTATION"
+    printf 'part_b_detach_attestation=%s\n' "$PART_B_DETACH_ATTESTATION"
+    printf 'part_c_auth_mode=%s\n' "$PART_C_AUTH_MODE"
+    printf 'part_c_auth_attestation=%s\n' "$PART_C_AUTH_ATTESTATION"
     printf 'part_c_skill_attestation=%s\n' "$PART_C_SKILL_ATTESTATION"
     printf 'part_c_meaning_attestation=%s\n' "$PART_C_MEANING_ATTESTATION"
     printf 'teardown_status_exit=%s\n' "$TEARDOWN_STATUS_EXIT"
