@@ -82,7 +82,7 @@ func (d Decoder) Decode(path string) (Document, error) {
 	if err != nil {
 		return Document{}, templateError(path, "", "cannot open: "+err.Error(), err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	info, err := file.Stat()
 	if err != nil {
