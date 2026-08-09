@@ -45,6 +45,9 @@ agentctl kill --session SESSION
 ```
 
 `launch`, `relaunch`, and `attach` are operator-only; do not issue them.
+`launch --from-template FILE` lets the operator supply fleet shape from a
+strict JSON file, but does not make launch or template authoring an
+agent-driven workflow.
 
 ## 3. Read status as factual claims
 
@@ -56,8 +59,12 @@ distinct meanings — see
 liveness from anything else (pane text, AMQ traffic, silence). An exited
 agent normally reports `missing`, not `dead`, because managed windows close
 on exit. `no-baseline` means launch retained the role without proving its
-process identity; control commands still fail closed, and only the operator
-may decide whether to recover it with `relaunch`.
+process identity; control commands still fail closed. Operator-only
+`relaunch` can recover it only when the window carries launch's positive
+`@agentctl_unproven=1` abandonment record and the session has at least one
+other listed window. An unmarked `no-baseline` window is refused because it
+may still be settling. A sole-window case is also refused and requires the
+operator's managed `kill` plus `launch` remedy.
 
 ## 4. Rules the binary does not enforce
 
