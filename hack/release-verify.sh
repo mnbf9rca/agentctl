@@ -225,6 +225,17 @@ part_c_kill_session() {
   )
 }
 
+part_c_named_socket_absent() {
+  local output=$1
+  case "$output" in
+    *$'\n'*) return 1 ;;
+    'no server running') return 0 ;;
+    "no server running on "*"/$PART_C_SOCKET") return 0 ;;
+    "error connecting to "*"/$PART_C_SOCKET (No such file or directory)") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 part_c_teardown() {
   local teardown_status=0
   local socket_output
@@ -250,7 +261,9 @@ part_c_teardown() {
         printf 'PART C CLEANUP OBSERVED (named tmux socket removal proves skillverify absent)\n'
         PART_C_SESSION_OWNED=0
       fi
-    elif printf '%s\n' "$socket_output" | grep -qF 'no server running'; then
+    elif part_c_named_socket_absent "$socket_output"; then
+      # Accept only tmux's complete single-line response for this internally
+      # named socket when it was armed but no server was ever created.
       printf 'PART C CLEANUP OBSERVED (named tmux socket already absent)\n'
       PART_C_SOCKET_ARMED=0
       PART_C_SESSION_OWNED=0
