@@ -1296,8 +1296,9 @@ No name pattern-matching. Identity is established by observation at launch and v
   difference principled rather than arbitrary. The two commands stand in different relations to what existed before
   them, so the same rule yields opposite outcomes:
 
-  - **`launch` records no baseline and destroys nothing.** The role is unproven, its window and the rest of the fleet
-    are retained, and the invocation exits 9 (§6.6, §9). Rolling back would destroy peer roles that launched correctly.
+  - **`launch` records no baseline and destroys nothing.** It stamps the `@agentctl_unproven` abandonment record in
+    place of the baseline (§6.5), so the role is unproven *and recoverable*; its window and the rest of the fleet are
+    retained, and the invocation exits 9 (§6.6, §9). Rolling back would destroy peer roles that launched correctly.
   - **`relaunch` rolls back the single window this invocation created, exit 8** (§6.8 step 9), unchanged. It *has* a
     prior state: its precondition is zero windows matching ROLE, so removing the window it just made restores the
     fleet exactly as it found it, and the role was already absent beforehand, so absent-after is not a regression.
@@ -1565,8 +1566,19 @@ Notes:
 ### 13.3 Format-string and option-read rules
 
 - **Window collection format** (row 8), fields in this order:
-  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_effort}⟨TAB⟩#{@agentctl_process}`
-  Parse with `strings.SplitN(line, "\t", 7)`.
+  `#{window_id}⟨TAB⟩#{window_name}⟨TAB⟩#{@agentctl_role}⟨TAB⟩#{@agentctl_harness}⟨TAB⟩#{@agentctl_model}⟨TAB⟩#{@agentctl_effort}⟨TAB⟩#{@agentctl_unproven}⟨TAB⟩#{@agentctl_process}`
+  Parse with `strings.SplitN(line, "\t", 8)`.
+- **`@agentctl_unproven` is carried here, and read nowhere else.** §6.8 step 4 must observe the abandonment record to
+  classify a window as recoverable, and `relaunch` already issues row 8 to classify that window by §6.3 precedence — so
+  carrying the field costs no additional command. The alternative, a row 7 read per window, would cost one call each and
+  reintroduce exactly the per-window read loop §6.3 removed; row 7 therefore stays unused, and the status tests that
+  assert its absence continue to hold. This is the same standard the next note applies: row 8 carries every window field
+  that is *collected or consumed*, not every field that is stamped. `status` receives the value and ignores it,
+  consistent with the marker deliberately not being a status state (§6.3).
+
+  Its **placement is constrained, not stylistic**. `@agentctl_unproven` is bounded — empty or `1` — so it sits before
+  `@agentctl_process`, which must remain last to absorb any residue under the unconstrained-values-last rule below.
+  Putting it after would let a delimiter inside an observed process name shift it.
 - **Managed/version fields are absent by construction.** Row 8 and the `tmuxx.Window` data model do not carry the
   inherited session `@agentctl_managed` or `@agentctl_version` expansions. Window `@agentctl_managed` remains stamped
   as advisory metadata (§6.5); the prior window-version data-model field was removed rather than promoted to a gate.
