@@ -276,6 +276,7 @@ part_c_teardown() {
   printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
   if [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
     if [ -L "$PART_C_KEYCHAIN_LINK" ]; then
+      # Keep this exactly non-recursive and slash-free: rm -rf link/ follows the symlink and destroys the operator's Keychains target.
       if rm -f -- "$PART_C_KEYCHAIN_LINK" && [ ! -e "$PART_C_KEYCHAIN_LINK" ] && [ ! -L "$PART_C_KEYCHAIN_LINK" ]; then
         printf 'PART C CLEANUP PASS (temporary Keychains symlink removed)\n'
         PART_C_KEYCHAIN_LINK_OWNED=0
