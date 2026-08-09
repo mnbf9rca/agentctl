@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "dir": "relative-is-validated-by-config",
+  "roles": [
+    {"role": "planner"},
+    {"role": "Reviewer", "harness": "future-harness", "model": "bad model", "effort": "extreme"}
+  ]
+}
