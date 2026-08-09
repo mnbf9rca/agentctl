@@ -797,8 +797,26 @@ After every role has been attempted, `launch` writes exactly one summary line, l
 order:
 
 ```text
-agentctl: session "S" launched; 1 of 4 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role until "agentctl relaunch ROLE" recovers it
+agentctl: session "S" launched; 1 of 4 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role; "agentctl relaunch ROLE" recovers planner
 ```
+
+The trailing remedy is **two conditional clauses, not a fixed sentence**, because a role whose abandonment record could
+not be stamped has no `relaunch` remedy (§6.5) and a summary asserting one would be false for exactly that role. After
+the fixed prefix, emit each clause only when its own set is non-empty:
+
+- roles carrying an abandonment record → `; "agentctl relaunch ROLE" recovers LIST`
+- roles without one → `; no abandonment record was stamped for LIST, which can only be recovered by recreating the fleet`
+
+So a mixed launch reports both, naming which roles fall where:
+
+```text
+agentctl: session "S" launched; 2 of 4 roles unproven: planner, worker; nothing was rolled back; control commands refuse an unproven role; "agentctl relaunch ROLE" recovers planner; no abandonment record was stamped for worker, which can only be recovered by recreating the fleet
+```
+
+and a launch where every marker stamp failed reports only the second clause. This keeps the summary inside its own
+remit: §6.6 already holds that the per-role line is the observation and the summary is the claim about the fleet, with
+neither implying the other — a fixed remedy clause quietly broke that by asserting a per-role fact the per-role line
+had just contradicted.
 
 If the abandonment record (§6.5) could not be stamped for a role, its per-role line says so, because that role cannot
 be recovered by `relaunch` (§6.8) and the operator would otherwise learn it only on being refused:
