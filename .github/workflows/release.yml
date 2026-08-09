@@ -46,20 +46,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install goreleaser
-        run: brew install goreleaser
-      - name: Verify goreleaser version
-        run: |
-          set -euo pipefail
-          if ! command -v goreleaser >/dev/null 2>&1; then
-            echo "goreleaser not found on PATH after the install step" >&2
-            exit 1
-          fi
-          actual="$(goreleaser --version | awk '/^GitVersion:/ {print $2; exit}')"
-          if [[ "$actual" != "2.17.1" ]]; then
-            echo "goreleaser is $actual; the last green snapshot used 2.17.1."
-            echo "Re-run the snapshot checks and review the result before changing this pin."
-            exit 1
-          fi
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.17.1
+          install-only: true
       - name: Environment fingerprint (post-install)
         run: ./hack/ci-fingerprint.sh
       - name: Resolve version
@@ -111,11 +101,6 @@ jobs:
           if [ "$DRY_RUN" != "true" ] && [ "$amd_out" != "$expected" ]; then
             echo "amd64 version mismatch: got '$amd_out', want '$expected'" >&2; exit 1
           fi
-      - name: Publish (undraft) release
-        if: env.DRY_RUN != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Attest release artifacts
         if: env.DRY_RUN != 'true'
         uses: actions/attest@v4
@@ -126,6 +111,11 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: ./dist/checksums.txt
+      - name: Publish (undraft) release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Mint tap token
         if: env.DRY_RUN != 'true'
         id: tap-token

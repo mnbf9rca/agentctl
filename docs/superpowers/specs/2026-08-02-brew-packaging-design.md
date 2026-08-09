@@ -223,9 +223,11 @@ write`, `id-token: write`, `attestations: write`. Steps:
    the step fails closed rather than shipping untested bytes). Each must print exactly
    the tag version from `agentctl version`. (§1.1: the version claim is verified on the
    bytes being shipped, not on a rebuild.)
-5. **Undraft**: `gh release edit vX.Y.Z --draft=false` — the publish moment.
-6. **Attest**: `actions/attest@v4` with `subject-checksums: dist/checksums.txt`, then a
-   second step with `subject-path: dist/checksums.txt`.
+5. **Attest while still draft**: `actions/attest@v4` with `subject-checksums:
+   dist/checksums.txt`, then a second step with `subject-path: dist/checksums.txt`.
+   Both attestations must succeed before the release can become public.
+6. **Undraft**: `gh release edit vX.Y.Z --draft=false` — the publish moment, reached
+   only after the exact artifacts and checksums file have been attested.
 7. **Render and push the formula**: `hack/render-formula.sh` produces
    `Formula/agentctl.rb`; the workflow commits it to `mnbf9rca/homebrew-tap` via
    GraphQL `createCommitOnBranch` using a fresh App installation token — a Verified,
