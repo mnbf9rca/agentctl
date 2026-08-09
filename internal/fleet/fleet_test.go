@@ -152,8 +152,12 @@ func TestLaunchMakesRelativeDirectoryAbsoluteBeforeCreationAndStamping(t *testin
 			runner := tmuxx.NewFakeRunner(successfulOneRoleResponses("")...)
 			launcher := New(runner, Dependencies{LookPath: presentExecutable})
 
-			if _, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr(tt.directory)); err != nil {
+			launched, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr(tt.directory))
+			if err != nil {
 				t.Fatalf("Launch() error = %v", err)
+			}
+			if launched.Directory != tt.wantDirectory {
+				t.Fatalf("Launch() directory = %q, want %q", launched.Directory, tt.wantDirectory)
 			}
 
 			wantCreation := tmuxx.Call{Executable: "tmux", Args: []string{
@@ -261,8 +265,11 @@ func TestLaunchContinuesToCreationWhenSessionLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch() error = %v, want successful launch", err)
 	}
-	if want := (tmuxx.Session{ID: "$17", Name: "epic123"}); launched != want {
-		t.Fatalf("Launch() session = %+v, want %+v", launched, want)
+	if want := (tmuxx.Session{ID: "$17", Name: "epic123"}); launched.Session != want {
+		t.Fatalf("Launch() session = %+v, want %+v", launched.Session, want)
+	}
+	if launched.UnprovenRoles != nil {
+		t.Fatalf("Launch() unproven roles = %#v, want nil", launched.UnprovenRoles)
 	}
 	if len(runner.Calls) != 18 {
 		t.Fatalf("Runner call count = %d, want 18 (advisory lookup plus successful launch)", len(runner.Calls))
@@ -779,64 +786,66 @@ func TestLaunchCapturesFirstStablePairWithoutExtraPolling(t *testing.T) {
 	}
 }
 
-func TestLaunchUnsettledProcessThroughBoundaryRollsBack(t *testing.T) {
-	clock := &fakeClock{}
-	responses := launchPrefixResponses(12)
-	for index := range 51 {
-		process := "env\n"
-		if index%2 == 1 {
-			process = "claude\n"
-		}
-		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
-	}
-	responses = append(responses, tmuxx.Response{})
-	runner := tmuxx.NewFakeRunner(responses...)
-	launcher := New(runner, Dependencies{LookPath: presentExecutable, Getwd: func() (string, error) { return "/repo", nil }, Now: clock.Now, Sleep: clock.Sleep})
-
-	_, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
-	var launchErr *LaunchError
-	if !errors.As(err, &launchErr) {
-		t.Fatalf("Launch() error = %v, want *LaunchError", err)
-	}
-	if got, want := len(clock.sleeps), 50; got != want {
-		t.Fatalf("sleep count = %d, want %d", got, want)
-	}
-	if got, want := clock.now, 5*time.Second; got != want {
-		t.Fatalf("final fake time = %s, want %s", got, want)
-	}
-	assertExactlyOneKill(t, runner, "$17")
-}
-
-func TestLaunchProcessPollRetriesThroughFiveSecondBoundaryThenRollsBack(t *testing.T) {
+func TestLaunchProcessPollTimeoutRetainsTheFleetAndReportsFinalObservation(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		response tmuxx.Response
+		name         string
+		response     func(int) tmuxx.Response
+		wantObserved string
 	}{
-		{name: "amq", response: tmuxx.Response{Stdout: []byte("amq\n")}},
-		{name: "unavailable", response: tmuxx.Response{Err: fakeExitError{code: 1}}},
+		{
+			name: "non-amq value was not repeated",
+			response: func(index int) tmuxx.Response {
+				if index%2 == 0 {
+					return tmuxx.Response{Stdout: []byte("env\n")}
+				}
+				return tmuxx.Response{Stdout: []byte("claude\n")}
+			},
+			wantObserved: `last observed: "env", not repeated`,
+		},
+		{
+			name:         "amq exec chain",
+			response:     func(int) tmuxx.Response { return tmuxx.Response{Stdout: []byte("amq\n")} },
+			wantObserved: `last observed: "amq"; the exec chain had not advanced past amq`,
+		},
+		{
+			name:         "identity unavailable",
+			response:     func(int) tmuxx.Response { return tmuxx.Response{Err: fakeExitError{code: 1}} },
+			wantObserved: "no identity was available for the pane's root process",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clock := &fakeClock{}
 			responses := launchPrefixResponses(12)
-			for range 51 {
-				responses = append(responses, tt.response)
+			for index := range 51 {
+				responses = append(responses, tt.response(index))
 			}
-			responses = append(responses, tmuxx.Response{}) // rollback
+			responses = append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
 			runner := tmuxx.NewFakeRunner(responses...)
+			var stderr bytes.Buffer
 			launcher := New(runner, Dependencies{
 				LookPath: presentExecutable,
 				Getwd:    func() (string, error) { return "/repo", nil },
 				Now:      clock.Now,
 				Sleep:    clock.Sleep,
+				Stderr:   &stderr,
 			})
 
-			_, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
-			var launchErr *LaunchError
-			if !errors.As(err, &launchErr) {
-				t.Fatalf("Launch() error = %v, want *LaunchError", err)
+			result, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
+			if err != nil {
+				t.Fatalf("Launch() error = %v, want retained launch", err)
 			}
-			if launchErr.Role != "planner" || launchErr.Session != "epic123" {
-				t.Fatalf("LaunchError = %#v, want planner / epic123", launchErr)
+			if got, want := result.Session, (tmuxx.Session{ID: "$17", Name: "epic123"}); got != want {
+				t.Fatalf("LaunchResult.Session = %#v, want %#v", got, want)
+			}
+			if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
+			}
+			if got, want := result.RecoverableRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("LaunchResult.RecoverableRoles = %#v, want %#v", got, want)
+			}
+			wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (" + tt.wantObserved + "); window @23 was left in place\n"
+			if got := stderr.String(); got != wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, wantStderr)
 			}
 			if len(clock.sleeps) != 50 {
 				t.Fatalf("sleep count = %d, want 50", len(clock.sleeps))
@@ -852,8 +861,124 @@ func TestLaunchProcessPollRetriesThroughFiveSecondBoundaryThenRollsBack(t *testi
 			if got, want := processCallCount(runner), 51; got != want {
 				t.Fatalf("ps call count = %d, want %d (t=0 through t=5s)", got, want)
 			}
-			assertLastKill(t, runner, "$17")
+			assertNoKill(t, runner)
+			assertNoProcessStamp(t, runner, "@23")
+			wantTail := []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}},
+				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_SESSION"}},
+				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_ROLE"}},
+				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_MANAGED"}},
+			}
+			if got := runner.Calls[len(runner.Calls)-4:]; !reflect.DeepEqual(got, wantTail) {
+				t.Fatalf("calls after timeout = %#v, want identity clears %#v", got, wantTail)
+			}
 		})
+	}
+}
+
+func TestLaunchFirstRoleTimeoutClearsIdentityBeforeCreatingAndSettlingLaterRole(t *testing.T) {
+	clock := &fakeClock{}
+	responses := launchPrefixResponses(12)
+	for index := range 51 {
+		process := "env\n"
+		if index%2 == 1 {
+			process = "claude\n"
+		}
+		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
+	}
+	responses = append(responses,
+		tmuxx.Response{},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("@65\t%87\t8686\n")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("codex\n")}, tmuxx.Response{Stdout: []byte("codex\n")}, tmuxx.Response{},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Getwd:    func() (string, error) { return "/repo", nil },
+		Now:      clock.Now,
+		Sleep:    clock.Sleep,
+	})
+
+	result, err := launcher.Launch(context.Background(), "epic123", twoRoleFleet(), nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v, want retained launch", err)
+	}
+	if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
+	}
+	if got, want := result.RecoverableRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LaunchResult.RecoverableRoles = %#v, want %#v", got, want)
+	}
+	assertNoKill(t, runner)
+	assertNoProcessStamp(t, runner, "@23")
+	assertProcessStamp(t, runner, "@65", "codex")
+
+	lastFirstProcess := -1
+	markerStamp := -1
+	firstClear := -1
+	secondCreation := -1
+	for index, call := range runner.Calls {
+		switch {
+		case call.Executable == "ps" && len(call.Args) == 4 && call.Args[3] == "4242":
+			lastFirstProcess = index
+		case call.Executable == "tmux" && reflect.DeepEqual(call.Args, []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}):
+			markerStamp = index
+		case firstClear == -1 && call.Executable == "tmux" && len(call.Args) > 0 && call.Args[0] == "set-environment":
+			firstClear = index
+		case call.Executable == "tmux" && len(call.Args) > 0 && call.Args[0] == "new-window":
+			secondCreation = index
+		}
+	}
+	if lastFirstProcess >= markerStamp || markerStamp >= firstClear || firstClear >= secondCreation {
+		t.Fatalf("call order last first-role ps=%d, marker=%d, first clear=%d, second creation=%d; calls=%#v", lastFirstProcess, markerStamp, firstClear, secondCreation, runner.Calls)
+	}
+}
+
+func TestLaunchMarkerStampFailureIsReportedNeverFatalAndLeavesRoleUnrecoverable(t *testing.T) {
+	clock := &fakeClock{}
+	responses := launchPrefixResponses(12)
+	for index := range 51 {
+		process := "env\n"
+		if index%2 == 1 {
+			process = "claude\n"
+		}
+		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
+	}
+	responses = append(responses,
+		tmuxx.Response{Err: errors.New("marker unavailable")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+	var stderr bytes.Buffer
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Getwd:    func() (string, error) { return "/repo", nil },
+		Now:      clock.Now,
+		Sleep:    clock.Sleep,
+		Stderr:   &stderr,
+	})
+
+	result, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v, want retained launch", err)
+	}
+	if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
+	}
+	if result.RecoverableRoles != nil {
+		t.Fatalf("LaunchResult.RecoverableRoles = %#v, want nil", result.RecoverableRoles)
+	}
+	wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (last observed: \"env\", not repeated); window @23 was left in place, but its abandonment record could not be stamped (tmux set window option: marker unavailable), so \"agentctl relaunch ROLE\" cannot recover it\n"
+	if got := stderr.String(); got != wantStderr {
+		t.Fatalf("stderr = %q, want %q", got, wantStderr)
+	}
+	assertNoKill(t, runner)
+	assertNoProcessStamp(t, runner, "@23")
+	marker := tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}}
+	if got := runner.Calls[len(runner.Calls)-4]; !reflect.DeepEqual(got, marker) {
+		t.Fatalf("final per-window call = %#v, want marker attempt %#v", got, marker)
 	}
 }
 
@@ -1146,6 +1271,33 @@ func processCallCount(runner *tmuxx.FakeRunner) int {
 		}
 	}
 	return count
+}
+
+func assertNoProcessStamp(t *testing.T, runner *tmuxx.FakeRunner, windowID string) {
+	t.Helper()
+	for _, call := range runner.Calls {
+		if reflect.DeepEqual(call, tmuxx.Call{Executable: "tmux", Args: []string{
+			"set-option", "-w", "-t", windowID, "@agentctl_process", "",
+		}}) {
+			t.Fatalf("runner calls include empty process stamp for %s: %#v", windowID, runner.Calls)
+		}
+		if call.Executable == "tmux" && len(call.Args) == 6 && call.Args[0] == "set-option" && call.Args[1] == "-w" && call.Args[3] == windowID && call.Args[4] == "@agentctl_process" {
+			t.Fatalf("runner calls include process stamp for %s: %#v", windowID, call)
+		}
+	}
+}
+
+func assertProcessStamp(t *testing.T, runner *tmuxx.FakeRunner, windowID, process string) {
+	t.Helper()
+	want := tmuxx.Call{Executable: "tmux", Args: []string{
+		"set-option", "-w", "-t", windowID, "@agentctl_process", process,
+	}}
+	for _, call := range runner.Calls {
+		if reflect.DeepEqual(call, want) {
+			return
+		}
+	}
+	t.Fatalf("runner calls = %#v, want process stamp %#v", runner.Calls, want)
 }
 
 func assertLastKill(t *testing.T, runner *tmuxx.FakeRunner, sessionID string) {

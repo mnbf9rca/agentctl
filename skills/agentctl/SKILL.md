@@ -3,7 +3,7 @@ name: agentctl
 description: Use when operating an agentctl fleet from inside it — checking sibling agent status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
 compatibility: Requires the agentctl binary on PATH, run from inside an agentctl-managed tmux window.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Driving agentctl
@@ -45,16 +45,27 @@ agentctl kill --session SESSION
 ```
 
 `launch`, `relaunch`, and `attach` are operator-only; do not issue them.
+`launch --from-template FILE` lets the operator supply fleet shape from a
+strict JSON file, but does not make launch or template authoring an
+agent-driven workflow.
 
 ## 3. Read status as factual claims
 
 Status is roster-driven: roles come from fleet metadata, not from whatever
 windows exist. The states `ambiguous`, `unmanaged`, `missing`, `dead`,
-`unexpected-process`, `running` are distinct claims with distinct meanings —
-see [references/status-states.md](references/status-states.md). Never infer
+`no-baseline`, `unexpected-process`, `running` are distinct claims with
+distinct meanings — see
+[references/status-states.md](references/status-states.md). Never infer
 liveness from anything else (pane text, AMQ traffic, silence). An exited
 agent normally reports `missing`, not `dead`, because managed windows close
-on exit.
+on exit. `no-baseline` means the stored process baseline is empty, so agentctl
+never proved the pane's launch identity; control commands fail closed and no
+current-process probe is issued. Operator-only `relaunch` can recover it only
+when the window carries launch's positive `@agentctl_unproven=1` abandonment
+record and the session has at least one other listed window. An unmarked
+`no-baseline` window is refused because it may still be settling. A
+sole-window case is also refused and requires the operator's managed `kill`
+plus `launch` remedy.
 
 ## 4. Rules the binary does not enforce
 

@@ -416,15 +416,15 @@ func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
 	t.Parallel()
 
 	runner := NewFakeRunner(Response{Stdout: []byte(
-		"@7\tplanner\tplanner\tclaude\tfable\tmax\tweird name\twith tab\n" +
-			"@8\tcodex1\tcodex1\tcodex\t\t\tcodex\n",
+		"@7\tplanner\tplanner\tclaude\tfable\tmax\t1\tweird name\twith tab\n" +
+			"@8\tcodex1\tcodex1\tcodex\t\t\t\tcodex\n",
 	)})
 	got, err := New(runner).ListWindows(context.Background(), "$4")
 	if err != nil {
 		t.Fatalf("ListWindows() error = %v", err)
 	}
 	want := []Window{
-		{ID: "@7", Name: "planner", Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Process: "weird name\twith tab"},
+		{ID: "@7", Name: "planner", Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Unproven: "1", Process: "weird name\twith tab"},
 		{ID: "@8", Name: "codex1", Role: "codex1", Harness: "codex", Model: "", Effort: "", Process: "codex"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -432,7 +432,7 @@ func TestListWindowsParsesMetadataAndPreservesProcessResidue(t *testing.T) {
 	}
 	assertCalls(t, runner, Call{Executable: "tmux", Args: []string{
 		"list-windows", "-t", "$4", "-F",
-		"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+		"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}",
 	}})
 }
 
@@ -456,10 +456,10 @@ func TestListWindowsRejectsMalformedOutput(t *testing.T) {
 		name   string
 		stdout string
 	}{
-		{name: "too few fields", stdout: "@7\tplanner\tplanner\tclaude\tfable\tclaude\n"},
-		{name: "wrong id prefix", stdout: "$7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n"},
-		{name: "empty name", stdout: "@7\t\tplanner\tclaude\tfable\tmax\tclaude\n"},
-		{name: "blank trailing record", stdout: "@7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n\n"},
+		{name: "too few fields", stdout: "@7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n"},
+		{name: "wrong id prefix", stdout: "$7\tplanner\tplanner\tclaude\tfable\tmax\t1\tclaude\n"},
+		{name: "empty name", stdout: "@7\t\tplanner\tclaude\tfable\tmax\t1\tclaude\n"},
+		{name: "blank trailing record", stdout: "@7\tplanner\tplanner\tclaude\tfable\tmax\t1\tclaude\n\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

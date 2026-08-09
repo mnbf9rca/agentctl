@@ -89,3 +89,91 @@ func TestIntegrationRelaunchRecreatesOnlyTheAbsentRole(t *testing.T) {
 	}
 	fixture.waitRoleInput("coder", "/clear\n")
 }
+
+func TestIntegrationRelaunchRefusesSoleNoBaselineWindowWithoutMutation(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launch := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-recover-no-baseline",
+		"--roles", "planner:claude",
+	)
+	if launch.exitCode != 0 {
+		t.Fatalf("launch result = %#v, want success", launch)
+	}
+	fixture.waitStubInvocations(1)
+	fixture.waitRoleMarkers("planner")
+
+	session := fixture.sessions()[0]
+	windows := fixture.windows(session.ID)
+	if len(windows) != 1 || windows[0].Process == "" {
+		t.Fatalf("launched windows = %#v, want one proven planner", windows)
+	}
+	originalWindowID := windows[0].ID
+	fixture.tmuxOutput("set-option", "-wu", "-t", string(originalWindowID), "@agentctl_process")
+	fixture.tmuxOutput("set-option", "-w", "-t", string(originalWindowID), "@agentctl_unproven", "1")
+
+	report := parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", session.Name, "--json"))
+	if len(report.Agents) != 1 || report.Agents[0].State != statuspkg.StateNoBaseline {
+		t.Fatalf("status after baseline removal = %#v, want no-baseline", report.Agents)
+	}
+
+	result := fixture.runAgentctl("relaunch", "--session", session.Name, "planner")
+	if result.exitCode != exitRole || result.stdout != "" {
+		t.Fatalf("relaunch result = %#v, want exit-4 sole-window refusal", result)
+	}
+	want := "agentctl: refusing to relaunch planner; it is the only window in session integration-recover-no-baseline, so removing it would destroy the session. Recreate the fleet instead:\n" +
+		"  agentctl kill --session integration-recover-no-baseline\n" +
+		"  agentctl launch --session integration-recover-no-baseline --roles planner:claude --dir " + fixture.windows(session.ID)[0].Directory + "\n"
+	if result.stderr != want {
+		t.Fatalf("relaunch stderr = %q, want %q", result.stderr, want)
+	}
+	windows = fixture.windows(session.ID)
+	if len(windows) != 1 || windows[0].ID != originalWindowID || windows[0].Process != "" {
+		t.Fatalf("windows after refusal = %#v, want original no-baseline planner %s untouched", windows, originalWindowID)
+	}
+	report = parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", session.Name, "--json"))
+	if len(report.Agents) != 1 || report.Agents[0].State != statuspkg.StateNoBaseline {
+		t.Fatalf("status after refusal = %#v, want no-baseline", report.Agents)
+	}
+	if invocations := fixture.stubInvocations(); len(invocations) != 1 {
+		t.Fatalf("stub invocations after refusal = %#v, want no recreation", invocations)
+	}
+}
+
+func TestIntegrationRelaunchRefusesRecordedBaselineMismatchWithoutMutation(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launch := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-refuse-mismatch",
+		"--roles", "planner:claude",
+	)
+	if launch.exitCode != 0 {
+		t.Fatalf("launch result = %#v, want success", launch)
+	}
+	fixture.waitStubInvocations(1)
+	fixture.waitRoleMarkers("planner")
+
+	session := fixture.sessions()[0]
+	windows := fixture.windows(session.ID)
+	if len(windows) != 1 {
+		t.Fatalf("launched windows = %#v, want one planner", windows)
+	}
+	original := windows[0]
+	fixture.tmuxOutput("set-option", "-w", "-t", string(original.ID), "@agentctl_process", "definitely-not-the-live-process")
+
+	report := parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", session.Name, "--json"))
+	if len(report.Agents) != 1 || report.Agents[0].State != statuspkg.StateUnexpectedProcess {
+		t.Fatalf("status after baseline mismatch = %#v, want unexpected-process", report.Agents)
+	}
+	result := fixture.runAgentctl("relaunch", "--session", session.Name, "planner")
+	if result.exitCode != exitRole || result.stdout != "" || !strings.Contains(result.stderr, "unexpected-process") {
+		t.Fatalf("relaunch mismatch result = %#v, want exit-4 refusal", result)
+	}
+	after := fixture.windows(session.ID)
+	if len(after) != 1 || after[0].ID != original.ID {
+		t.Fatalf("windows after mismatch refusal = %#v, want original %s untouched", after, original.ID)
+	}
+	if invocations := fixture.stubInvocations(); len(invocations) != 1 {
+		t.Fatalf("stub invocations after mismatch refusal = %#v, want no recreation", invocations)
+	}
+}

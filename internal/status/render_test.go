@@ -24,6 +24,13 @@ func TestWriteTableRendersDefaultModelAndEffortOnlyForHumans(t *testing.T) {
 				State:   StateRunning,
 			},
 			{
+				Role:    "worker",
+				Harness: "codex",
+				Window:  "worker",
+				PaneID:  "%14",
+				State:   StateNoBaseline,
+			},
+			{
 				Role:    "codex1",
 				Harness: "codex",
 				Window:  "codex1",
@@ -41,6 +48,7 @@ func TestWriteTableRendersDefaultModelAndEffortOnlyForHumans(t *testing.T) {
 	want := "" +
 		"SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS   STATE\n" +
 		"epic123  planner  claude   fable    max      %12   claude    running\n" +
+		"epic123  worker   codex    default  default  %14             no-baseline\n" +
 		"epic123  codex1   codex    default  default  %13   /bin/zsh  unexpected-process\n"
 	if got := output.String(); got != want {
 		t.Fatalf("WriteTable() output =\n%q\nwant:\n%q", got, want)

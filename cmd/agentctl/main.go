@@ -35,13 +35,14 @@ const (
 	exitTmux              = 6
 	exitMissingExecutable = 7
 	exitLaunch            = 8
+	exitLaunchUnproven    = 9
 )
 
 var globalUsage = `Usage: agentctl COMMAND [OPTIONS]
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate one absent role window in a managed fleet
+  relaunch  recreate an absent role or an eligible no-baseline window
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
@@ -52,10 +53,11 @@ Commands:
 `
 
 var commandUsage = map[string]string{
-	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
+	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n" +
+		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
 	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE\n\n" +
-		"Recreates a role window that is absent. It refuses whenever the role's window still exists,\n" +
-		"including a dead one, and reports whether the configuration came from the session or from flags.\n",
+		"Recreates a role window that is absent or recovers one live managed window with no process baseline when another window keeps the session alive.\n" +
+		"It refuses every other existing-window state and reports configuration provenance.\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
 	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
@@ -142,7 +144,7 @@ func runWithRunner(
 	collector := statuspkg.NewCollector(client).WithLookupEnv(statuspkg.LookupEnv(lookupEnv))
 	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
 	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{
+	return runWithDependencies(ctx, arguments, stdout, stderr, dependencies{
 		launch: launchDependencies{
 			runner:       runner,
 			skillHome:    os.UserHomeDir,
@@ -172,32 +174,16 @@ func runVersion(arguments []string, stdout, stderr io.Writer) (bool, int) {
 	return true, exitOK
 }
 
-func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver})
-}
-
-func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, killer: killer})
-}
-
-func runWithControlDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, controller controlExecutor) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, controller: controller})
-}
-
-func runWithRelaunchDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, relauncher roleRelauncher) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, relauncher: relauncher})
-}
-
 func runWith(arguments []string, stdout, stderr io.Writer, launch launchDependencies) int {
 	client := tmuxx.New(launch.runner)
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{
+	return runWithDependencies(context.Background(), arguments, stdout, stderr, dependencies{
 		launch:    launch,
 		resolver:  session.New(client, nil),
 		collector: statuspkg.NewCollector(client),
 	})
 }
 
-func runWithAllDependencies(
+func runWithDependencies(
 	ctx context.Context,
 	arguments []string,
 	stdout, stderr io.Writer,
@@ -229,18 +215,28 @@ func runWithAllDependencies(
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
+		document, err := decodeLaunchTemplate(options.fromTemplate)
+		if err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
 		if err := config.ValidateSessionName(options.session); err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
-		fleetConfig, err := config.ParseFleet(options.roles, options.models, options.efforts)
+		launchConfig := launchConfiguration{directory: options.directory}
+		if document == nil {
+			launchConfig.fleet, err = config.ParseFleet(options.roles, options.models, options.efforts)
+		} else {
+			launchConfig, err = mergeLaunchTemplate(*document, options)
+		}
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
 		deps.launch.fleet.Stderr = stderr
-		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
+		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, launchConfig.fleet, launchConfig.directory)
 		if code := launchResult(stderr, err, usage); code != exitOK {
 			return code
 		}
+		writeLaunchTemplateProvenance(stdout, options.session, launchConfig, launched.Directory)
 		code := confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
 		writeSkillLaunchNotices(stderr, deps.launch.skillHome, deps.launch.skillVersion)
 		return code
@@ -459,11 +455,37 @@ func confirmLaunch(
 	ctx context.Context,
 	stdout, stderr io.Writer,
 	collector statusCollector,
-	target tmuxx.Session,
+	result fleet.LaunchResult,
 ) int {
-	err := writeSelectedStatus(ctx, stdout, collector, target, false)
+	if len(result.UnprovenRoles) > 0 {
+		fmt.Fprintf(stderr,
+			"agentctl: session %q launched; %d of %d roles unproven: %s; nothing was rolled back; control commands refuse an unproven role",
+			result.Session.Name, len(result.UnprovenRoles), result.TotalRoles, strings.Join(result.UnprovenRoles, ", "),
+		)
+		if len(result.RecoverableRoles) > 0 {
+			fmt.Fprintf(stderr, "; \"agentctl relaunch ROLE\" recovers %s", strings.Join(result.RecoverableRoles, ", "))
+		}
+		recoverable := make(map[string]struct{}, len(result.RecoverableRoles))
+		for _, role := range result.RecoverableRoles {
+			recoverable[role] = struct{}{}
+		}
+		unrecorded := make([]string, 0, len(result.UnprovenRoles)-len(result.RecoverableRoles))
+		for _, role := range result.UnprovenRoles {
+			if _, ok := recoverable[role]; !ok {
+				unrecorded = append(unrecorded, role)
+			}
+		}
+		if len(unrecorded) > 0 {
+			fmt.Fprintf(stderr, "; no abandonment record was stamped for %s, which can only be recovered by recreating the fleet", strings.Join(unrecorded, ", "))
+		}
+		fmt.Fprintln(stderr)
+	}
+	err := writeSelectedStatus(ctx, stdout, collector, result.Session, false)
 	if err != nil {
-		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", target.Name, err)
+		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", result.Session.Name, err)
+	}
+	if len(result.UnprovenRoles) > 0 {
+		return exitLaunchUnproven
 	}
 	return exitOK
 }
@@ -564,17 +586,20 @@ func attachError(stderr io.Writer, err error) int {
 }
 
 type launchOptions struct {
-	session   string
-	roles     string
-	models    *string
-	efforts   *string
-	directory *string
+	session      string
+	roles        string
+	rolesSet     bool
+	fromTemplate *string
+	models       *string
+	efforts      *string
+	directory    *string
 }
 
 func parseLaunch(arguments []string) (launchOptions, error) {
 	flags := cliflags.New("launch")
 	session := flags.String("session", "", "session name")
 	roles := flags.String("roles", "", "role and harness assignments")
+	fromTemplate := flags.String("from-template", "", "JSON launch template")
 	models := flags.String("models", "", "role and model assignments")
 	efforts := flags.String("efforts", "", "role and effort assignments")
 	directory := flags.String("dir", "", "working directory")
@@ -586,7 +611,11 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 		return launchOptions{}, errors.New("launch accepts no positional arguments")
 	}
 
-	options := launchOptions{session: *session, roles: *roles}
+	options := launchOptions{session: *session, roles: *roles, rolesSet: flags.WasSet("roles")}
+	if flags.WasSet("from-template") {
+		templateValue := *fromTemplate
+		options.fromTemplate = &templateValue
+	}
 	if flags.WasSet("models") {
 		modelValue := *models
 		options.models = &modelValue
@@ -655,67 +684,33 @@ type commandOptions struct {
 	directory  *string
 }
 
-type parsedFlagKind uint8
-
-const (
-	parsedFlagString parsedFlagKind = iota
-	parsedFlagBool
-)
-
-type parsedFlagTarget uint8
-
-const (
-	parsedTargetSession parsedFlagTarget = iota + 1
-	parsedTargetJSON
-	parsedTargetHarness
-	parsedTargetModel
-	parsedTargetEffort
-	parsedTargetDirectory
-)
-
-type parsedFlagSpec struct {
-	name   string
-	kind   parsedFlagKind
-	target parsedFlagTarget
-	usage  string
-}
-
 type parsedCommandSpec struct {
 	agentFacing bool
-	flags       []parsedFlagSpec
+	flags       []string
 }
 
 var parsedCommandRegistry = map[string]parsedCommandSpec{
 	"attach": {
-		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags: []string{"session"},
 	},
 	"status": {
 		agentFacing: true,
-		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
-			{name: "json", kind: parsedFlagBool, target: parsedTargetJSON, usage: "emit JSON"},
-		},
+		flags:       []string{"session", "json"},
 	},
 	"clear": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"compact": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"kill": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"relaunch": {
-		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
-			{name: "harness", kind: parsedFlagString, target: parsedTargetHarness, usage: "harness override"},
-			{name: "model", kind: parsedFlagString, target: parsedTargetModel, usage: "model override"},
-			{name: "effort", kind: parsedFlagString, target: parsedTargetEffort, usage: "effort override"},
-			{name: "dir", kind: parsedFlagString, target: parsedTargetDirectory, usage: "working directory override"},
-		},
+		flags: []string{"session", "harness", "model", "effort", "dir"},
 	},
 	"version": {},
 }
@@ -726,66 +721,42 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
 	}
 	flags := cliflags.New(command)
-	type parsedFlagValue struct {
-		specification parsedFlagSpec
-		stringValue   *string
-		boolValue     *bool
-	}
-	values := make([]parsedFlagValue, 0, len(specification.flags))
+	var sessionName, harnessName, modelName, effortName, directory *string
+	var jsonOutput *bool
 	for _, registered := range specification.flags {
-		value := parsedFlagValue{specification: registered}
-		switch registered.kind {
-		case parsedFlagString:
-			value.stringValue = flags.String(registered.name, "", registered.usage)
-		case parsedFlagBool:
-			value.boolValue = flags.Bool(registered.name, false, registered.usage)
+		switch registered {
+		case "session":
+			sessionName = flags.String(registered, "", "session name")
+		case "json":
+			jsonOutput = flags.Bool(registered, false, "emit JSON")
+		case "harness":
+			harnessName = flags.String(registered, "", "harness override")
+		case "model":
+			modelName = flags.String(registered, "", "model override")
+		case "effort":
+			effortName = flags.String(registered, "", "effort override")
+		case "dir":
+			directory = flags.String(registered, "", "working directory override")
 		default:
-			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown kind", command, registered.name)
+			return commandOptions{}, fmt.Errorf("command %q has unsupported registered flag --%s", command, registered)
 		}
-		values = append(values, value)
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
-	options := commandOptions{}
-	for _, value := range values {
-		registered := value.specification
-		switch registered.target {
-		case parsedTargetSession:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s session projection requires string kind", command, registered.name)
-			}
-			options.session = *value.stringValue
-			options.sessionSet = flags.WasSet(registered.name)
-		case parsedTargetJSON:
-			if value.boolValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s JSON projection requires bool kind", command, registered.name)
-			}
-			options.json = *value.boolValue
-		case parsedTargetHarness:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s harness projection requires string kind", command, registered.name)
-			}
-			options.harness = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetModel:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s model projection requires string kind", command, registered.name)
-			}
-			options.model = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetEffort:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s effort projection requires string kind", command, registered.name)
-			}
-			options.effort = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetDirectory:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s directory projection requires string kind", command, registered.name)
-			}
-			options.directory = suppliedValue(flags, registered.name, value.stringValue)
-		default:
-			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown projection target %d", command, registered.name, registered.target)
-		}
+	options := commandOptions{
+		harness:   suppliedValue(flags, "harness", harnessName),
+		model:     suppliedValue(flags, "model", modelName),
+		effort:    suppliedValue(flags, "effort", effortName),
+		directory: suppliedValue(flags, "dir", directory),
+	}
+	if sessionName != nil {
+		options.session = *sessionName
+		options.sessionSet = flags.WasSet("session")
+	}
+	if jsonOutput != nil {
+		options.json = *jsonOutput
 	}
 
 	positional := flags.Args()
@@ -855,6 +826,10 @@ func writeRelaunchResult(stdout io.Writer, result fleet.RelaunchResult) {
 		fmt.Fprintf(stdout, "agentctl: %s now runs in %s; the fleet's recorded directory %s is unchanged\n",
 			result.Role, result.Directory, result.StoredDirectory)
 	}
+	if result.RecoveredWindowID != "" {
+		fmt.Fprintf(stdout, "recovered: removed window %s, which carried no @agentctl_process baseline, and recreated %s\n",
+			result.RecoveredWindowID, result.Role)
+	}
 }
 
 func renderEffort(effort string) string {
@@ -874,6 +849,16 @@ func renderModel(model string) string {
 }
 
 func relaunchError(stderr io.Writer, role, usage string, err error) int {
+	code := relaunchCauseError(stderr, role, usage, err)
+	var recovered *fleet.RecoveredWindowError
+	if errors.As(err, &recovered) {
+		fmt.Fprintf(stderr, "recovered: removed window %s, which carried no @agentctl_process baseline; %s was not recreated\n",
+			recovered.WindowID, recovered.Role)
+	}
+	return code
+}
+
+func relaunchCauseError(stderr io.Writer, role, usage string, err error) int {
 	var validation *config.ValidationError
 	if errors.As(err, &validation) {
 		return usageError(stderr, err.Error(), usage)
@@ -921,7 +906,9 @@ func relaunchError(stderr io.Writer, role, usage string, err error) int {
 	}
 	var unknownRole *fleet.UnknownRoleError
 	var present *fleet.WindowPresentError
-	if errors.As(err, &unknownRole) || errors.As(err, &present) {
+	var soleWindow *fleet.SoleWindowRecoveryError
+	var unmarkedWindow *fleet.UnmarkedWindowRecoveryError
+	if errors.As(err, &unknownRole) || errors.As(err, &present) || errors.As(err, &soleWindow) || errors.As(err, &unmarkedWindow) {
 		relaunchRefusal(stderr, role, err)
 		return exitRole
 	}
@@ -983,7 +970,10 @@ func controlError(stderr io.Writer, operation, usage string, err error) int {
 	if errors.As(err, &processIdentity) {
 		switch {
 		case processIdentity.Window.Process == "":
-			controlRefusal(stderr, operation, "%s:%s has empty @agentctl_process baseline", processIdentity.Session.Name, processIdentity.Role)
+			fmt.Fprintf(stderr,
+				"agentctl: refusing to %s %s; window %s has no @agentctl_process baseline; recover the role with \"agentctl relaunch %s\"\n",
+				operation, processIdentity.Role, processIdentity.Window.ID, processIdentity.Role,
+			)
 		case processIdentity.Err != nil:
 			controlRefusal(stderr, operation, "%s:%s process identity is unavailable for pane %s: %v", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.Err)
 		default:

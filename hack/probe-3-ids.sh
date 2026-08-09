@@ -72,7 +72,22 @@ stdout_value=$(tmux_cmd new-window -d -t "$SESSION_ID" -n probe2 -P -F '#{window
 echo "stdout='$stdout_value'"
 
 echo
-echo "== G. kill-session by ID =="
+echo "== G. window IDs are not reused after kill within one server lifetime =="
+FIRST_WINDOW_ID=$(tmux_cmd new-window -d -t "$SESSION_ID" -n reuse-first -P -F '#{window_id}' 'exec sleep 300')
+tmux_cmd kill-window -t "$FIRST_WINDOW_ID"
+SECOND_WINDOW_ID=$(tmux_cmd new-window -d -t "$SESSION_ID" -n reuse-second -P -F '#{window_id}' 'exec sleep 300')
+if [[ ! "$FIRST_WINDOW_ID" =~ ^@[0-9]+$ || ! "$SECOND_WINDOW_ID" =~ ^@[0-9]+$ ]]; then
+  echo "invalid window IDs: first='$FIRST_WINDOW_ID' second='$SECOND_WINDOW_ID'" >&2
+  exit 1
+fi
+if [[ "$FIRST_WINDOW_ID" == "$SECOND_WINDOW_ID" ]]; then
+  echo "window ID was reused after kill: '$FIRST_WINDOW_ID'" >&2
+  exit 1
+fi
+echo "created '$FIRST_WINDOW_ID', killed it, then created '$SECOND_WINDOW_ID': not reused"
+
+echo
+echo "== H. kill-session by ID =="
 tmux_cmd kill-session -t "$SESSION_ID" 2>&1 && echo "killed by id OK"
 echo "remaining:"
 tmux_cmd list-sessions -F '  #{session_name}' 2>&1

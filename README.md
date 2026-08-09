@@ -62,14 +62,25 @@ payloads.
 
 ## Installation
 
+Homebrew is the recommended installation path:
+
 ```sh
 brew install mnbf9rca/tap/agentctl
 ```
 
-This installs a prebuilt, signed binary and `tmux` alongside it. agentctl
-also expects `amq` and at least one agent harness (`claude`, `codex`) on
-PATH at launch time — it will tell you exactly what is missing when you run
-it.
+This installs a prebuilt, signed binary and brings in `tmux` as a dependency. Every fleet launch also requires `amq`
+and each harness in the effective fleet (`claude` or `codex`) on `PATH`; agentctl reports the exact missing executable
+before creating anything. iTerm2 is needed only for `agentctl attach`.
+
+After installing or upgrading the binary, install its embedded agent-facing skill into both harnesses' user-scope
+skill directories:
+
+```sh
+agentctl skill install
+```
+
+Run `agentctl skill status` to compare each installed copy with the binary. The installer updates files it can prove
+it owns and refuses unmanaged or modified targets unless the operator explicitly supplies `--force`.
 
 Release artifacts carry Sigstore build provenance. To verify a downloaded
 tarball:
@@ -78,23 +89,9 @@ tarball:
 gh attestation verify agentctl_<version>_darwin_arm64.tar.gz --repo mnbf9rca/agentctl
 ```
 
-To build from source instead: `make build` (requires Go), then
-`make install`.
+### Build from source
 
-## Prerequisites and installation
-
-To build agentctl, install Go and Make. To operate a fleet, install tmux, AMQ, and every harness named in `--roles`:
-
-- `tmux`
-- `amq`
-- Claude Code for `claude` roles
-- Codex CLI for `codex` roles
-- iTerm2 when using `agentctl attach`
-
-Harness and tmux behavior can change between releases. The dated versions actually exercised by the project are kept
-in the [release verification checklist](docs/release-checklist.md); they are evidence, not compatibility pins.
-
-Build, test, and install from this repository:
+Building from source requires Go and Make:
 
 ```bash
 make build
@@ -112,6 +109,9 @@ agentctl --help
 ```
 
 `PREFIX` and `DESTDIR` may be supplied to Make for packaging or a different installation prefix.
+
+Harness and tmux behavior can change between releases. The dated versions actually exercised by the project are kept
+in the [release verification checklist](docs/release-checklist.md); they are evidence, not compatibility pins.
 
 ## Quickstart: launch an eight-role fleet
 
@@ -211,17 +211,48 @@ with Go instead reports its recorded VCS revision, followed by `+dirty` when Go 
 
 ```text
 agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]
+agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]
 ```
 
-Creates a new managed tmux session. `--session` and `--roles` are required. Supported harnesses are `claude` and
-`codex`. `--models` and `--efforts` are optional and may name only roles present in `--roles`. `--dir` overrides the
-invocation working directory and must name an existing directory. Launch fails rather than adopting an existing
-session.
+Creates a new managed tmux session. `--session` is always required. Without `--from-template`, `--roles` is required
+as before. A template makes `--roles` optional, not forbidden: template roles come first in file order, flags override
+fields on those roles, and roles added by `--roles` follow in flag order. No flag removes a template role. Supported
+harnesses are `claude` and `codex`; `--models` and `--efforts` may name any role in the effective union. `--dir`
+overrides the template or invocation working directory and must name an existing directory. Launch fails rather than
+adopting an existing session.
+
+Templates are strict, read-only JSON inputs with this shape:
+
+```json
+{
+  "version": 1,
+  "dir": "/srv/work",
+  "roles": [
+    { "role": "planner", "harness": "claude", "model": "opus-4-1", "effort": "high" },
+    { "role": "worker", "harness": "codex" }
+  ]
+}
+```
+
+The file never contains a session name. `version` is required; `dir` and `roles` may be omitted, and a role's harness
+may be supplied later by a matching `--roles` entry. Unknown or duplicate fields, duplicate roles, `null`, empty
+strings, trailing JSON documents, non-regular files, and files over 1 MiB are refused. A template
+`dir` must be absolute; omit it and use `--dir` when the invocation should choose a relative or machine-specific path.
+Every effective role and field passes the same validators used by flags before launch continues.
+
+When a template is used, launch prints one provenance line per effective role before the observed status table. It
+labels fields as `template`, `flag override`, or `flags`; a template-supplied directory gets its own line. These lines
+describe the values actually passed to the launch path and recorded in session metadata.
 
 After creation succeeds, `launch` prints the same observed human-readable table as `status --session SESSION`. The
 table is collected from the managed roster and live tmux state rather than echoed from the launch arguments, so a role
 that has already disappeared is reported as `missing`. If that confirmation cannot be collected, launch reports the
 unverified confirmation on stderr but keeps exit 0 because the fleet creation itself succeeded.
+
+Launch records a role's process baseline only after observing the same non-`amq` root executable twice in succession.
+If that bounded settle poll expires, launch leaves the role window and the rest of the fleet in place, reports the
+unproven role, and exits 9. The retained role reports `no-baseline` and control commands refuse it until an operator
+resolves it; other roles continue launching and keep their own independently observed state.
 
 #### Effort levels
 
@@ -249,7 +280,7 @@ remembering how it was started:
 
 | Session option | Value |
 | --- | --- |
-| `@agentctl_roles` | the declared role names, comma-joined, in declaration order |
+| `@agentctl_roles` | the declared role names, comma-joined, in declaration order (template roles first, then flag-added roles) |
 | `@agentctl_fleet` | `role:harness:model:effort` quads, comma-joined, in the same order; defaulted model and effort values are empty (`planner:claude::`) |
 | `@agentctl_dir` | the exact directory passed to tmux `-c`: the `--dir` value, or the invocation working directory |
 
@@ -263,17 +294,24 @@ Recreates one role's window inside an existing managed session, using the harnes
 the fleet launched. Use it when a single agent's window has gone — closed deliberately to reload a harness, or lost to
 a crash — instead of killing and relaunching the whole fleet.
 
-It creates only what is **absent**. If the role still has a window, relaunch refuses and reports the state it observed,
-using the same vocabulary as `status`:
+It creates what is **absent**. It can also recover exactly one live managed `no-baseline` window by removing that exact
+window ID and creating a newly observed replacement, but only while another window keeps the session alive. Every
+other present-window state is refused and reported using the same vocabulary as `status`:
 
 ```text
-agentctl: refusing to relaunch coder; role coder already has 1 window in epic123 (@7 running); relaunch creates only absent role windows
-agentctl: refusing to relaunch coder; role coder already has 2 windows in epic123 (@7 ambiguous, @9 ambiguous); relaunch creates only absent role windows
+agentctl: refusing to relaunch coder; role coder already has 1 window in epic123 (@7 running); relaunch accepts only an absent role or a recoverable no-baseline window
+agentctl: refusing to relaunch coder; role coder already has 2 windows in epic123 (@7 ambiguous, @9 ambiguous); relaunch accepts only an absent role or a recoverable no-baseline window
 ```
 
 A `dead` window is refused too. Relaunch is not a restart: a dead pane still exists and may hold the output that
 explains why the agent stopped, so it is never killed and recreated for you. Remove the window yourself once you have
 finished with it, then relaunch.
+
+If the `no-baseline` window is the session's only window, relaunch refuses before preflight or mutation because tmux
+would destroy the session along with that window. The refusal reconstructs the managed remedy from validated fleet
+metadata: `agentctl kill --session SESSION`, followed by the complete equivalent `agentctl launch ...` command. It
+omits empty model and effort maps; if legacy metadata cannot reconstruct the whole fleet, it prints no potentially
+incorrect command block and says so.
 
 Success states exactly what was created and where each part of the configuration came from:
 
@@ -476,13 +514,15 @@ since disappeared. State precedence is fail-closed, so the first applicable stat
 | `unmanaged` | Window metadata does not describe the expected managed role, or the window has more than one pane. |
 | `missing` | No exact role window exists, or the matching window has no pane. |
 | `dead` | A surviving pane explicitly reports that it is dead. |
+| `no-baseline` | The live managed pane has no recorded launch baseline, so its process identity was never proved. |
 | `unexpected-process` | The live pane's observed root executable does not match its launch baseline, or identity cannot be verified. |
 | `running` | The managed window, sole live pane, and recorded process identity all match. |
 
 Exited agents normally report `missing`, not `dead`. Managed windows do not use tmux `remain-on-exit`, so a window
 normally disappears when its agent exits. `dead` is reserved for the distinct case where a pane still exists and tmux
 reports it dead. A `missing` role is the one `relaunch` can bring back; every other state means the window is still
-there and relaunch will refuse it.
+there. The one bounded exception is `no-baseline`, which relaunch can replace when another session window survives;
+the sole-window case is refused with a whole-fleet recreation remedy.
 
 Status does not claim that a `running` agent is idle, healthy at the application level, or following the intended
 workflow. It reports only the objective state agentctl can verify without scraping agent output.
@@ -493,8 +533,14 @@ agentctl is a single-user accident-prevention tool, not a security boundary agai
 same user. It validates identifiers, hardcodes its control payloads, addresses tmux objects by resolved IDs, checks
 management metadata and launch-time process identity, and refuses to target its own pane when invoked from inside
 tmux. Recorded metadata is re-validated when it is read back: `relaunch` applies the same harness, model, and effort rules to
-`@agentctl_fleet` that `launch` applies to `--roles`, `--models`, and `--efforts`, and it removes only a window the same invocation
-created.
+`@agentctl_fleet` that `launch` applies to `--roles`, `--models`, and `--efforts`. Relaunch rollback removes only the window the
+same invocation created; recovery removes only the exact typed ID of a uniquely classified managed `no-baseline`
+window, after every non-destructive check has passed.
+
+`launch --from-template` is a caller-named read path, not a write path. agentctl opens the path, verifies the opened
+descriptor is a regular file, bounds the read, and strictly decodes it before the effective fleet can reach preflight
+or tmux. Symlinks are followed to their target; `-` is an ordinary filename and stdin is never read. Template values
+gain no trust from their source and follow the same validated harness-argv and quoting path as flag values.
 
 These checks reduce wrong-target accidents but cannot make terminal input transactional. Under deliberate CPU
 saturation, verification observed delayed, missing, and doubled input. No wrong command selection was observed, but a

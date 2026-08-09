@@ -19,6 +19,7 @@ concurrency:
 jobs:
   promotion-form:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out PR head
         uses: actions/checkout@v7

@@ -11,7 +11,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-const statusWindowFormat = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
+const statusWindowFormat = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"
 
 func TestCollectorReportsHealthyFleetInRosterOrder(t *testing.T) {
 	t.Parallel()
@@ -20,7 +20,7 @@ func TestCollectorReportsHealthyFleetInRosterOrder(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner,codex1\n")},
-		tmuxx.Response{Stdout: []byte("@8\tcodex1\tcodex1\tcodex\t\t\tweird name\n@9\textra\textra\tclaude\t\t\t\n@7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@8\tcodex1\tcodex1\tcodex\t\t\t\tweird name\n@9\textra\textra\tclaude\t\t\t\t\n@7\tplanner\tplanner\tclaude\tfable\tmax\t1\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("%13\t222\t0\t1\n")},
@@ -202,8 +202,8 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 		},
 		{
 			name: "ambiguous precedes unmanaged and process state",
-			windows: "@7\tplanner\twrong\tclaude\tfable\t\t\n" +
-				"@8\tplanner\tplanner\tcodex\t\t\tbaseline\n",
+			windows: "@7\tplanner\twrong\tclaude\tfable\t\t\t\n" +
+				"@8\tplanner\tplanner\tcodex\t\t\t\tbaseline\n",
 			wantAgents: []Agent{
 				{Role: "planner", Harness: "claude", Model: "fable", Window: "planner", State: StateAmbiguous},
 				{Role: "planner", Harness: "codex", Window: "planner", State: StateAmbiguous},
@@ -212,54 +212,54 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 		},
 		{
 			name:          "unmanaged metadata precedes missing pane",
-			windows:       "@7\tplanner\twrong\tclaude\tfable\tmax\tbaseline\n",
+			windows:       "@7\tplanner\twrong\tclaude\tfable\tmax\t\tbaseline\n",
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateUnmanaged}},
 			wantCallCount: 4,
 		},
 		{
 			name:          "missing stored role precedes pane probe",
-			windows:       "@7\tplanner\t\tclaude\tfable\tmax\tbaseline\n",
+			windows:       "@7\tplanner\t\tclaude\tfable\tmax\t\tbaseline\n",
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateUnmanaged}},
 			wantCallCount: 4,
 		},
 		{
 			name:          "zero panes is missing",
-			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n",
+			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n",
 			afterWindows:  []tmuxx.Response{{}},
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateMissing}},
 			wantCallCount: 5,
 		},
 		{
 			name:          "reported multiple pane count is unmanaged",
-			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n",
+			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n",
 			afterWindows:  []tmuxx.Response{{Stdout: []byte("%12\t111\t0\t2\n")}},
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateUnmanaged}},
 			wantCallCount: 5,
 		},
 		{
 			name:          "multiple panes is unmanaged",
-			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n",
+			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n",
 			afterWindows:  []tmuxx.Response{{Stdout: []byte("%12\t111\t0\t2\n%13\t222\t1\t2\n")}},
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", State: StateUnmanaged}},
 			wantCallCount: 5,
 		},
 		{
 			name:          "dead precedes empty baseline",
-			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\n",
+			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\t\n",
 			afterWindows:  []tmuxx.Response{{Stdout: []byte("%12\t111\t1\t1\n")}},
 			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", PaneID: "%12", State: StateDead}},
 			wantCallCount: 5,
 		},
 		{
-			name:          "empty baseline is unexpected without process probe",
-			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\n",
+			name:          "empty baseline is no-baseline without process probe",
+			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\t\n",
 			afterWindows:  []tmuxx.Response{{Stdout: []byte("%12\t111\t0\t1\n")}},
-			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", PaneID: "%12", State: StateUnexpectedProcess}},
+			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", PaneID: "%12", State: StateNoBaseline}},
 			wantCallCount: 5,
 		},
 		{
 			name:    "unavailable identity is unexpected",
-			windows: "@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n",
+			windows: "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n",
 			afterWindows: []tmuxx.Response{
 				{Stdout: []byte("%12\t111\t0\t1\n")},
 				{Err: processExitError(1)},
@@ -270,7 +270,7 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 		},
 		{
 			name:    "mismatch renders current process",
-			windows: "@7\tplanner\tplanner\tclaude\tfable\tmax\tclaude\n",
+			windows: "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tclaude\n",
 			afterWindows: []tmuxx.Response{
 				{Stdout: []byte("%12\t111\t0\t1\n")},
 				{Stdout: []byte("/bin/zsh\n")},
@@ -315,7 +315,7 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 func TestCollectorRechecksWindowSnapshotBeforeClassifyingPaneErrorAsMissing(t *testing.T) {
 	t.Parallel()
 
-	windowRecord := "@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n"
+	windowRecord := "@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n"
 	windowGone := errors.New("window disappeared")
 	tests := []struct {
 		name          string
@@ -373,7 +373,7 @@ func TestCollectorPropagatesProcessRunnerFailure(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\tfable\tmax\tbaseline\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\tfable\tmax\t\tbaseline\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Err: processFailure},
 	)
@@ -398,7 +398,7 @@ func TestCollectorCollectAllListsEverySessionInServerOrder(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -406,7 +406,7 @@ func TestCollectorCollectAllListsEverySessionInServerOrder(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("codex1\n")},
-		tmuxx.Response{Stdout: []byte("@9\tcodex1\tcodex1\tcodex\tgpt\t\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@9\tcodex1\tcodex1\tcodex\tgpt\t\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("%20\t222\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 	)
@@ -462,7 +462,7 @@ func TestCollectorCollectAllMarksOnlyTheSessionContainingTheCallerPane(t *testin
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -533,7 +533,7 @@ func TestCollectorCollectAllContinuesAfterUnreadableSessionMetadata(t *testing.T
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},

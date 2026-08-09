@@ -11,7 +11,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-const targetWindowFormat = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
+const targetWindowFormat = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"
 const targetPaneFormat = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 
 func TestResolverRejectsMalformedRoleBeforeClientCall(t *testing.T) {
@@ -135,12 +135,12 @@ func TestResolverRequiresExactlyOneExactWindowName(t *testing.T) {
 	}{
 		{
 			name:    "no exact match despite prefix and suffix decoys",
-			windows: "@3\tcodex21\tcodex21\tcodex\t\t\tcodex\n@5\txcodex2\txcodex2\tcodex\t\t\tcodex\n",
+			windows: "@3\tcodex21\tcodex21\tcodex\t\t\t\tcodex\n@5\txcodex2\txcodex2\tcodex\t\t\t\tcodex\n",
 			wantIDs: []tmuxx.WindowID{},
 		},
 		{
 			name:    "multiple exact matches",
-			windows: "@3\tcodex21\tcodex21\tcodex\t\t\tcodex\n@4\tcodex2\tcodex2\tcodex\t\t\tcodex\n@7\tcodex2\tcodex2\tcodex\t\t\tcodex\n",
+			windows: "@3\tcodex21\tcodex21\tcodex\t\t\t\tcodex\n@4\tcodex2\tcodex2\tcodex\t\t\t\tcodex\n@7\tcodex2\tcodex2\tcodex\t\t\t\tcodex\n",
 			wantIDs: []tmuxx.WindowID{"@4", "@7"},
 		},
 	}
@@ -200,13 +200,13 @@ func TestResolverRejectsFirstInvalidWindowMetadataField(t *testing.T) {
 	}{
 		{
 			name:       "stored role mismatch",
-			windowLine: "@4\tcodex2\tplanner\tcodex\t\t\tcodex\n",
+			windowLine: "@4\tcodex2\tplanner\tcodex\t\t\t\tcodex\n",
 			wantWindow: tmuxx.Window{ID: "@4", Name: "codex2", Role: "planner", Harness: "codex", Process: "codex"},
 			wantError:  `window @4 named "codex2" has stored role "planner"; expected "codex2"`,
 		},
 		{
 			name:       "stored role absent",
-			windowLine: "@4\tcodex2\t\tcodex\t\t\tcodex\n",
+			windowLine: "@4\tcodex2\t\tcodex\t\t\t\tcodex\n",
 			wantWindow: tmuxx.Window{ID: "@4", Name: "codex2", Role: "", Harness: "codex", Process: "codex"},
 			wantError:  `window @4 named "codex2" has stored role ""; expected "codex2"`,
 		},
@@ -278,7 +278,7 @@ func TestResolverRejectsUnsafePaneStateBeforeProcessProbe(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
-				tmuxx.Response{Stdout: []byte("@4\tcodex2\tcodex2\tcodex\t\t\tcodex\n")},
+				tmuxx.Response{Stdout: []byte("@4\tcodex2\tcodex2\tcodex\t\t\t\tcodex\n")},
 				tmuxx.Response{Stdout: []byte(test.paneRows)},
 			)
 			resolver := New(tmuxx.New(runner), nil)
@@ -463,7 +463,7 @@ func validTargetRunner(baseline string, processResponse ...tmuxx.Response) *tmux
 	responses := []tmuxx.Response{
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
-		{Stdout: []byte("@4\tcodex2\tcodex2\tcodex\t\t\t" + baseline + "\n")},
+		{Stdout: []byte("@4\tcodex2\tcodex2\tcodex\t\t\t\t" + baseline + "\n")},
 		{Stdout: []byte("%8\t101\t0\t1\n")},
 	}
 	responses = append(responses, processResponse...)

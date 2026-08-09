@@ -88,12 +88,20 @@ type integrationFixture struct {
 }
 
 type socketRunner struct {
-	tmuxPath      string
-	socket        string
-	tmuxTmpDir    string
-	failureMu     sync.Mutex
-	failOperation string
+	tmuxPath                  string
+	socket                    string
+	tmuxTmpDir                string
+	failureMu                 sync.Mutex
+	failOperation             string
+	processMu                 sync.Mutex
+	firstProcessPID           string
+	processUnavailableForRest bool
 }
+
+type integrationProcessExitError struct{}
+
+func (integrationProcessExitError) Error() string { return "injected ps exit status 1" }
+func (integrationProcessExitError) ExitCode() int { return 1 }
 
 func TestIntegrationFixtureRemovesSocketDirectory(t *testing.T) {
 	var socketDirectory string
@@ -121,6 +129,9 @@ func (r *socketRunner) Output(ctx context.Context, executable string, args ...st
 			return nil, errors.New("injected tmux operation failure")
 		}
 		return r.tmuxCommand(ctx, args...).Output()
+	}
+	if executable == "ps" && r.processUnavailable(args) {
+		return nil, integrationProcessExitError{}
 	}
 	return exec.CommandContext(ctx, executable, args...).Output()
 }
@@ -159,6 +170,33 @@ func (r *socketRunner) failNextTmuxOperation(operation string) {
 	r.failureMu.Lock()
 	defer r.failureMu.Unlock()
 	r.failOperation = operation
+}
+
+func (r *socketRunner) makeProcessUnavailableAfterFirstPID() {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	r.firstProcessPID = ""
+	r.processUnavailableForRest = true
+}
+
+func (r *socketRunner) allowAllProcesses() {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	r.firstProcessPID = ""
+	r.processUnavailableForRest = false
+}
+
+func (r *socketRunner) processUnavailable(args []string) bool {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	if !r.processUnavailableForRest || len(args) == 0 {
+		return false
+	}
+	pid := args[len(args)-1]
+	if r.firstProcessPID == "" {
+		r.firstProcessPID = pid
+	}
+	return pid != r.firstProcessPID
 }
 
 func TestMain(m *testing.M) {
@@ -508,21 +546,21 @@ func (f *integrationFixture) hasSession(name string) bool {
 
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
 	f.t.Helper()
-	const format = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}\t#{pane_current_path}"
+	const format = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}\t#{pane_current_path}"
 	output := f.tmuxOutput("list-windows", "-t", string(sessionID), "-F", format)
 	lines := nonemptyLines(output)
 	windows := make([]integrationWindow, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 8)
-		if len(fields) != 8 {
+		fields := strings.SplitN(line, "\t", 9)
+		if len(fields) != 9 {
 			f.t.Fatalf("parse integration window %q: got %d fields", line, len(fields))
 		}
 		windows = append(windows, integrationWindow{
 			Window: tmuxx.Window{
 				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Role: fields[2], Harness: fields[3],
-				Model: fields[4], Effort: fields[5], Process: fields[6],
+				Model: fields[4], Effort: fields[5], Unproven: fields[6], Process: fields[7],
 			},
-			Directory: fields[7],
+			Directory: fields[8],
 		})
 	}
 	return windows

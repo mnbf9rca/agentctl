@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -155,6 +156,21 @@ func ParseHarness(name string) (Harness, error) {
 	}
 }
 
+// ValidateTemplateDirectory requires a template-sourced directory to carry
+// its own absolute meaning. Directory existence remains a point-of-use check
+// in internal/fleet.
+func ValidateTemplateDirectory(path string) error {
+	if filepath.IsAbs(path) {
+		return nil
+	}
+	return &ValidationError{
+		Option:     "dir",
+		Value:      path,
+		EntryIndex: -1,
+		Reason:     "template path must be absolute; omit dir and supply --dir at invocation",
+	}
+}
+
 // ParseFleet parses ordered role declarations and optional model and effort
 // assignments. A nil models or efforts value means the option was omitted; a
 // non-nil empty value means it was explicitly supplied as empty.
@@ -220,17 +236,12 @@ func parseRoles(roles string) (FleetConfig, error) {
 		if harnessName == "" {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, "harness is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
 
-		var harness Harness
-		switch harnessName {
-		case string(HarnessClaude):
-			harness = HarnessClaude
-		case string(HarnessCodex):
-			harness = HarnessCodex
-		default:
+		harness, err := ParseHarness(harnessName)
+		if err != nil {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("unknown harness %q", harnessName))
 		}
 		if _, duplicate := seen[role]; duplicate {
@@ -269,11 +280,11 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 		if model == "" {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, "model is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
-		if !modelExpression.MatchString(model) {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q must match %s", model, modelPattern))
+		if err := ValidateModelName(model); err != nil {
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q %s", model, validationReason(err)))
 		}
 		if _, duplicate := modelRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("duplicate model entry for role %q", role))
@@ -313,8 +324,8 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 		if effort == "" {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "effort is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
 		if _, duplicate := effortRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("duplicate effort entry for role %q", role))
@@ -324,11 +335,8 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
 		harness := fleet.Roles[roleIndex].Harness
-		if !supportsEffort(harness, effort) {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf(
-				"harness %q does not support effort %q; supported levels are %s",
-				harness, effort, strings.Join(effortLevels[harness], ", "),
-			))
+		if err := ValidateEffort(harness, effort); err != nil {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err))
 		}
 
 		effortRoles[role] = struct{}{}
@@ -345,6 +353,14 @@ func supportsEffort(harness Harness, effort string) bool {
 		}
 	}
 	return false
+}
+
+func validationReason(err error) string {
+	validation, ok := err.(*ValidationError)
+	if !ok {
+		return err.Error()
+	}
+	return validation.Reason
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {

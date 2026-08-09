@@ -54,7 +54,7 @@ func TestRunRejectsVersionArguments(t *testing.T) {
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate one absent role window in a managed fleet
+  relaunch  recreate an absent role or an eligible no-baseline window
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
@@ -129,7 +129,8 @@ func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 }
 
 func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
-	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n"
+	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n" +
+		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n"
 	const statusUsage = "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
 		"A leading * marks the caller's session when agentctl can determine it from tmux.\n" +
@@ -144,6 +145,8 @@ func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 		{name: "session equals", args: []string{"launch", "--session=one", "--session=two", "--roles", "planner:claude"}, option: "session", usage: launchUsage},
 		{name: "roles spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--roles", "reviewer:codex"}, option: "roles", usage: launchUsage},
 		{name: "roles equals", args: []string{"launch", "--session", "fleet", "--roles=planner:claude", "--roles=reviewer:codex"}, option: "roles", usage: launchUsage},
+		{name: "from-template spaced", args: []string{"launch", "--session", "fleet", "--from-template", "/one", "--from-template", "/two"}, option: "from-template", usage: launchUsage},
+		{name: "from-template equals", args: []string{"launch", "--session", "fleet", "--from-template=/one", "--from-template=/two"}, option: "from-template", usage: launchUsage},
 		{name: "models spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", "planner:fable", "--models", "planner:opus"}, option: "models", usage: launchUsage},
 		{name: "models equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models=planner:fable", "--models=planner:opus"}, option: "models", usage: launchUsage},
 		{name: "efforts spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:high", "--efforts", "planner:low"}, option: "efforts", usage: launchUsage},
@@ -241,9 +244,9 @@ func TestRunMapsSessionResolverErrorsToOwnedExitCodes(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 			resolver := session.New(tmuxx.New(runner), tt.lookup)
 			var stdout, stderr bytes.Buffer
-			code := runWithResolver(context.Background(), tt.args, &stdout, &stderr, resolver)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver})
 			if code != tt.wantCode {
-				t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.wantText) {
 				t.Fatalf("stderr = %q, want substring %q", stderr.String(), tt.wantText)
@@ -272,7 +275,7 @@ func TestRunKillExecutesManagedSessionByResolvedID(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 	if code != exitOK {
 		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
@@ -330,7 +333,7 @@ func TestRunKillRefusalsMapToSessionExitWithoutKilling(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+			code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 			if code != exitSession {
 				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
@@ -359,7 +362,7 @@ func TestRunKillMissingSessionStopsBeforeOwnershipChecks(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, killer)
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: killer})
 
 	if code != exitSession {
 		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
@@ -389,7 +392,7 @@ func TestRunKillTmuxFailuresMapToTmuxExit(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 			if code != exitTmux {
 				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
@@ -412,10 +415,10 @@ func TestActingCommandMalformedTMUXPaneMapsToSessionErrorWithoutTmuxCall(t *test
 			resolver := session.New(tmuxx.New(runner), lookupValues(map[string]string{"TMUX_PANE": pane}))
 			var stdout, stderr bytes.Buffer
 
-			code := runWithResolver(context.Background(), []string{"kill"}, &stdout, &stderr, resolver)
+			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, dependencies{resolver: resolver})
 
 			if code != exitSession {
-				t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), "current tmux session") {
 				t.Fatalf("stderr = %q, want current-source error", stderr.String())
@@ -471,11 +474,11 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 				Schema: 1, Session: "fleet", Managed: true, Agents: []statuspkg.Agent{},
 			}}
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
 				launch: launchTestDependencies(runner), resolver: resolver, collector: collector,
 			})
 			if code != tt.wantCode {
-				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
+				t.Fatalf("runWithDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
 			}
 			if resolveCalls != tt.wantResolve {
 				t.Fatalf("Resolve() calls = %d, want %d", resolveCalls, tt.wantResolve)
@@ -564,7 +567,7 @@ func TestRunBareStatusIgnoresAmbientSessionSourcesAndMarksCurrent(t *testing.T) 
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -597,7 +600,7 @@ func TestRunStatusAllRendersMetadataDefectsAndContinuesBeforeExitThree(t *testin
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -711,7 +714,7 @@ func TestRunStatusResolvesSessionAndRendersSelectedFormat(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 			}
@@ -847,7 +850,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("planner\n")},
-				tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 				tmuxx.Response{Stdout: []byte("claude\n")},
 				tmuxx.Response{Stdout: []byte("0\n")},
@@ -875,7 +878,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
@@ -916,7 +919,7 @@ func TestRunStatusNarrowsOnlyForExplicitSession(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)
@@ -948,7 +951,7 @@ func healthyStatusRunner() *tmuxx.FakeRunner {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\txhigh\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\txhigh\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)

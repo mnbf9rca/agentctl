@@ -41,10 +41,10 @@ func TestRunControlDeliversRegisteredOperationToResolvedRole(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitOK {
-				t.Fatalf("runWithControlDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 			}
 			want := invocation{operation: tt.operation, session: session, role: tt.role}
 			if !reflect.DeepEqual(got, want) {
@@ -86,10 +86,10 @@ func TestRunControlRejectsCallerPayloadInputsBeforeDependencies(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), tt.args, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitUsage {
-				t.Fatalf("runWithControlDependencies(%q) = %d, want %d", tt.args, code, exitUsage)
+				t.Fatalf("runWithDependencies(%q) = %d, want %d", tt.args, code, exitUsage)
 			}
 			if resolverCalled || controllerCalled {
 				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
@@ -121,10 +121,10 @@ func TestRunControlRejectsMalformedRoleBeforeSessionResolution(t *testing.T) {
 				arguments = []string{"clear", "--session", "epic123", "--", role}
 			}
 
-			code := runWithControlDependencies(context.Background(), arguments, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), arguments, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitUsage {
-				t.Fatalf("runWithControlDependencies(role %q) = %d, want %d", role, code, exitUsage)
+				t.Fatalf("runWithDependencies(role %q) = %d, want %d", role, code, exitUsage)
 			}
 			if resolverCalled || controllerCalled {
 				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
@@ -244,7 +244,7 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 				}, Pane: plannerPane,
 			},
 			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send clear; epic123:planner has empty @agentctl_process baseline\n",
+			wantError: "agentctl: refusing to clear planner; window @4 has no @agentctl_process baseline; recover the role with \"agentctl relaunch planner\"\n",
 		},
 		{
 			name:      "process unavailable",
@@ -287,10 +287,10 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != tt.wantCode {
-				t.Fatalf("runWithControlDependencies() = %d, want %d", code, tt.wantCode)
+				t.Fatalf("runWithDependencies() = %d, want %d", code, tt.wantCode)
 			}
 			if stderr.String() != tt.wantError {
 				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantError)
@@ -307,7 +307,7 @@ func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{},
@@ -325,7 +325,7 @@ func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
 		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
 		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
@@ -348,7 +348,7 @@ func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *tes
 		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("codex\n")},
 		tmuxx.Response{Err: errors.New("send keys failed")},
@@ -364,7 +364,7 @@ func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *tes
 		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
 		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},

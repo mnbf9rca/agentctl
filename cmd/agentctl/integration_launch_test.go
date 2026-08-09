@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 func TestIntegrationLaunchStartsWithoutTmuxServer(t *testing.T) {
@@ -121,6 +124,126 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	for role := range expected {
 		if !seenInvocations[role] {
 			t.Errorf("missing stub invocation for role %q", role)
+		}
+	}
+}
+
+func TestIntegrationLaunchTemplateCreatesTheEffectiveUnionInPinnedOrderWithoutWritingTheSource(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	templateDirectory := t.TempDir()
+	launchDirectory := t.TempDir()
+	templatePath := writeLaunchTemplateFixture(t, templateDirectory, "fleet.json", `{
+  "version": 1,
+  "dir": "/template/default",
+  "roles": [
+    {"role":"planner","harness":"claude","model":"opus","effort":"high"}
+  ]
+}`)
+	before, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-template",
+		"--from-template", templatePath,
+		"--roles", "coder:codex",
+		"--models", "coder:gpt-5",
+		"--efforts", "planner:max,coder:high",
+		"--dir", launchDirectory,
+	)
+	if result.exitCode != exitOK || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want success", result)
+	}
+	provenance := "agentctl: launched planner in integration-template: harness claude (template), model opus (template), effort max (flag override)\n" +
+		"agentctl: launched coder in integration-template: harness codex (flags), model gpt-5 (flags), effort high (flags)\n" +
+		"agentctl: template " + templatePath + ": dir " + launchDirectory + " (flag override)\n"
+	if !strings.HasPrefix(result.stdout, provenance) {
+		t.Fatalf("launch stdout = %q, want provenance prefix %q", result.stdout, provenance)
+	}
+	status := fixture.runAgentctl("status", "--session", "integration-template")
+	if status.exitCode != exitOK || status.stderr != "" || !strings.HasSuffix(result.stdout, status.stdout) {
+		t.Fatalf("status = %#v; launch stdout = %q, want observed status suffix", status, result.stdout)
+	}
+
+	sessions := fixture.sessions()
+	if len(sessions) != 1 || sessions[0].Roles != "planner,coder" ||
+		sessions[0].Fleet != "planner:claude:opus:max,coder:codex:gpt-5:high" || sessions[0].Directory != launchDirectory {
+		t.Fatalf("session metadata = %#v, want effective ordered union and override directory", sessions)
+	}
+	windows := fixture.windows(sessions[0].ID)
+	if len(windows) != 2 || windows[0].Role != "planner" || windows[1].Role != "coder" {
+		t.Fatalf("windows = %#v, want template role then flag-added role", windows)
+	}
+	after, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("template contents changed from %q to %q", before, after)
+	}
+}
+
+func TestIntegrationLaunchRetainsUnprovenRoleForRelaunchRecovery(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	fixture.runner.makeProcessUnavailableAfterFirstPID()
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-launch-unproven",
+		"--roles", "planner:claude,coder:codex",
+	)
+	if result.exitCode != exitLaunchUnproven {
+		t.Fatalf("launch result = %#v, want exit %d", result, exitLaunchUnproven)
+	}
+	if !strings.Contains(result.stderr, "coder: no process baseline recorded") ||
+		!strings.Contains(result.stderr, `session "integration-launch-unproven" launched; 1 of 2 roles unproven: coder; nothing was rolled back`) {
+		t.Fatalf("launch stderr = %q, want retained-role diagnostic and summary", result.stderr)
+	}
+	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
+
+	session := fixture.sessions()[0]
+	windows := fixture.windows(session.ID)
+	if len(windows) != 2 {
+		t.Fatalf("windows after unproven launch = %#v, want both roles retained", windows)
+	}
+	var originalCoder tmuxx.WindowID
+	for _, window := range windows {
+		switch window.Role {
+		case "planner":
+			if window.Process == "" || window.Unproven != "" {
+				t.Fatalf("planner window = %#v, want recorded baseline", window)
+			}
+		case "coder":
+			if window.Process != "" || window.Unproven != "1" {
+				t.Fatalf("coder window = %#v, want empty baseline and abandonment record", window)
+			}
+			originalCoder = window.ID
+		}
+	}
+	if originalCoder == "" {
+		t.Fatalf("windows after unproven launch = %#v, want coder window", windows)
+	}
+	report := parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", session.Name, "--json"))
+	if len(report.Agents) != 2 || report.Agents[0].State != statuspkg.StateRunning || report.Agents[1].State != statuspkg.StateNoBaseline {
+		t.Fatalf("status after unproven launch = %#v, want running then no-baseline", report.Agents)
+	}
+
+	fixture.runner.allowAllProcesses()
+	recovery := fixture.runAgentctl("relaunch", "--session", session.Name, "coder")
+	if recovery.exitCode != exitOK || recovery.stderr != "" {
+		t.Fatalf("relaunch result = %#v, want recovery success", recovery)
+	}
+	if !strings.Contains(recovery.stdout, "recovered: removed window "+string(originalCoder)) {
+		t.Fatalf("relaunch stdout = %q, want recovered window %s", recovery.stdout, originalCoder)
+	}
+	fixture.waitStubInvocations(3)
+	fixture.waitRoleMarkers("coder")
+	for _, window := range fixture.windows(session.ID) {
+		if window.Role == "coder" && (window.ID == originalCoder || window.Process == "" || window.Unproven != "") {
+			t.Fatalf("coder after recovery = %#v, want new proven window", window)
 		}
 	}
 }

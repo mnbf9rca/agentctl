@@ -25,6 +25,7 @@ env:
 jobs:
   release:
     runs-on: macos-26
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       dry_run: ${{ steps.version.outputs.dry_run }}
@@ -45,7 +46,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Install goreleaser
-        run: brew install goreleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.17.1
+          install-only: true
       - name: Environment fingerprint (post-install)
         run: ./hack/ci-fingerprint.sh
       - name: Resolve version
@@ -97,11 +101,6 @@ jobs:
           if [ "$DRY_RUN" != "true" ] && [ "$amd_out" != "$expected" ]; then
             echo "amd64 version mismatch: got '$amd_out', want '$expected'" >&2; exit 1
           fi
-      - name: Publish (undraft) release
-        if: env.DRY_RUN != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Attest release artifacts
         if: env.DRY_RUN != 'true'
         uses: actions/attest@v4
@@ -112,6 +111,11 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: ./dist/checksums.txt
+      - name: Publish (undraft) release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Mint tap token
         if: env.DRY_RUN != 'true'
         id: tap-token
@@ -152,6 +156,7 @@ jobs:
     needs: release
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -178,6 +183,7 @@ jobs:
     needs: [release, verify-install]
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
