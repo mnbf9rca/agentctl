@@ -205,13 +205,13 @@ var attachNoticeWithoutCount = "agentctl " + buildinfo.Current() + "\n" +
 	"        Prefer esc.\n\n" +
 	"Detaching never stops the fleet. To stop it: agentctl kill --session fleet\n"
 
-const attachWindows = "@7\tplanner\tplanner\tclaude\t\t\tclaude\n" +
-	"@8\tcoder\tcoder\tcodex\t\t\tcodex\n" +
-	"@9\treviewer\treviewer\tclaude\t\t\tclaude\n"
+const attachWindows = "@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n" +
+	"@8\tcoder\tcoder\tcodex\t\t\t\tcodex\n" +
+	"@9\treviewer\treviewer\tclaude\t\t\t\tclaude\n"
 
 var attachListWindowsCall = tmuxx.Call{Executable: "tmux", Args: []string{
 	"list-windows", "-t", "$4", "-F",
-	"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+	"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}",
 }}
 
 func TestRunAttachAttemptsControlModeByResolvedIDAndReportsTheSessionStateItObserved(t *testing.T) {

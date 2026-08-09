@@ -54,7 +54,7 @@ func TestRunRejectsVersionArguments(t *testing.T) {
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate one absent role window in a managed fleet
+  relaunch  recreate an absent role or an eligible no-baseline window
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
@@ -564,7 +564,7 @@ func TestRunBareStatusIgnoresAmbientSessionSourcesAndMarksCurrent(t *testing.T) 
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("0\n")},
@@ -597,7 +597,7 @@ func TestRunStatusAllRendersMetadataDefectsAndContinuesBeforeExitThree(t *testin
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -711,7 +711,7 @@ func TestRunStatusResolvesSessionAndRendersSelectedFormat(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 			}
@@ -847,7 +847,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("1\n")},
 				tmuxx.Response{Stdout: []byte("planner\n")},
-				tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+				tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 				tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 				tmuxx.Response{Stdout: []byte("claude\n")},
 				tmuxx.Response{Stdout: []byte("0\n")},
@@ -875,7 +875,7 @@ func TestRunStatusWithoutAnySessionSourceListsEverySession(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
-				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+				{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 				{Executable: "tmux", Args: []string{"list-panes", "-t", "@7", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 				{Executable: "ps", Args: []string{"-o", "comm=", "-p", "111"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$5", "@agentctl_managed"}},
@@ -916,7 +916,7 @@ func TestRunStatusNarrowsOnlyForExplicitSession(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)
@@ -948,7 +948,7 @@ func healthyStatusRunner() *tmuxx.FakeRunner {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\txhigh\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\txhigh\t\tclaude\n")},
 		tmuxx.Response{Stdout: []byte("%12\t111\t0\t1\n")},
 		tmuxx.Response{Stdout: []byte("claude\n")},
 	)

@@ -201,7 +201,7 @@ func TestIntegrationHandmadeRosterWindowIsNeverControlledOrReplaced(t *testing.T
 	fixture.waitHandmadeWindowReady(handmade)
 	for _, option := range []string{
 		"@agentctl_managed", "@agentctl_version", "@agentctl_role", "@agentctl_harness",
-		"@agentctl_model", "@agentctl_effort", "@agentctl_process",
+		"@agentctl_model", "@agentctl_effort", "@agentctl_unproven", "@agentctl_process",
 	} {
 		if got := fixture.windowOption(handmade.ID, option); got != "" {
 			t.Fatalf("handmade window option %s = %q, want absent", option, got)
@@ -241,7 +241,7 @@ func TestIntegrationHandmadeRosterWindowIsNeverControlledOrReplaced(t *testing.T
 		t.Fatalf("handmade window %s absent before relaunch: %#v", handmade.ID, fixture.windows(session.ID))
 	}
 	relaunch := fixture.runAgentctl("relaunch", "--session", "integration-handmade-window", "coder")
-	wantRelaunch := fmt.Sprintf("agentctl: refusing to relaunch coder; role coder already has 1 window in integration-handmade-window (%s unmanaged); relaunch creates only absent role windows\n", handmade.ID)
+	wantRelaunch := fmt.Sprintf("agentctl: refusing to relaunch coder; role coder already has 1 window in integration-handmade-window (%s unmanaged); relaunch accepts only an absent role or a recoverable no-baseline window\n", handmade.ID)
 	if relaunch.exitCode != exitRole || relaunch.stdout != "" || relaunch.stderr != wantRelaunch {
 		t.Fatalf("relaunch against handmade window = %#v, want existing-window refusal", relaunch)
 	}

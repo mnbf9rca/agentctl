@@ -83,6 +83,36 @@ func (e *LaunchError) Error() string {
 
 func (e *LaunchError) Unwrap() error { return e.Cause }
 
+// LaunchResult reports the exact session created and every role for which the
+// launch poll could not establish a process baseline. Both role slices stay in
+// roster order; RecoverableRoles is the subset whose abandonment record was
+// successfully stamped.
+type LaunchResult struct {
+	Session          tmuxx.Session
+	TotalRoles       int
+	UnprovenRoles    []string
+	RecoverableRoles []string
+}
+
+type processSettleTimeoutError struct {
+	lastProcess string
+	unavailable bool
+}
+
+func (e *processSettleTimeoutError) Error() string {
+	return fmt.Sprintf("process identity did not settle within %s", processPollTimeout)
+}
+
+func (e *processSettleTimeoutError) observation() string {
+	if e.unavailable {
+		return "no identity was available for the pane's root process"
+	}
+	if e.lastProcess == "amq" {
+		return `last observed: "amq"; the exec chain had not advanced past amq`
+	}
+	return fmt.Sprintf("last observed: %q, not repeated", e.lastProcess)
+}
+
 // Dependencies supplies launch seams. Nil functions use production defaults.
 type Dependencies struct {
 	LookPath preflight.LookPathFunc
@@ -123,6 +153,7 @@ const (
 	optionHarness   = "@agentctl_harness"
 	optionModel     = "@agentctl_model"
 	optionEffort    = "@agentctl_effort"
+	optionUnproven  = "@agentctl_unproven"
 	optionProcess   = "@agentctl_process"
 )
 
@@ -172,28 +203,28 @@ func New(runner tmuxx.Runner, dependencies Dependencies) Launcher {
 // Launch performs preflight before taking any tmux action and returns the exact
 // session created by this invocation. A nil directory uses the invocation
 // working directory; a non-nil value must name a directory.
-func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) (tmuxx.Session, error) {
+func (l Launcher) Launch(ctx context.Context, session string, fleet config.FleetConfig, directory *string) (LaunchResult, error) {
 	if len(fleet.Roles) == 0 {
-		return tmuxx.Session{}, fmt.Errorf("fleet must contain at least one role")
+		return LaunchResult{}, fmt.Errorf("fleet must contain at least one role")
 	}
 	if err := preflight.CheckExecutables(fleet, l.lookPath); err != nil {
-		return tmuxx.Session{}, err
+		return LaunchResult{}, err
 	}
 	directoryName, err := l.resolveDirectory(directory)
 	if err != nil {
-		return tmuxx.Session{}, err
+		return LaunchResult{}, err
 	}
 	sessions, err := l.tmux.ListSessions(ctx)
 	if errors.Is(err, context.Canceled) {
-		return tmuxx.Session{}, context.Canceled
+		return LaunchResult{}, context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return tmuxx.Session{}, context.DeadlineExceeded
+		return LaunchResult{}, context.DeadlineExceeded
 	}
 	if err == nil {
 		for _, existing := range sessions {
 			if existing.Name == session {
-				return tmuxx.Session{}, &SessionExistsError{Name: session}
+				return LaunchResult{}, &SessionExistsError{Name: session}
 			}
 		}
 	}
@@ -201,31 +232,61 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	createdSession, err := l.newSession(ctx, session, first, directoryName)
 	if err != nil {
 		if isDuplicateSessionRefusal(err, session) {
-			return tmuxx.Session{}, &SessionExistsError{Name: session, Cause: err}
+			return LaunchResult{}, &SessionExistsError{Name: session, Cause: err}
 		}
 		if errors.Is(err, tmuxx.ErrCreationOutput) {
-			return tmuxx.Session{}, &CreationError{Session: session, Cause: err}
+			return LaunchResult{}, &CreationError{Session: session, Cause: err}
 		}
-		return tmuxx.Session{}, err
+		return LaunchResult{}, err
+	}
+	result := LaunchResult{
+		Session:    tmuxx.Session{ID: createdSession.SessionID, Name: session},
+		TotalRoles: len(fleet.Roles),
 	}
 	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles, directoryName); err != nil {
-		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
-		return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		if !l.retainUnproven(ctx, &result, first.Name, createdSession.WindowID, createdSession.PaneID, err) {
+			return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
+		}
 	}
 	l.clearSessionIdentity(ctx, createdSession.SessionID)
 
 	for _, role := range fleet.Roles[1:] {
 		createdWindow, err := l.newWindow(ctx, createdSession.SessionID, session, role, directoryName)
 		if err != nil {
-			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 		if err := l.stampWindow(ctx, createdWindow.WindowID, createdWindow.PanePID, role); err != nil {
-			return tmuxx.Session{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			if !l.retainUnproven(ctx, &result, role.Name, createdWindow.WindowID, createdWindow.PaneID, err) {
+				return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
+			}
 		}
 	}
-	return tmuxx.Session{ID: createdSession.SessionID, Name: session}, nil
+	return result, nil
+}
+
+func (l Launcher) retainUnproven(ctx context.Context, result *LaunchResult, role string, windowID tmuxx.WindowID, paneID tmuxx.PaneID, err error) bool {
+	var timeout *processSettleTimeoutError
+	if !errors.As(err, &timeout) {
+		return false
+	}
+	result.UnprovenRoles = append(result.UnprovenRoles, role)
+	markerErr := l.tmux.SetWindowOption(ctx, windowID, optionUnproven, "1")
+	if markerErr != nil {
+		fmt.Fprintf(l.stderr,
+			"agentctl: %s: no process baseline recorded; pane %s did not yield two consecutive identical non-amq observations within %s (%s); window %s was left in place, but its abandonment record could not be stamped (%v), so \"agentctl relaunch ROLE\" cannot recover it\n",
+			role, paneID, processPollTimeout, timeout.observation(), windowID, markerErr,
+		)
+		return true
+	}
+	result.RecoverableRoles = append(result.RecoverableRoles, role)
+	fmt.Fprintf(l.stderr,
+		"agentctl: %s: no process baseline recorded; pane %s did not yield two consecutive identical non-amq observations within %s (%s); window %s was left in place\n",
+		role, paneID, processPollTimeout, timeout.observation(), windowID,
+	)
+	return true
 }
 
 func isDuplicateSessionRefusal(err error, session string) bool {
@@ -336,9 +397,13 @@ func (l Launcher) stampWindow(ctx context.Context, windowID tmuxx.WindowID, pane
 func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, error) {
 	deadline := l.now().Add(processPollTimeout)
 	previous := ""
+	lastProcess := ""
+	lastUnavailable := false
 	for {
 		process, err := l.tmux.ProcessName(ctx, panePID)
 		if err == nil {
+			lastProcess = process
+			lastUnavailable = false
 			if process != "amq" {
 				if process == previous {
 					return process, nil
@@ -349,12 +414,14 @@ func (l Launcher) processBaseline(ctx context.Context, panePID int) (string, err
 			}
 		} else {
 			previous = ""
+			lastProcess = ""
+			lastUnavailable = errors.Is(err, tmuxx.ErrProcessUnavailable)
 		}
 		if err != nil && !errors.Is(err, tmuxx.ErrProcessUnavailable) {
 			return "", err
 		}
 		if !l.now().Before(deadline) {
-			return "", fmt.Errorf("process identity did not become available within %s", processPollTimeout)
+			return "", &processSettleTimeoutError{lastProcess: lastProcess, unavailable: lastUnavailable}
 		}
 		l.sleep(processPollInterval)
 	}

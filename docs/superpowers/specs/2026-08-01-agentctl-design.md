@@ -1603,6 +1603,9 @@ Notes:
   applying the same resolution.
 - **No `remain-on-exit`, verified.** A window whose command exited disappeared entirely from `list-windows`, confirming
   §6.3: an exited agent normally reports `missing`, not `dead`.
+- **Window IDs are not reused within one tmux server lifetime, verified on tmux 3.7b (2026-08-09).**
+  `hack/probe-3-ids.sh` created window `@5`, killed that exact ID, then created window `@6`; the probe fails if the
+  second ID equals the first.
 - Ambiguity is a first-class test case: two windows sharing a role name must fail closed, not resolve (§13.5).
 
 ### 13.5 Ambiguous roles

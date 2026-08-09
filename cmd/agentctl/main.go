@@ -35,13 +35,14 @@ const (
 	exitTmux              = 6
 	exitMissingExecutable = 7
 	exitLaunch            = 8
+	exitLaunchUnproven    = 9
 )
 
 var globalUsage = `Usage: agentctl COMMAND [OPTIONS]
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate one absent role window in a managed fleet
+  relaunch  recreate an absent role or an eligible no-baseline window
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
@@ -54,8 +55,8 @@ Commands:
 var commandUsage = map[string]string{
 	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
 	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE\n\n" +
-		"Recreates a role window that is absent. It refuses whenever the role's window still exists,\n" +
-		"including a dead one, and reports whether the configuration came from the session or from flags.\n",
+		"Recreates a role window that is absent or recovers one live managed window with no process baseline when another window keeps the session alive.\n" +
+		"It refuses every other existing-window state and reports configuration provenance.\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
 	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
@@ -443,11 +444,37 @@ func confirmLaunch(
 	ctx context.Context,
 	stdout, stderr io.Writer,
 	collector statusCollector,
-	target tmuxx.Session,
+	result fleet.LaunchResult,
 ) int {
-	err := writeSelectedStatus(ctx, stdout, collector, target, false)
+	if len(result.UnprovenRoles) > 0 {
+		fmt.Fprintf(stderr,
+			"agentctl: session %q launched; %d of %d roles unproven: %s; nothing was rolled back; control commands refuse an unproven role",
+			result.Session.Name, len(result.UnprovenRoles), result.TotalRoles, strings.Join(result.UnprovenRoles, ", "),
+		)
+		if len(result.RecoverableRoles) > 0 {
+			fmt.Fprintf(stderr, "; \"agentctl relaunch ROLE\" recovers %s", strings.Join(result.RecoverableRoles, ", "))
+		}
+		recoverable := make(map[string]struct{}, len(result.RecoverableRoles))
+		for _, role := range result.RecoverableRoles {
+			recoverable[role] = struct{}{}
+		}
+		unrecorded := make([]string, 0, len(result.UnprovenRoles)-len(result.RecoverableRoles))
+		for _, role := range result.UnprovenRoles {
+			if _, ok := recoverable[role]; !ok {
+				unrecorded = append(unrecorded, role)
+			}
+		}
+		if len(unrecorded) > 0 {
+			fmt.Fprintf(stderr, "; no abandonment record was stamped for %s, which can only be recovered by recreating the fleet", strings.Join(unrecorded, ", "))
+		}
+		fmt.Fprintln(stderr)
+	}
+	err := writeSelectedStatus(ctx, stdout, collector, result.Session, false)
 	if err != nil {
-		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", target.Name, err)
+		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", result.Session.Name, err)
+	}
+	if len(result.UnprovenRoles) > 0 {
+		return exitLaunchUnproven
 	}
 	return exitOK
 }
@@ -781,6 +808,10 @@ func writeRelaunchResult(stdout io.Writer, result fleet.RelaunchResult) {
 		fmt.Fprintf(stdout, "agentctl: %s now runs in %s; the fleet's recorded directory %s is unchanged\n",
 			result.Role, result.Directory, result.StoredDirectory)
 	}
+	if result.RecoveredWindowID != "" {
+		fmt.Fprintf(stdout, "recovered: removed window %s, which carried no @agentctl_process baseline, and recreated %s\n",
+			result.RecoveredWindowID, result.Role)
+	}
 }
 
 func renderEffort(effort string) string {
@@ -800,6 +831,16 @@ func renderModel(model string) string {
 }
 
 func relaunchError(stderr io.Writer, role, usage string, err error) int {
+	code := relaunchCauseError(stderr, role, usage, err)
+	var recovered *fleet.RecoveredWindowError
+	if errors.As(err, &recovered) {
+		fmt.Fprintf(stderr, "recovered: removed window %s, which carried no @agentctl_process baseline; %s was not recreated\n",
+			recovered.WindowID, recovered.Role)
+	}
+	return code
+}
+
+func relaunchCauseError(stderr io.Writer, role, usage string, err error) int {
 	var validation *config.ValidationError
 	if errors.As(err, &validation) {
 		return usageError(stderr, err.Error(), usage)
@@ -847,7 +888,9 @@ func relaunchError(stderr io.Writer, role, usage string, err error) int {
 	}
 	var unknownRole *fleet.UnknownRoleError
 	var present *fleet.WindowPresentError
-	if errors.As(err, &unknownRole) || errors.As(err, &present) {
+	var soleWindow *fleet.SoleWindowRecoveryError
+	var unmarkedWindow *fleet.UnmarkedWindowRecoveryError
+	if errors.As(err, &unknownRole) || errors.As(err, &present) || errors.As(err, &soleWindow) || errors.As(err, &unmarkedWindow) {
 		relaunchRefusal(stderr, role, err)
 		return exitRole
 	}
@@ -909,7 +952,10 @@ func controlError(stderr io.Writer, operation, usage string, err error) int {
 	if errors.As(err, &processIdentity) {
 		switch {
 		case processIdentity.Window.Process == "":
-			controlRefusal(stderr, operation, "%s:%s has empty @agentctl_process baseline", processIdentity.Session.Name, processIdentity.Role)
+			fmt.Fprintf(stderr,
+				"agentctl: refusing to %s %s; window %s has no @agentctl_process baseline; recover the role with \"agentctl relaunch %s\"\n",
+				operation, processIdentity.Role, processIdentity.Window.ID, processIdentity.Role,
+			)
 		case processIdentity.Err != nil:
 			controlRefusal(stderr, operation, "%s:%s process identity is unavailable for pane %s: %v", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.Err)
 		default:
