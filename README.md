@@ -62,14 +62,25 @@ payloads.
 
 ## Installation
 
+Homebrew is the recommended installation path:
+
 ```sh
 brew install mnbf9rca/tap/agentctl
 ```
 
-This installs a prebuilt, signed binary and `tmux` alongside it. agentctl
-also expects `amq` and at least one agent harness (`claude`, `codex`) on
-PATH at launch time — it will tell you exactly what is missing when you run
-it.
+This installs a prebuilt, signed binary and brings in `tmux` as a dependency. Every fleet launch also requires `amq`
+and each harness named in `--roles` (`claude` or `codex`) on `PATH`; agentctl reports the exact missing executable
+before creating anything. iTerm2 is needed only for `agentctl attach`.
+
+After installing or upgrading the binary, install its embedded agent-facing skill into both harnesses' user-scope
+skill directories:
+
+```sh
+agentctl skill install
+```
+
+Run `agentctl skill status` to compare each installed copy with the binary. The installer updates files it can prove
+it owns and refuses unmanaged or modified targets unless the operator explicitly supplies `--force`.
 
 Release artifacts carry Sigstore build provenance. To verify a downloaded
 tarball:
@@ -78,23 +89,9 @@ tarball:
 gh attestation verify agentctl_<version>_darwin_arm64.tar.gz --repo mnbf9rca/agentctl
 ```
 
-To build from source instead: `make build` (requires Go), then
-`make install`.
+### Build from source
 
-## Prerequisites and installation
-
-To build agentctl, install Go and Make. To operate a fleet, install tmux, AMQ, and every harness named in `--roles`:
-
-- `tmux`
-- `amq`
-- Claude Code for `claude` roles
-- Codex CLI for `codex` roles
-- iTerm2 when using `agentctl attach`
-
-Harness and tmux behavior can change between releases. The dated versions actually exercised by the project are kept
-in the [release verification checklist](docs/release-checklist.md); they are evidence, not compatibility pins.
-
-Build, test, and install from this repository:
+Building from source requires Go and Make:
 
 ```bash
 make build
@@ -112,6 +109,9 @@ agentctl --help
 ```
 
 `PREFIX` and `DESTDIR` may be supplied to Make for packaging or a different installation prefix.
+
+Harness and tmux behavior can change between releases. The dated versions actually exercised by the project are kept
+in the [release verification checklist](docs/release-checklist.md); they are evidence, not compatibility pins.
 
 ## Quickstart: launch an eight-role fleet
 
