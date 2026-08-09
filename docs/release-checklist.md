@@ -22,6 +22,11 @@ prompt exactly `y` or `n`; empty input and other text re-prompt. `n` is a named
 failing operator claim, not a way to skip a judgment, and the verifier fails
 closed after attempting teardown.
 
+Standing release-prep rule: before every live release run, execute once every
+checklist mechanism whose implementation changed since the previous release
+and record the result. This is the execution-audit practice established by
+[issue #177](https://github.com/mnbf9rca/agentctl/issues/177).
+
 ## Part A — Start the verifier
 
 Resolve the release version and prove that the embedded skill documents that
@@ -52,6 +57,10 @@ release_tmux_tmpdir="$(mktemp -d /tmp/agentctl-release-tmux.XXXXXX)"
   bash hack/release-verify.sh
 )
 ```
+
+The no-server wrapper leg introduced for #147 was executed and released in
+the [final #162 reviewer gate](https://github.com/mnbf9rca/agentctl/pull/162#issuecomment-5229600302).
+
 - [ ] The verifier printed the default-server connect-ENOENT observation,
       created its uniquely named wrapper-owned keeper session, and later
       printed the keeper cleanup pass
@@ -201,6 +210,10 @@ harnesses can reach the operator's login keychain through the link (per-item
 ACLs still apply). The link copies no secret; refresh writes reach the real
 login keychain as they do for the operator's daily harnesses.
 
+The Part C wrapper's current authentication, consent, launch, and cleanup legs
+introduced for #148 were executed in the [#178 audit and final
+re-gate](https://github.com/mnbf9rca/agentctl/pull/178#issuecomment-5230449087).
+
 If the Claude link is declined or its fixed source is absent, the verifier
 offers guided Claude sign-in instead. On consent it creates a mode-`0700`
 `$TEMP_HOME/Library/Keychains` and an empty `login.keychain-db` there with
@@ -336,6 +349,30 @@ gh pr create --base release --head main \
   --title "Release v$(hack/next-version.sh)" \
   --body-file .github/PULL_REQUEST_TEMPLATE/release-promotion.md
 ```
+
+If this normal `main` to `release` PR conflicts only because `release` carries
+a prior promotion-only commit, preserve both histories with the fallback used
+for the 0.2.0 handoff. First confirm that `release` holds no unique content;
+then start from current `origin/main` and merge `origin/release` with the
+`ours` strategy:
+
+```bash
+git fetch origin
+git diff --stat origin/main...origin/release
+version="$(hack/next-version.sh)"
+git switch --create "promote/$version" origin/main
+git merge --strategy ours --no-ff origin/release -m "Promote v$version"
+git push -u origin "promote/$version"
+gh pr create --base release --head "promote/$version" \
+  --title "Release v$version" \
+  --body-file .github/PULL_REQUEST_TEMPLATE/release-promotion.md
+```
+
+The pre-merge three-dot diff must print no paths. If it reports anything,
+stop: `release` carries unique content that an `ours` merge would discard.
+Merge the fallback PR with a merge commit; do not squash or rebase it. Do not
+use the fallback when the normal promotion PR is mergeable.
+
 - [ ] The correct box is ticked — "Checklist run" (Parts A–C passed, evidence
       committed on main) or "Checklist not required"
 - [ ] The `Version:` line is filled in with `hack/next-version.sh`'s output
