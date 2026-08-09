@@ -393,7 +393,14 @@ Three mappings are deliberate and easy to get backwards:
   (§6.2 step 5, exit 5), but they are different facts and the operator's response differs. `unexpected-process` says a
   proven pane is now occupied by something else — an unexplained event, to be investigated, and `relaunch` refuses it
   (§6.8). `no-baseline` says agentctl never proved anything about this pane, usually because the launch poll timed out
-  (§8) — nothing is unexplained, and `relaunch` recovers it. Rendering both as `unexpected-process` asserted an event
+  (§8) — nothing is unexplained, and `relaunch` recovers it when an abandonment record is present (§6.8). That record
+  is deliberately **not** a status state of its own: every state here derives from a structural fact — window, pane,
+  process — whereas `@agentctl_unproven` is advisory metadata (SECURITY.md residual 4). `relaunch` *acting* on
+  advisory metadata is already how it works; `status` *asserting* it as a state would promote a forgeable option into
+  a factual claim, and it is transient for a settling window, so it would flip within seconds of launch and invite
+  acting on a snapshot of an operation still in progress. The distinction is reported where it is actionable — in
+  `relaunch`'s refusal, which names what is missing and gives the remedy.
+  Rendering both as `unexpected-process` asserted an event
   ("the process changed") that did not occur in the second case. No §13.2 row 14 probe is issued for a `no-baseline`
   row: the state is decided from metadata already in hand, so the probe-is-last-resort rule above is unchanged, and a
   `ps` tool failure cannot fail a status listing on behalf of a row whose state was already settled.
@@ -669,7 +676,34 @@ means before any *window option*, never before any window.
 When the baseline poll times out (§8), the final `@agentctl_process` call is **not issued**. The option is left unset,
 never set to an empty string: the two are indistinguishable on read (§13.3), so the distinction exists only in the
 recorded call sequence, and that is where it is asserted. Every preceding window option is stamped in the same order —
-the timeout removes the last element of the sequence and reorders nothing.
+the timeout replaces the last element of the sequence and reorders nothing.
+
+**In its place, the timeout branch stamps `@agentctl_unproven=1`** as that role's final per-window call. This is the
+*abandonment record*: launch completed its attempt on this role, gave up, and left the window standing. It exists
+because recoverability must be a **positive observation, not an absence**.
+
+The absence is not usable evidence, and the reason is timing. Between the option loop and the `@agentctl_process`
+call, a window is fully stamped with an empty baseline for as long as the poll runs — up to §8's 5s. That state is
+byte-identical to a retained post-timeout window, so a concurrent `relaunch` reading metadata alone cannot tell a role
+that was abandoned from one that is still settling. Acting on the absence lets it destroy a window mid-launch, and the
+consequence is not symmetric with the harm it was meant to fix: if the kill lands after the stable pair but before the
+`@agentctl_process` call, that stamp fails as an ordinary option-stamping failure, which is *not* the §6.6 timeout
+carve-out — so `launch` rolls back the whole session and destroys the peer roles the carve-out exists to protect. A
+kill during the poll is milder but still false: `launch` reaches its deadline and reports that the window "was left in
+place" when it no longer exists (§1.1).
+
+This is §1.1 applied to a precondition rather than to an output: **never act on the absence of evidence when presence
+is obtainable.** A record of a decision that *completed* is what makes the state readable; a flag asserting work is
+*in progress* would not, because an interrupted launch leaves a stale one indistinguishable from a live one, moving
+the ambiguity instead of closing it.
+
+**A failed marker stamp is reported, never fatal, and never rolled back**, exactly as §13.2 row 5a's failed clear is,
+and for the same reason: rolling back a fleet because an advisory stamp failed would be the harm §6.6's carve-out
+removes, one level further out. The role is then unproven *and* unmarked, so §6.8 cannot recover it, and §6.6's
+per-role line says so rather than leaving the operator to discover it when `relaunch` refuses.
+
+`relaunch` stamps no marker on its own creations: its settle-timeout rolls back the window it created (§8), so no
+abandoned window survives the invocation to be recovered.
 
 The stamped window `@agentctl_managed` marker is advisory metadata and remains part of that fixed stamping contract;
 it is not consumed as a window-ownership gate. The stored `@agentctl_role` is the sole window-ownership evidence.
@@ -763,7 +797,32 @@ After every role has been attempted, `launch` writes exactly one summary line, l
 order:
 
 ```text
-agentctl: session "S" launched; 1 of 4 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role until "agentctl relaunch ROLE" recovers it
+agentctl: session "S" launched; 1 of 4 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role; "agentctl relaunch ROLE" recovers planner
+```
+
+The trailing remedy is **two conditional clauses, not a fixed sentence**, because a role whose abandonment record could
+not be stamped has no `relaunch` remedy (§6.5) and a summary asserting one would be false for exactly that role. After
+the fixed prefix, emit each clause only when its own set is non-empty:
+
+- roles carrying an abandonment record → `; "agentctl relaunch ROLE" recovers LIST`
+- roles without one → `; no abandonment record was stamped for LIST, which can only be recovered by recreating the fleet`
+
+So a mixed launch reports both, naming which roles fall where:
+
+```text
+agentctl: session "S" launched; 2 of 4 roles unproven: planner, worker; nothing was rolled back; control commands refuse an unproven role; "agentctl relaunch ROLE" recovers planner; no abandonment record was stamped for worker, which can only be recovered by recreating the fleet
+```
+
+and a launch where every marker stamp failed reports only the second clause. This keeps the summary inside its own
+remit: §6.6 already holds that the per-role line is the observation and the summary is the claim about the fleet, with
+neither implying the other — a fixed remedy clause quietly broke that by asserting a per-role fact the per-role line
+had just contradicted.
+
+If the abandonment record (§6.5) could not be stamped for a role, its per-role line says so, because that role cannot
+be recovered by `relaunch` (§6.8) and the operator would otherwise learn it only on being refused:
+
+```text
+agentctl: ROLE: no process baseline recorded; pane P did not yield two consecutive identical non-amq observations within 5s (OBSERVATION); window W was left in place, but its abandonment record could not be stamped (CAUSE), so "agentctl relaunch ROLE" cannot recover it
 ```
 
 The count phrasing takes no plural form — `1 of 4 roles unproven` and `3 of 4 roles unproven` are the same shape — so
@@ -894,8 +953,8 @@ reporting the provenance of every field is what keeps an override from silently 
    invocation cwd — relaunching one role somewhere the rest of the fleet does not live is exactly the silent
    divergence this refusal exists to prevent.
 4. Window precondition. **Zero** windows match ROLE → proceed. **Exactly one** window matches, its state by §6.3
-   precedence is `no-baseline`, **and the session contains at least one other window** → this is the **recovery
-   case**: record that window ID and continue. No destruction happens at this step. Any other observation → exit 4,
+   precedence is `no-baseline`, **it carries `@agentctl_unproven=1`**, **and the session contains at least one other
+   window** → this is the **recovery case**: record that window ID and continue. No destruction happens at this step. Any other observation → exit 4,
    rendering the observed state by §6.3 precedence and every matching window ID (§13.5).
 
    **The sole-window case is refused, not recovered.** Killing a session's only window destroys the session (§8), so a
@@ -925,6 +984,30 @@ reporting the provenance of every field is what keeps an override from silently 
 
    Exit **4**, with every other present-window refusal in this step. Not exit 3: the session is not defective, it is
    single-role, and exit 3 would assert a state error that did not occur.
+
+   **A `no-baseline` window without the abandonment record is refused too**, and for a stronger reason than the
+   sole-window case: agentctl holds no evidence that anything finished with it. It may be settling right now inside a
+   concurrent `launch` (§6.5), or it may be the husk of a launch that was killed mid-poll. Those are indistinguishable
+   from metadata, and only one of them is safe to destroy, so both are refused. The message names what is missing
+   rather than restating the state:
+
+   ```text
+   agentctl: refusing to relaunch planner; window @7 has no process baseline and no abandonment record, so agentctl cannot tell an abandoned role from one still starting. If no launch is in progress, recreate the fleet:
+     agentctl kill --session alpha
+     agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work
+   ```
+
+   The remedy is reconstructed exactly as the sole-window refusal reconstructs it, and under the same rules — valueless
+   flags omitted, the whole block dropped rather than rendered wrong if a field cannot be recovered. The two
+   irrecoverable cases deliberately share one shape and one remedy instead of being two separate dead ends.
+
+   A window carrying the marker **and** a valid baseline is not recoverable either: a present baseline means the
+   ordinary verification path applies, so it never reaches `no-baseline` in §6.3's precedence. No extra rule is
+   needed, and fail-closed is the right default for a combination agentctl never writes.
+
+   Sessions launched by a pre-0.4.0 binary carry no marker, which is correct rather than a migration gap: those
+   launches rolled back on timeout, so an empty baseline there can only come from tampering, and tampering must not
+   be recoverable.
 
    The precedence ordering does the discrimination, and three of its consequences are load-bearing:
 
@@ -1282,7 +1365,7 @@ Consequently:
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and, when observations remain unsettled through the timeout boundary, stamps no `@agentctl_process`, issues no kill, and lets the remaining roles continue (§6.6) while `relaunch` still rolls back its own created window (§8); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and, when observations remain unsettled through the timeout boundary, stamps no `@agentctl_process`, stamps `@agentctl_unproven` as that role's final call instead, issues no kill, and lets the remaining roles continue (§6.6) while `relaunch` still rolls back its own created window (§8); a `no-baseline` window without that record is refused by recovery with no kill issued; equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
   renders `unmanaged`; alive-pane-with-unavailable-identity renders `unexpected-process` and an empty baseline renders `no-baseline` (§6.3), with no process probe issued for the latter; zero
   panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
