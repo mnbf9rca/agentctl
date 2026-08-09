@@ -1166,7 +1166,14 @@ order. An override never moves a role — it changes that role's fields and leav
 
 #### Strictness, in decode order
 
-1. **Open the file, then verify the handle** — `os.Open`, then `Stat` on the descriptor. Never `Stat` the path and then
+1. **Open the file non-blockingly, then verify the handle** — `os.OpenFile` with `O_RDONLY|O_NONBLOCK`, then `Stat` on
+   the descriptor. The flag is load-bearing, not defensive: a plain `O_RDONLY` open of a FIFO with no writer **blocks
+   inside `open(2)` itself**, before any descriptor exists, so the refusal in rule 2 could never run and `launch` would
+   hang exactly where that rule promises it cannot. `O_RDONLY|O_NONBLOCK` returns immediately on a FIFO regardless of
+   writers, which is what gives rule 2 a descriptor to refuse. Verified on this platform: a plain open of a writerless
+   FIFO did not return, the non-blocking open returned at once and `Stat` reported `ModeNamedPipe`, and the same flags
+   on a regular file opened and read normally. `O_NONBLOCK` is inert for regular-file reads, so once rule 2 has
+   accepted the descriptor the remaining steps are unaffected and nothing clears the flag. Never `Stat` the path and then
    read the path: checking one object and reading another is a time-of-check/time-of-use gap, and checking the
    descriptor that will actually be read has none.
 2. **Regular files only.** A directory, FIFO, device or socket is refused, naming what it is. A template is a regular
