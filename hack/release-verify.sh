@@ -123,6 +123,27 @@ checkpoint() {
 PART_B_TOP=''
 PART_B_SESSION=''
 PART_B_SESSION_OWNED=0
+PART_B_KEEPER_SESSION=''
+PART_B_KEEPER_OWNED=0
+PART_B_PRECHECK_OBSERVATION=''
+
+# This calls bare tmux; cleanup order must restore Part C's shimmed PATH first.
+part_b_keeper_teardown() {
+  local kill_status=0
+  if [ "$PART_B_KEEPER_OWNED" -eq 0 ]; then
+    return 0
+  fi
+  if tmux kill-session -t "=$PART_B_KEEPER_SESSION"; then
+    printf 'PART B KEEPER CLEANUP PASS (wrapper-owned session %s removed)\n' "$PART_B_KEEPER_SESSION"
+    PART_B_KEEPER_OWNED=0
+    return 0
+  else
+    kill_status=$?
+  fi
+  printf 'PART B KEEPER CLEANUP FAIL (wrapper-owned session %s kill exited %s)\n' "$PART_B_KEEPER_SESSION" "$kill_status" >&2
+  return 1
+}
+
 part_b_teardown() {
   local kill_status=0
   if [ "$PART_B_SESSION_OWNED" -eq 0 ]; then
@@ -280,6 +301,10 @@ cleanup_exit_trap() {
     printf 'release-verify: Part B cleanup failed during exit\n' >&2
     cleanup_status=1
   fi
+  if ! part_b_keeper_teardown; then
+    printf 'release-verify: Part B keeper cleanup failed during exit\n' >&2
+    cleanup_status=1
+  fi
   final_status=$original_status
   if [ "$cleanup_status" -ne 0 ]; then
     final_status=1
@@ -305,12 +330,19 @@ session_absent() {
       grep -qF "session \"$session_name\" not found" "$stderr_file" || return 2
       ;;
     6)
+      # Keep the pre-#147 exited-server contract; the keeper path is scoped to connect ENOENT.
       grep -qF 'no server running' "$stderr_file" || return 2
       ;;
     *)
       return 2
       ;;
   esac
+}
+
+default_tmux_server_connect_enoent() {
+  local stderr_file=$1
+  # The path is deliberately unconstrained because TMUX_TMPDIR relocates the default socket.
+  grep -Eq '^agentctl: tmux list sessions: exit status 1: error connecting to .+ \(No such file or directory\)$' "$stderr_file"
 }
 
 valid_tmux_id() {
@@ -407,6 +439,13 @@ render_results() {
       printf -- '- Part A: %s\n' "$part_a_result"
       printf -- '- Part B: %s\n' "$(field part_b_result "$metadata")"
       printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
+      part_b_precheck_observation=$(field part_b_precheck_observation "$metadata")
+      if [ -n "$part_b_precheck_observation" ]; then
+        part_b_keeper_session=$(field part_b_keeper_session "$metadata")
+        [ -n "$part_b_keeper_session" ] || die 'live metadata records a no-server pre-check without its keeper session'
+        printf -- '- Part B pre-check: %s\n' "$part_b_precheck_observation"
+        printf -- '- Part B keeper: created and removed wrapper-owned session `%s`\n' "$part_b_keeper_session"
+      fi
     fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
     if [ -n "$part_a_result" ]; then
@@ -787,8 +826,32 @@ else
     if [ "$absence_status" -eq 1 ]; then
       die "session $LIVE_SESSION already exists; refusing to use or kill it"
     fi
-    cat "$STATUS_STDERR" >&2
-    die "could not prove session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
+    if [ "$STATUS_EXIT" -eq 6 ] && default_tmux_server_connect_enoent "$STATUS_STDERR"; then
+      cat "$STATUS_STDERR" >&2
+      PART_B_PRECHECK_OBSERVATION='default tmux server absent (connect ENOENT)'
+      printf 'PART B PRECHECK OBSERVED (default tmux server absent: connect ENOENT)\n'
+      PART_B_KEEPER_SESSION="agentctl-release-verify-keeper-$$"
+      if ! tmux new-session -d -s "$PART_B_KEEPER_SESSION" -n keeper -- 'exec sleep 86400'; then
+        die "could not create wrapper-owned tmux keeper session $PART_B_KEEPER_SESSION"
+      fi
+      PART_B_KEEPER_OWNED=1
+      trap cleanup_exit_trap EXIT
+      printf 'PART B KEEPER CREATED (wrapper-owned session %s keeps the default tmux server available)\n' "$PART_B_KEEPER_SESSION"
+
+      if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
+        :
+      else
+        absence_status=$?
+        if [ "$absence_status" -eq 1 ]; then
+          die "session $LIVE_SESSION appeared after keeper creation; refusing to use or kill it"
+        fi
+        cat "$STATUS_STDERR" >&2
+        die "could not prove session $LIVE_SESSION is absent after keeper creation (status exit $STATUS_EXIT)"
+      fi
+    else
+      cat "$STATUS_STDERR" >&2
+      die "could not prove session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
+    fi
   fi
 
   step_start B.1 'launch release-candidate fleet'
@@ -1287,6 +1350,10 @@ EOF
     PART_C_RESULT='PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3'
   fi
 
+  if ! part_b_keeper_teardown; then
+    die 'Part B keeper teardown failed'
+  fi
+
   {
     printf 'date_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'mode=verify-live\n'
@@ -1296,6 +1363,8 @@ EOF
     printf 'part_a_result=%s\n' "$PART_A_RESULT"
     printf 'part_b_result=%s\n' "$PART_B_RESULT"
     printf 'part_c_result=%s\n' "$PART_C_RESULT"
+    printf 'part_b_precheck_observation=%s\n' "$PART_B_PRECHECK_OBSERVATION"
+    printf 'part_b_keeper_session=%s\n' "$PART_B_KEEPER_SESSION"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
     printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"

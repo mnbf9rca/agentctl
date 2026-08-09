@@ -242,6 +242,8 @@ func newLiveFixture(t *testing.T) liveFixture {
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
 	agentctlRoleB := filepath.Join(t.TempDir(), "role-b")
 	agentctlRelaunched := filepath.Join(t.TempDir(), "relaunched")
+	keeperOwned := filepath.Join(t.TempDir(), "keeper-owned")
+	keeperKilled := filepath.Join(t.TempDir(), "keeper-killed")
 	pgrepCalls := filepath.Join(t.TempDir(), "pgrep-calls")
 	operatorHome := t.TempDir()
 	for _, path := range []string{filepath.Join(operatorHome, ".claude"), filepath.Join(operatorHome, ".codex")} {
@@ -270,6 +272,10 @@ case "$1" in
     echo 'agentctl version test'
     ;;
   status)
+    if [ "${AGENTCTL_TEST_NO_SERVER_PRECHECK:-0}" = 1 ] && [ ! -e "$AGENTCTL_TEST_KEEPER_OWNED" ] && [ ! -e "$AGENTCTL_TEST_OWNED" ] && [ ! -e "$AGENTCTL_TEST_KILLED" ]; then
+      echo 'agentctl: tmux list sessions: exit status 1: error connecting to /private/tmp/tmux-501/default (No such file or directory)' >&2
+      exit 6
+    fi
     if [ "${AGENTCTL_TEST_COLLISION:-0}" = 1 ] && [ ! -e "$AGENTCTL_TEST_OWNED" ] && [ ! -e "$AGENTCTL_TEST_KILLED" ]; then
       echo 'relverify exists'
       exit 0
@@ -417,6 +423,28 @@ case "$1" in
   list-sessions)
     [ -e "$AGENTCTL_TEST_OWNED" ] && printf '$4\trelverify\n'
     ;;
+  new-session)
+    [ "$2" = -d ] && [ "$3" = -s ] && [ "$5" = -n ] && [ "$6" = keeper ] && [ "$7" = -- ] && [ "$8" = 'exec sleep 86400' ] || exit 65
+    case "$4" in
+      agentctl-release-verify-keeper-[0-9]*) ;;
+      *) exit 65 ;;
+    esac
+    if [ "${AGENTCTL_TEST_KEEPER_CREATE_CODE:-0}" -ne 0 ]; then
+      echo 'simulated keeper creation failure' >&2
+      exit "$AGENTCTL_TEST_KEEPER_CREATE_CODE"
+    fi
+    touch "$AGENTCTL_TEST_KEEPER_OWNED"
+    ;;
+  kill-session)
+    [ "$2" = -t ] || exit 65
+    case "$3" in
+      =agentctl-release-verify-keeper-[0-9]*) ;;
+      *) exit 65 ;;
+    esac
+    [ -e "$AGENTCTL_TEST_KEEPER_OWNED" ] || exit 66
+    rm -f "$AGENTCTL_TEST_KEEPER_OWNED"
+    touch "$AGENTCTL_TEST_KEEPER_KILLED"
+    ;;
   list-windows)
     if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
       if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
@@ -515,6 +543,8 @@ esac
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
+	t.Setenv("AGENTCTL_TEST_KEEPER_OWNED", keeperOwned)
+	t.Setenv("AGENTCTL_TEST_KEEPER_KILLED", keeperKilled)
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILLED", filepath.Join(t.TempDir(), "skill-killed"))
 	t.Setenv("AGENTCTL_TEST_PART_C_KILL_CALLS", filepath.Join(t.TempDir(), "skill-kill-calls"))
@@ -1432,6 +1462,108 @@ func TestLiveVerificationRefusesExistingSessionWithoutKilling(t *testing.T) {
 	calls := strings.Join(fixture.calls(t), "\n")
 	if strings.Contains(calls, "launch --session relverify") || strings.Contains(calls, "kill --session relverify") {
 		t.Fatalf("existing session was launched or killed:\n%s", calls)
+	}
+}
+
+func TestLiveVerificationCreatesKeeperWhenDefaultServerIsAbsent(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 14), "AGENTCTL_TEST_NO_SERVER_PRECHECK=1")
+	if err != nil {
+		t.Fatalf("no-server verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"error connecting to /private/tmp/tmux-501/default (No such file or directory)",
+		"PART B PRECHECK OBSERVED (default tmux server absent: connect ENOENT)",
+		"PART B KEEPER CREATED (wrapper-owned session agentctl-release-verify-keeper-",
+		"PART B KEEPER CLEANUP PASS (wrapper-owned session agentctl-release-verify-keeper-",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+
+	var createCall, killCall string
+	for _, call := range fixture.tmuxCalls(t) {
+		switch {
+		case strings.HasPrefix(call, "new-session -d -s agentctl-release-verify-keeper-"):
+			createCall = call
+		case strings.HasPrefix(call, "kill-session -t =agentctl-release-verify-keeper-"):
+			killCall = call
+		}
+	}
+	if createCall == "" || !strings.HasSuffix(createCall, " -n keeper -- exec sleep 86400") {
+		t.Fatalf("keeper create call missing or malformed:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
+	}
+	createdName := strings.TrimSuffix(strings.TrimPrefix(createCall, "new-session -d -s "), " -n keeper -- exec sleep 86400")
+	if killCall != "kill-session -t ="+createdName {
+		t.Fatalf("keeper cleanup targeted %q, want exact created session %q", killCall, createdName)
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("keeper survived verification: %v", statErr)
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); statErr != nil {
+		t.Fatalf("keeper teardown was not observed: %v", statErr)
+	}
+
+	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
+	for _, want := range []string{
+		"- Part B pre-check: default tmux server absent (connect ENOENT)",
+		"- Part B keeper: created and removed wrapper-owned session `" + createdName + "`",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("notes missing %q:\n%s", want, notes)
+		}
+	}
+}
+
+func TestLiveVerificationExitTrapRemovesKeeper(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, "",
+		"AGENTCTL_TEST_NO_SERVER_PRECHECK=1",
+		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+	)
+	if err == nil {
+		t.Fatalf("unexpected Part B exit returned success:\n%s", output)
+	}
+	for _, want := range []string{
+		"simulated unexpected Part B exit",
+		"PART B CLEANUP PASS (relverify kill exited 0)",
+		"PART B KEEPER CLEANUP PASS (wrapper-owned session agentctl-release-verify-keeper-",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("trap output missing %q:\n%s", want, output)
+		}
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("keeper survived trapped exit: %v", statErr)
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); statErr != nil {
+		t.Fatalf("keeper trap teardown was not observed: %v", statErr)
+	}
+}
+
+func TestLiveVerificationNeverKillsKeeperItDidNotCreate(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, "",
+		"AGENTCTL_TEST_NO_SERVER_PRECHECK=1",
+		"AGENTCTL_TEST_KEEPER_CREATE_CODE=17",
+	)
+	if err == nil {
+		t.Fatalf("keeper creation failure returned success:\n%s", output)
+	}
+	if !strings.Contains(output, "could not create wrapper-owned tmux keeper session agentctl-release-verify-keeper-") {
+		t.Fatalf("keeper creation failure was not reported:\n%s", output)
+	}
+	for _, call := range fixture.tmuxCalls(t) {
+		if strings.HasPrefix(call, "kill-session ") {
+			t.Fatalf("wrapper killed a keeper it did not create: %q", call)
+		}
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed keeper creation left an ownership marker: %v", statErr)
+	}
+	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed keeper creation recorded a false teardown: %v", statErr)
 	}
 }
 
