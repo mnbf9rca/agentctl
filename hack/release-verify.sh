@@ -127,6 +127,7 @@ PART_B_KEEPER_SESSION=''
 PART_B_KEEPER_OWNED=0
 PART_B_PRECHECK_OBSERVATION=''
 
+# This calls bare tmux; cleanup order must restore Part C's shimmed PATH first.
 part_b_keeper_teardown() {
   local kill_status=0
   if [ "$PART_B_KEEPER_OWNED" -eq 0 ]; then
@@ -329,6 +330,7 @@ session_absent() {
       grep -qF "session \"$session_name\" not found" "$stderr_file" || return 2
       ;;
     6)
+      # Keep the pre-#147 exited-server contract; the keeper path is scoped to connect ENOENT.
       grep -qF 'no server running' "$stderr_file" || return 2
       ;;
     *)
@@ -339,6 +341,7 @@ session_absent() {
 
 default_tmux_server_connect_enoent() {
   local stderr_file=$1
+  # The path is deliberately unconstrained because TMUX_TMPDIR relocates the default socket.
   grep -Eq '^agentctl: tmux list sessions: exit status 1: error connecting to .+ \(No such file or directory\)$' "$stderr_file"
 }
 

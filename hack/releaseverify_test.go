@@ -272,10 +272,10 @@ case "$1" in
     echo 'agentctl version test'
     ;;
   status)
-	if [ "${AGENTCTL_TEST_NO_SERVER_PRECHECK:-0}" = 1 ] && [ ! -e "$AGENTCTL_TEST_KEEPER_OWNED" ] && [ ! -e "$AGENTCTL_TEST_OWNED" ] && [ ! -e "$AGENTCTL_TEST_KILLED" ]; then
-	  echo 'agentctl: tmux list sessions: exit status 1: error connecting to /private/tmp/tmux-501/default (No such file or directory)' >&2
-	  exit 6
-	fi
+    if [ "${AGENTCTL_TEST_NO_SERVER_PRECHECK:-0}" = 1 ] && [ ! -e "$AGENTCTL_TEST_KEEPER_OWNED" ] && [ ! -e "$AGENTCTL_TEST_OWNED" ] && [ ! -e "$AGENTCTL_TEST_KILLED" ]; then
+      echo 'agentctl: tmux list sessions: exit status 1: error connecting to /private/tmp/tmux-501/default (No such file or directory)' >&2
+      exit 6
+    fi
     if [ "${AGENTCTL_TEST_COLLISION:-0}" = 1 ] && [ ! -e "$AGENTCTL_TEST_OWNED" ] && [ ! -e "$AGENTCTL_TEST_KILLED" ]; then
       echo 'relverify exists'
       exit 0
@@ -423,28 +423,28 @@ case "$1" in
   list-sessions)
     [ -e "$AGENTCTL_TEST_OWNED" ] && printf '$4\trelverify\n'
     ;;
-	new-session)
-	  [ "$2" = -d ] && [ "$3" = -s ] && [ "$5" = -n ] && [ "$6" = keeper ] && [ "$7" = -- ] && [ "$8" = 'exec sleep 86400' ] || exit 65
-	  case "$4" in
-	    agentctl-release-verify-keeper-[0-9]*) ;;
-	    *) exit 65 ;;
-	  esac
-	  if [ "${AGENTCTL_TEST_KEEPER_CREATE_CODE:-0}" -ne 0 ]; then
-	    echo 'simulated keeper creation failure' >&2
-	    exit "$AGENTCTL_TEST_KEEPER_CREATE_CODE"
-	  fi
-	  touch "$AGENTCTL_TEST_KEEPER_OWNED"
-	  ;;
-	kill-session)
-	  [ "$2" = -t ] || exit 65
-	  case "$3" in
-	    =agentctl-release-verify-keeper-[0-9]*) ;;
-	    *) exit 65 ;;
-	  esac
-	  [ -e "$AGENTCTL_TEST_KEEPER_OWNED" ] || exit 66
-	  rm -f "$AGENTCTL_TEST_KEEPER_OWNED"
-	  touch "$AGENTCTL_TEST_KEEPER_KILLED"
-	  ;;
+  new-session)
+    [ "$2" = -d ] && [ "$3" = -s ] && [ "$5" = -n ] && [ "$6" = keeper ] && [ "$7" = -- ] && [ "$8" = 'exec sleep 86400' ] || exit 65
+    case "$4" in
+      agentctl-release-verify-keeper-[0-9]*) ;;
+      *) exit 65 ;;
+    esac
+    if [ "${AGENTCTL_TEST_KEEPER_CREATE_CODE:-0}" -ne 0 ]; then
+      echo 'simulated keeper creation failure' >&2
+      exit "$AGENTCTL_TEST_KEEPER_CREATE_CODE"
+    fi
+    touch "$AGENTCTL_TEST_KEEPER_OWNED"
+    ;;
+  kill-session)
+    [ "$2" = -t ] || exit 65
+    case "$3" in
+      =agentctl-release-verify-keeper-[0-9]*) ;;
+      *) exit 65 ;;
+    esac
+    [ -e "$AGENTCTL_TEST_KEEPER_OWNED" ] || exit 66
+    rm -f "$AGENTCTL_TEST_KEEPER_OWNED"
+    touch "$AGENTCTL_TEST_KEEPER_KILLED"
+    ;;
   list-windows)
     if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
       if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then

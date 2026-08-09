@@ -34,11 +34,23 @@ hack/check-skill-version.sh "$release_version"
 
 - [ ] The skill version check exited 0 and printed no mismatch or missing-version error
 
-Start the default interactive walkthrough:
+Start the default interactive walkthrough with a fresh, isolated default tmux
+socket directory. This deliberately exercises the connect-ENOENT path without
+touching the operator's live default server; the setting is inherited by the
+verifier, agentctl, and their tmux children. The subshell trap removes only the
+temporary directory created for this run:
 
 ```bash
-bash hack/release-verify.sh
+release_tmux_tmpdir="$(mktemp -d /tmp/agentctl-release-tmux.XXXXXX)"
+(
+  trap 'rm -rf -- "$release_tmux_tmpdir"' EXIT
+  export TMUX_TMPDIR="$release_tmux_tmpdir"
+  bash hack/release-verify.sh
+)
 ```
+- [ ] The verifier printed the default-server connect-ENOENT observation,
+      created its uniquely named wrapper-owned keeper session, and later
+      printed the keeper cleanup pass
 - [ ] `PROBES PASS` printed; all four probes completed and no throwaway server survived
 - [ ] The verifier ran `./bin/agentctl launch --session relverify --roles
       a:claude,b:codex --efforts b:high` successfully
