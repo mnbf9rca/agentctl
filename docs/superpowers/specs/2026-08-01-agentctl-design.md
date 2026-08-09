@@ -26,6 +26,32 @@ The rules in those sections are the operative ones; this paragraph is why they a
 output is designed and no specific rule covers it, this is the one to apply — and the test is not "is this message
 reasonable" but "is every claim in it true, and is anything true being withheld".
 
+### 1.2 Principle: return to the prior state where one exists, and never destroy peers
+
+An invocation may destroy what it created, and only in order to return the system to the state it found. Where there is
+no prior state to return to, it destroys nothing and reports instead. Nothing an invocation did not create is ever
+destroyed to tidy up after a failure.
+
+Like §1.1, this was decided several times before it was written down, and the decisions look unrelated until the rule
+is named:
+
+| Where it bites | What the rule produces |
+|---|---|
+| §6.6, before ownership | `new-session` returned no parseable session ID, so agentctl created nothing and destroys nothing — the session is left for the operator to see and remove (exit 6). |
+| §6.6, after ownership | The session exists because this invocation made it, and no fleet existed before, so rollback returns to nothing: kill the typed session ID (exit 8). |
+| §6.6, settle timeout | There is no prior state to return to and the peers are not this invocation's to destroy, so `launch` retains the fleet and reports the unproven role (exit 9). |
+| §6.8 step 9 | `relaunch` removes only the window it created, which restores the fleet exactly as it found it (exit 8). |
+| §8 | The same timeout produces retention in `launch` and rollback in `relaunch`, because only one of them has a prior state. |
+| §13.2 row 11a | `kill-window` is exposed only for windows this invocation created — plus §6.8 step 5a's bounded recovery, the single deliberate exception, which is why that exception is stated as a change rather than absorbed. |
+
+The two principles answer different questions and are both required. §1.1 governs what an output may *claim*; this one
+governs what an invocation may *destroy*. A rollback that is honestly reported can still be the wrong act, and a
+retention that is silently performed can still be a lie.
+
+When a new failure path is designed, the test is: *what existed before this invocation ran, and does this act return
+the system there?* If the answer is "it destroys something that predates me", the act is wrong regardless of how
+convenient the cleanup would be.
+
 ## 2. Decisions resolved in the design session
 
 These extend or refine `brief.md`:
@@ -677,7 +703,8 @@ session must exist to hold it, so it lands with the other session options rather
 
 ### 6.6 Launch failure, ownership, and exact messages
 
-Rollback is gated on **ownership**, and ownership begins at exactly one instant: when `new-session` returns output that
+This section is §1.2 applied to `launch`. Rollback is gated on **ownership**, and ownership begins at exactly one
+instant: when `new-session` returns output that
 parses into a session ID. Before that, agentctl owns nothing and destroys nothing. After it, the typed ID is the only
 thing rollback ever targets — a session is never killed by name (§13.1).
 
@@ -919,7 +946,8 @@ reporting the provenance of every field is what keeps an override from silently 
    ```
 
    Same shape and same rules as §6.6, including that `CAUSE` is mandatory in both variants. Exit 8's meaning therefore
-   extends from "the session this invocation created was removed" to "**what this invocation created** was removed".
+   extends from "the session this invocation created was removed" to "**what this invocation created** was removed" —
+   §1.2's rule stated as an exit code.
 
    Where a recovery kill was performed in step 5a, every terminal message of the invocation — success, post-create
    conflict, and rollback alike — also states that window W was removed. agentctl destroyed it, so §1.1 requires the
@@ -969,9 +997,9 @@ No name pattern-matching. Identity is established by observation at launch and v
   an observed value of literal `amq`. The `amq` comparison is against the exact trimmed value — the bare name, not a
   path — which holds because the window command invokes `amq` by bare name (§13.7). Neither condition is a tmux
   failure; both simply mean "not yet". Any other process-observation error fails immediately. If no stable pair has
-  been accepted by the final boundary attempt, the consequence differs by command. One principle governs both: **an
-  invocation returns to its prior state where one exists, and never destroys peers.** The two commands stand in
-  different relations to what existed before them, so the same rule yields opposite outcomes:
+  been accepted by the final boundary attempt, the consequence differs by command — and §1.2 is what makes the
+  difference principled rather than arbitrary. The two commands stand in different relations to what existed before
+  them, so the same rule yields opposite outcomes:
 
   - **`launch` records no baseline and destroys nothing.** The role is unproven, its window and the rest of the fleet
     are retained, and the invocation exits 9 (§6.6, §9). Rolling back would destroy peer roles that launched correctly.
