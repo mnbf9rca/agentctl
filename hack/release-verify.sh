@@ -250,7 +250,10 @@ part_c_teardown() {
         printf 'PART C CLEANUP OBSERVED (named tmux socket removal proves skillverify absent)\n'
         PART_C_SESSION_OWNED=0
       fi
-    elif printf '%s\n' "$socket_output" | grep -qF 'no server running'; then
+    elif printf '%s\n' "$socket_output" | grep -qF 'no server running' ||
+      printf '%s\n' "$socket_output" | grep -Eq '^error connecting to .+ \(No such file or directory\)$'; then
+      # The connect-ENOENT form is tmux's factual response when this internally
+      # named socket was armed for cleanup but no server was ever created.
       printf 'PART C CLEANUP OBSERVED (named tmux socket already absent)\n'
       PART_C_SOCKET_ARMED=0
       PART_C_SESSION_OWNED=0

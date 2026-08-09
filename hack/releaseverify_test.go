@@ -416,6 +416,10 @@ case "$1" in
   -L)
     [ "$3" = kill-server ] || exit 64
     touch "$AGENTCTL_TEST_SKILL_SOCKET_KILLED"
+    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT:-0}" = 1 ]; then
+      echo "error connecting to /private/tmp/tmux-501/$2 (No such file or directory)" >&2
+      exit 1
+    fi
     if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ABSENT:-0}" = 1 ]; then
       echo 'no server running'
       exit 1
@@ -1087,7 +1091,7 @@ func TestLiveVerificationPartCConsentDeclineGuidesManualSignIn(t *testing.T) {
 
 func TestLiveVerificationPartCRefusesConsentAndManualSignIn(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 11)+"n\nn\n")
+	output, err := fixture.run(t, strings.Repeat("y\n", 11)+"n\nn\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT=1")
 	if err == nil {
 		t.Fatalf("release verification accepted refusal of both auth paths:\n%s", output)
 	}
@@ -1101,6 +1105,9 @@ func TestLiveVerificationPartCRefusesConsentAndManualSignIn(t *testing.T) {
 	}
 	if _, statErr := os.Stat(fixture.amqLog); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("AMQ initialization ran after both auth paths were refused: %v", statErr)
+	}
+	if !strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") || strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
+		t.Fatalf("real tmux connect-ENOENT was not accepted as named-socket absence:\n%s", output)
 	}
 	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
 	t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })

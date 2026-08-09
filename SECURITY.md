@@ -123,9 +123,12 @@ ends the owned fleet and named tmux server so no harness can still use the
 link, then removes and observes absence of only the exact owned symlink, and
 only then removes the credential-bearing HOME. The target directory is never
 a recursive-removal operand. The verifier refuses success if link or HOME
-removal is not observed; fixture tests retain a sentinel in the fake target on
-every exit path, including abort, while unseeded Claude lookalike files never
-cross the launch boundary.
+removal is not observed. When consent aborts before the internally named tmux
+server is created, tmux's exact connect-ENOENT response is accepted as factual
+socket absence so teardown can continue to the credential-bearing HOME;
+fixture tests retain a sentinel in the fake target on every exit path,
+including abort, while unseeded Claude lookalike files never cross the launch
+boundary.
 
 ## Reporting a vulnerability
 
