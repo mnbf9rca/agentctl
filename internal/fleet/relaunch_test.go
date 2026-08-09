@@ -375,6 +375,107 @@ func TestRelaunchNoBaselineRecoveryKillFailureCreatesNothing(t *testing.T) {
 	}
 }
 
+func TestRelaunchNoBaselineRecoveryPreservesRemovalFactAcrossLaterFailures(t *testing.T) {
+	cause := errors.New("injected later failure")
+	cleanupCause := errors.New("injected rollback failure")
+	for _, tt := range []struct {
+		name        string
+		failureCall int
+		cleanup     tmuxx.Response
+		wantCreated bool
+		wantCleanup bool
+	}{
+		{name: "new-window failure", failureCall: 8},
+		{name: "post-create verification", failureCall: 9, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "window managed stamp", failureCall: 10, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "window effort stamp", failureCall: 14, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "process observation", failureCall: 15, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "process baseline stamp", failureCall: 17, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "fleet metadata rewrite", failureCall: 18, cleanup: tmuxx.Response{}, wantCreated: true},
+		{name: "rollback failure", failureCall: 10, cleanup: tmuxx.Response{Err: cleanupCause}, wantCreated: true, wantCleanup: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := append(recoveryPrefixResponses(tt.failureCall), tmuxx.Response{Err: cause})
+			if tt.wantCreated {
+				responses = append(responses, tt.cleanup)
+			}
+			runner := tmuxx.NewFakeRunner(responses...)
+
+			_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{
+				Role: "planner", Harness: stringPtr("codex"),
+			})
+
+			var recovered *RecoveredWindowError
+			if !errors.As(err, &recovered) {
+				t.Fatalf("Relaunch() error = %v, want *RecoveredWindowError", err)
+			}
+			if recovered.Role != "planner" || recovered.WindowID != "@23" {
+				t.Fatalf("RecoveredWindowError = %#v, want planner/@23", recovered)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("Relaunch() error = %v, want injected cause", err)
+			}
+			var killed []string
+			for _, call := range runner.Calls {
+				if call.Executable == "tmux" && len(call.Args) == 3 && call.Args[0] == "kill-window" {
+					killed = append(killed, call.Args[2])
+				}
+			}
+			wantKilled := []string{"@23"}
+			if tt.wantCreated {
+				wantKilled = append(wantKilled, "@71")
+				var relaunchFailure *RelaunchError
+				if !errors.As(err, &relaunchFailure) {
+					t.Fatalf("Relaunch() error = %v, want wrapped *RelaunchError", err)
+				}
+				if (relaunchFailure.CleanupErr != nil) != tt.wantCleanup {
+					t.Fatalf("RelaunchError.CleanupErr = %v, want present %t", relaunchFailure.CleanupErr, tt.wantCleanup)
+				}
+			}
+			if !reflect.DeepEqual(killed, wantKilled) {
+				t.Fatalf("killed window IDs = %#v, want exact order %#v", killed, wantKilled)
+			}
+		})
+	}
+}
+
+func TestRelaunchNoBaselineRecoveryPreservesRemovalFactOnSettleTimeout(t *testing.T) {
+	clock := &fakeClock{}
+	responses := recoveryPrefixResponses(15)
+	attempts := int(processPollTimeout/processPollInterval) + 1
+	for range attempts {
+		responses = append(responses, tmuxx.Response{Err: fakeExitError{code: 1}})
+	}
+	responses = append(responses, tmuxx.Response{})
+	runner := tmuxx.NewFakeRunner(responses...)
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Stat:     func(string) (fs.FileInfo, error) { return testFileInfo{mode: fs.ModeDir | 0o755}, nil },
+		Now:      clock.Now,
+		Sleep:    clock.Sleep,
+	})
+
+	_, err := launcher.Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner", Harness: stringPtr("codex")})
+
+	var recovered *RecoveredWindowError
+	if !errors.As(err, &recovered) || recovered.WindowID != "@23" {
+		t.Fatalf("Relaunch() error = %v, want recovered @23 fact", err)
+	}
+	var timeout *processSettleTimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("Relaunch() error = %v, want process settle timeout", err)
+	}
+	var killed []string
+	for _, call := range runner.Calls {
+		if call.Executable == "tmux" && len(call.Args) == 3 && call.Args[0] == "kill-window" {
+			killed = append(killed, call.Args[2])
+		}
+	}
+	if want := []string{"@23", "@71"}; !reflect.DeepEqual(killed, want) {
+		t.Fatalf("killed window IDs = %#v, want exact order %#v", killed, want)
+	}
+}
+
 func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
@@ -1238,6 +1339,31 @@ func relaunchPrefixResponses(end int) []tmuxx.Response {
 		{}, {}, {}, {}, {},
 		{Stdout: []byte("2.1.220\n")},
 		{Stdout: []byte("2.1.220\n")},
+		{},
+		{},
+	}
+	return append([]tmuxx.Response(nil), all[:end]...)
+}
+
+// recoveryPrefixResponses returns the successful scripted calls before
+// zero-based call index end for recovery of @23 while a peer keeps the session
+// alive. The request overrides planner to codex, so the final successful call
+// would rewrite the stored fleet.
+func recoveryPrefixResponses(end int) []tmuxx.Response {
+	all := []tmuxx.Response{
+		{Stdout: []byte("1\n")},
+		{Stdout: []byte("1\n")},
+		{Stdout: []byte("planner\n")},
+		{Stdout: []byte("planner:claude:fable:\n")},
+		{Stdout: []byte("/repo\n")},
+		{Stdout: []byte("@23\tplanner\tplanner\tclaude\tfable\t\t\n@24\tpeer\t\t\t\t\t\n")},
+		{Stdout: []byte("%42\t4242\t0\t1\n")},
+		{},
+		{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
+		{}, {}, {}, {}, {},
+		{Stdout: []byte("codex\n")},
+		{Stdout: []byte("codex\n")},
 		{},
 		{},
 	}

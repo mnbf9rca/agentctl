@@ -42,7 +42,7 @@ var globalUsage = `Usage: agentctl COMMAND [OPTIONS]
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate one absent role window in a managed fleet
+  relaunch  recreate an absent role or an eligible no-baseline window
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
