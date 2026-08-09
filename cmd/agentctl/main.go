@@ -448,9 +448,26 @@ func confirmLaunch(
 ) int {
 	if len(result.UnprovenRoles) > 0 {
 		fmt.Fprintf(stderr,
-			"agentctl: session %q launched; %d of %d roles unproven: %s; nothing was rolled back; control commands refuse an unproven role until \"agentctl relaunch ROLE\" recovers it\n",
+			"agentctl: session %q launched; %d of %d roles unproven: %s; nothing was rolled back; control commands refuse an unproven role",
 			result.Session.Name, len(result.UnprovenRoles), result.TotalRoles, strings.Join(result.UnprovenRoles, ", "),
 		)
+		if len(result.RecoverableRoles) > 0 {
+			fmt.Fprintf(stderr, "; \"agentctl relaunch ROLE\" recovers %s", strings.Join(result.RecoverableRoles, ", "))
+		}
+		recoverable := make(map[string]struct{}, len(result.RecoverableRoles))
+		for _, role := range result.RecoverableRoles {
+			recoverable[role] = struct{}{}
+		}
+		unrecorded := make([]string, 0, len(result.UnprovenRoles)-len(result.RecoverableRoles))
+		for _, role := range result.UnprovenRoles {
+			if _, ok := recoverable[role]; !ok {
+				unrecorded = append(unrecorded, role)
+			}
+		}
+		if len(unrecorded) > 0 {
+			fmt.Fprintf(stderr, "; no abandonment record was stamped for %s, which can only be recovered by recreating the fleet", strings.Join(unrecorded, ", "))
+		}
+		fmt.Fprintln(stderr)
 	}
 	err := writeSelectedStatus(ctx, stdout, collector, result.Session, false)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/fleet"
+	"github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -186,7 +187,7 @@ func TestRunLaunchWithUnprovenRoleReportsObservationAndSummaryRendersStatusAndEx
 		t.Fatalf("stdout = %q, want %q", got, wantStdout)
 	}
 	wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (last observed: \"env\", not repeated); window @23 was left in place\n" +
-		"agentctl: session \"fleet\" launched; 1 of 1 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role until \"agentctl relaunch ROLE\" recovers it\n"
+		"agentctl: session \"fleet\" launched; 1 of 1 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role; \"agentctl relaunch ROLE\" recovers planner\n"
 	if got := stderr.String(); got != wantStderr {
 		t.Fatalf("stderr = %q, want %q", got, wantStderr)
 	}
@@ -205,9 +206,10 @@ func TestRunLaunchWithUnprovenRoleReportsObservationAndSummaryRendersStatusAndEx
 func TestConfirmLaunchKeepsExitNineWhenStatusCannotBeConfirmed(t *testing.T) {
 	collector := selectedStatusCollectorStub{err: errors.New("observation failed")}
 	result := fleet.LaunchResult{
-		Session:       tmuxx.Session{ID: "$17", Name: "fleet"},
-		TotalRoles:    2,
-		UnprovenRoles: []string{"planner", "reviewer"},
+		Session:          tmuxx.Session{ID: "$17", Name: "fleet"},
+		TotalRoles:       2,
+		UnprovenRoles:    []string{"planner", "reviewer"},
+		RecoverableRoles: []string{"planner"},
 	}
 	var stdout, stderr bytes.Buffer
 
@@ -219,8 +221,28 @@ func TestConfirmLaunchKeepsExitNineWhenStatusCannotBeConfirmed(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
-	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role until \"agentctl relaunch ROLE\" recovers it\n" +
+	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role; \"agentctl relaunch ROLE\" recovers planner; no abandonment record was stamped for reviewer, which can only be recovered by recreating the fleet\n" +
 		"agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: observation failed\n"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestConfirmLaunchReportsOnlyFleetRecreationWhenNoAbandonmentRecordWasStamped(t *testing.T) {
+	collector := selectedStatusCollectorStub{report: status.Report{Session: "fleet", Managed: true}}
+	result := fleet.LaunchResult{
+		Session:       tmuxx.Session{ID: "$17", Name: "fleet"},
+		TotalRoles:    2,
+		UnprovenRoles: []string{"planner", "reviewer"},
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := confirmLaunch(context.Background(), &stdout, &stderr, collector, result)
+
+	if code != exitLaunchUnproven {
+		t.Fatalf("confirmLaunch() = %d, want %d", code, exitLaunchUnproven)
+	}
+	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role; no abandonment record was stamped for planner, reviewer, which can only be recovered by recreating the fleet\n"
 	if got := stderr.String(); got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
@@ -623,7 +645,7 @@ func launchOneRoleTimeoutResponses() []tmuxx.Response {
 		}
 		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
 	}
-	return append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
+	return append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
 }
 
 func useInstantLaunchClock(deps *launchDependencies) {

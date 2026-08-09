@@ -815,7 +815,7 @@ func TestLaunchProcessPollTimeoutRetainsTheFleetAndReportsFinalObservation(t *te
 			for index := range 51 {
 				responses = append(responses, tt.response(index))
 			}
-			responses = append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
+			responses = append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
 			runner := tmuxx.NewFakeRunner(responses...)
 			var stderr bytes.Buffer
 			launcher := New(runner, Dependencies{
@@ -835,6 +835,9 @@ func TestLaunchProcessPollTimeoutRetainsTheFleetAndReportsFinalObservation(t *te
 			}
 			if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
+			}
+			if got, want := result.RecoverableRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("LaunchResult.RecoverableRoles = %#v, want %#v", got, want)
 			}
 			wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (" + tt.wantObserved + "); window @23 was left in place\n"
 			if got := stderr.String(); got != wantStderr {
@@ -857,11 +860,12 @@ func TestLaunchProcessPollTimeoutRetainsTheFleetAndReportsFinalObservation(t *te
 			assertNoKill(t, runner)
 			assertNoProcessStamp(t, runner, "@23")
 			wantTail := []tmuxx.Call{
+				{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}},
 				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_SESSION"}},
 				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_ROLE"}},
 				{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_MANAGED"}},
 			}
-			if got := runner.Calls[len(runner.Calls)-3:]; !reflect.DeepEqual(got, wantTail) {
+			if got := runner.Calls[len(runner.Calls)-4:]; !reflect.DeepEqual(got, wantTail) {
 				t.Fatalf("calls after timeout = %#v, want identity clears %#v", got, wantTail)
 			}
 		})
@@ -879,6 +883,7 @@ func TestLaunchFirstRoleTimeoutClearsIdentityBeforeCreatingAndSettlingLaterRole(
 		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
 	}
 	responses = append(responses,
+		tmuxx.Response{},
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("@65\t%87\t8686\n")},
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
@@ -899,25 +904,77 @@ func TestLaunchFirstRoleTimeoutClearsIdentityBeforeCreatingAndSettlingLaterRole(
 	if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
 	}
+	if got, want := result.RecoverableRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LaunchResult.RecoverableRoles = %#v, want %#v", got, want)
+	}
 	assertNoKill(t, runner)
 	assertNoProcessStamp(t, runner, "@23")
 	assertProcessStamp(t, runner, "@65", "codex")
 
 	lastFirstProcess := -1
+	markerStamp := -1
 	firstClear := -1
 	secondCreation := -1
 	for index, call := range runner.Calls {
 		switch {
 		case call.Executable == "ps" && len(call.Args) == 4 && call.Args[3] == "4242":
 			lastFirstProcess = index
+		case call.Executable == "tmux" && reflect.DeepEqual(call.Args, []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}):
+			markerStamp = index
 		case firstClear == -1 && call.Executable == "tmux" && len(call.Args) > 0 && call.Args[0] == "set-environment":
 			firstClear = index
 		case call.Executable == "tmux" && len(call.Args) > 0 && call.Args[0] == "new-window":
 			secondCreation = index
 		}
 	}
-	if lastFirstProcess >= firstClear || firstClear >= secondCreation {
-		t.Fatalf("call order last first-role ps=%d, first clear=%d, second creation=%d; calls=%#v", lastFirstProcess, firstClear, secondCreation, runner.Calls)
+	if lastFirstProcess >= markerStamp || markerStamp >= firstClear || firstClear >= secondCreation {
+		t.Fatalf("call order last first-role ps=%d, marker=%d, first clear=%d, second creation=%d; calls=%#v", lastFirstProcess, markerStamp, firstClear, secondCreation, runner.Calls)
+	}
+}
+
+func TestLaunchMarkerStampFailureIsReportedNeverFatalAndLeavesRoleUnrecoverable(t *testing.T) {
+	clock := &fakeClock{}
+	responses := launchPrefixResponses(12)
+	for index := range 51 {
+		process := "env\n"
+		if index%2 == 1 {
+			process = "claude\n"
+		}
+		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
+	}
+	responses = append(responses,
+		tmuxx.Response{Err: errors.New("marker unavailable")},
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+	var stderr bytes.Buffer
+	launcher := New(runner, Dependencies{
+		LookPath: presentExecutable,
+		Getwd:    func() (string, error) { return "/repo", nil },
+		Now:      clock.Now,
+		Sleep:    clock.Sleep,
+		Stderr:   &stderr,
+	})
+
+	result, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v, want retained launch", err)
+	}
+	if got, want := result.UnprovenRoles, []string{"planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("LaunchResult.UnprovenRoles = %#v, want %#v", got, want)
+	}
+	if result.RecoverableRoles != nil {
+		t.Fatalf("LaunchResult.RecoverableRoles = %#v, want nil", result.RecoverableRoles)
+	}
+	wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (last observed: \"env\", not repeated); window @23 was left in place, but its abandonment record could not be stamped (tmux set window option: marker unavailable), so \"agentctl relaunch ROLE\" cannot recover it\n"
+	if got := stderr.String(); got != wantStderr {
+		t.Fatalf("stderr = %q, want %q", got, wantStderr)
+	}
+	assertNoKill(t, runner)
+	assertNoProcessStamp(t, runner, "@23")
+	marker := tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_unproven", "1"}}
+	if got := runner.Calls[len(runner.Calls)-4]; !reflect.DeepEqual(got, marker) {
+		t.Fatalf("final per-window call = %#v, want marker attempt %#v", got, marker)
 	}
 }
 

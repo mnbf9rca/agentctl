@@ -84,12 +84,14 @@ func (e *LaunchError) Error() string {
 func (e *LaunchError) Unwrap() error { return e.Cause }
 
 // LaunchResult reports the exact session created and every role for which the
-// launch poll could not establish a process baseline. UnprovenRoles stays in
-// roster order because Launch appends while it walks the validated fleet.
+// launch poll could not establish a process baseline. Both role slices stay in
+// roster order; RecoverableRoles is the subset whose abandonment record was
+// successfully stamped.
 type LaunchResult struct {
-	Session       tmuxx.Session
-	TotalRoles    int
-	UnprovenRoles []string
+	Session          tmuxx.Session
+	TotalRoles       int
+	UnprovenRoles    []string
+	RecoverableRoles []string
 }
 
 type processSettleTimeoutError struct {
@@ -151,6 +153,7 @@ const (
 	optionHarness   = "@agentctl_harness"
 	optionModel     = "@agentctl_model"
 	optionEffort    = "@agentctl_effort"
+	optionUnproven  = "@agentctl_unproven"
 	optionProcess   = "@agentctl_process"
 )
 
@@ -244,7 +247,7 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 		return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 	}
 	if err := l.stampWindow(ctx, createdSession.WindowID, createdSession.PanePID, first); err != nil {
-		if !l.retainUnproven(&result, first.Name, createdSession.WindowID, createdSession.PaneID, err) {
+		if !l.retainUnproven(ctx, &result, first.Name, createdSession.WindowID, createdSession.PaneID, err) {
 			return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, first.Name, err)
 		}
 	}
@@ -256,7 +259,7 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 			return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 		}
 		if err := l.stampWindow(ctx, createdWindow.WindowID, createdWindow.PanePID, role); err != nil {
-			if !l.retainUnproven(&result, role.Name, createdWindow.WindowID, createdWindow.PaneID, err) {
+			if !l.retainUnproven(ctx, &result, role.Name, createdWindow.WindowID, createdWindow.PaneID, err) {
 				return LaunchResult{}, l.rollback(ctx, createdSession.SessionID, session, role.Name, err)
 			}
 		}
@@ -264,12 +267,21 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	return result, nil
 }
 
-func (l Launcher) retainUnproven(result *LaunchResult, role string, windowID tmuxx.WindowID, paneID tmuxx.PaneID, err error) bool {
+func (l Launcher) retainUnproven(ctx context.Context, result *LaunchResult, role string, windowID tmuxx.WindowID, paneID tmuxx.PaneID, err error) bool {
 	var timeout *processSettleTimeoutError
 	if !errors.As(err, &timeout) {
 		return false
 	}
 	result.UnprovenRoles = append(result.UnprovenRoles, role)
+	markerErr := l.tmux.SetWindowOption(ctx, windowID, optionUnproven, "1")
+	if markerErr != nil {
+		fmt.Fprintf(l.stderr,
+			"agentctl: %s: no process baseline recorded; pane %s did not yield two consecutive identical non-amq observations within %s (%s); window %s was left in place, but its abandonment record could not be stamped (%v), so \"agentctl relaunch ROLE\" cannot recover it\n",
+			role, paneID, processPollTimeout, timeout.observation(), windowID, markerErr,
+		)
+		return true
+	}
+	result.RecoverableRoles = append(result.RecoverableRoles, role)
 	fmt.Fprintf(l.stderr,
 		"agentctl: %s: no process baseline recorded; pane %s did not yield two consecutive identical non-amq observations within %s (%s); window %s was left in place\n",
 		role, paneID, processPollTimeout, timeout.observation(), windowID,
