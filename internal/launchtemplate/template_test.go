@@ -234,6 +234,8 @@ func TestDecoderFixtureErrorsPinStrictnessOrderAndMessageShape(t *testing.T) {
 		{fixture: "malformed.json", want: `invalid JSON:`},
 		{fixture: "missing-version.json", want: `version: is required`},
 		{fixture: "null-version.json", want: `version: must be exactly 1, got null`},
+		{fixture: "version-array.json", want: `version: must be exactly 1, got []`},
+		{fixture: "version-object.json", want: `version: must be exactly 1, got {"major":1}`},
 		{fixture: "unsupported-version-with-unknown.json", want: `version 2 is not supported by this agentctl (supports 1)`},
 		{fixture: "duplicate-root.json", want: `duplicate field "dir"`},
 		{fixture: "duplicate-role-field.json", want: `roles[0]: duplicate field "effort"`},

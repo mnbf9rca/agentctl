@@ -189,7 +189,11 @@ func wrapTemplateValidation(path, location string, err error) error {
 	if !errors.As(err, &validation) {
 		return &launchtemplate.Error{Path: path, Location: location, Reason: err.Error(), Cause: err}
 	}
-	return &launchtemplate.Error{Path: path, Location: location, Reason: validation.Reason, Cause: err}
+	reason := validation.Reason
+	if validation.Option != "effort" {
+		reason = fmt.Sprintf("value %q %s", validation.Value, validation.Reason)
+	}
+	return &launchtemplate.Error{Path: path, Location: location, Reason: reason, Cause: err}
 }
 
 func wrapTemplateDirectoryError(path, value string, err error) error {

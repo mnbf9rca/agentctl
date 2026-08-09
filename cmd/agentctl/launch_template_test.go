@@ -142,7 +142,7 @@ func TestMergeLaunchTemplateUnionFailuresNameTheirSourceAndRule(t *testing.T) {
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
 				Name: "Planner", Harness: stringPointerForTemplate("claude"),
 			}}},
-			want: `template /fleet.json: roles[0].role: must match ^[a-z0-9][a-z0-9_-]*$`,
+			want: `template /fleet.json: roles[0].role: value "Planner" must match ^[a-z0-9][a-z0-9_-]*$`,
 		},
 		{
 			name: "missing effective harness",
@@ -156,14 +156,14 @@ func TestMergeLaunchTemplateUnionFailuresNameTheirSourceAndRule(t *testing.T) {
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
 				Name: "planner", Harness: stringPointerForTemplate("future"),
 			}}},
-			want: `template /fleet.json: roles[0].harness: must be claude or codex`,
+			want: `template /fleet.json: roles[0].harness: value "future" must be claude or codex`,
 		},
 		{
 			name: "invalid effective model",
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
 				Name: "planner", Harness: stringPointerForTemplate("claude"), Model: stringPointerForTemplate("bad model"),
 			}}},
-			want: `template /fleet.json: roles[0].model: must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+			want: `template /fleet.json: roles[0].model: value "bad model" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
 		},
 		{
 			name: "invalid effective effort",
