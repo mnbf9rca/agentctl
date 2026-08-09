@@ -136,7 +136,7 @@ further is printed.
 ## 4. CLI surface
 
 ```
-agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
+agentctl launch  --session S [--from-template FILE] [--roles R:H,...] [--models R:M,...] [--efforts R:L,...] [--dir PATH]
 agentctl relaunch [--session S] [--harness H] [--model M] [--dir PATH] ROLE
 agentctl attach   [--session S]
 agentctl status   [--session S | --all] [--json]
@@ -256,6 +256,9 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 
 ### 6.1 launch
 
+0. If `--from-template` was supplied: read and decode the template (§6.9), then compute the **union** of template and
+   command line. The union — not the file, and not the flags — is what step 1 validates. Every template failure is
+   exit 2 and occurs here, before step 2's preflight and before anything exists.
 1. Parse and validate the complete configuration (§7). Any error → exit 2, nothing created.
 2. Preflight: `tmux`, `amq`, and each *requested* harness resolve on `PATH` → else exit 7.
 3. Existence check, **best-effort and advisory** (§6.7): attempt `list-sessions`; on an exact match → exit 3. On a
@@ -692,6 +695,10 @@ the superseded triple is structurally invalid and refused, which is preferable t
 **Stored configuration always equals the actual fleet.** Whenever a command changes a role's harness, model or effort, it
 rewrites `@agentctl_fleet` in full with the new values, so the option can never disagree with the live windows.
 
+When `--from-template` supplied the fleet, "declaration order" means the union's pinned order (§6.9): template roles in
+file order, then flag-added roles in `--roles` order. Everything else in this section is unchanged — the stamping
+sequence does not vary by where a value came from.
+
 **`@agentctl_roles`** is the declared roster: the role names from `--roles`, comma-joined, in declaration order. It
 exists because without it a dead agent is *unobservable*. Every other status input is derived from windows that still
 exist, so a role whose window has closed leaves no trace to report — and since managed windows run without
@@ -962,6 +969,140 @@ reporting the provenance of every field is what keeps an override from silently 
    recovered: removed window W, which carried no @agentctl_process baseline, and recreated ROLE
    ```
 
+### 6.9 launch templates
+
+`agentctl launch --from-template FILE` supplies the **fleet shape** — roles with harness, model, effort, and an
+optional directory — from a JSON file. It is a source of values, never a second validator: `internal/config` continues
+to own all value semantics (§12.9).
+
+**The template never carries the session name.** Session identity is per-invocation, so one template serves
+`release_0_4_0`, `release_0_5_0` and every successor unedited, and identity can never come from a stale file. There is
+no `session` key, and because a bare `unknown field "session"` would under-explain a mistake people will reasonably
+make, it is refused by name:
+
+```text
+agentctl: template FILE: "session" is not a template field; session identity is supplied per invocation with --session
+```
+
+**Format is JSON**, because the standard library has no YAML or TOML decoder (CLAUDE.md's hard constraint) and
+`encoding/json` is the only stdlib decoder offering unknown-field rejection, a token stream for a duplicate-key pass,
+and trailing-document detection.
+
+```json
+{
+  "version": 1,
+  "dir": "/srv/work",
+  "roles": [
+    { "role": "planner",  "harness": "claude", "model": "opus-4-1", "effort": "high" },
+    { "role": "reviewer", "harness": "claude", "effort": "max" },
+    { "role": "worker",   "harness": "codex" }
+  ]
+}
+```
+
+#### The union, and where each requirement binds
+
+Flags and the template compose: **the effective fleet is the union of the two.** A flag value for a
+template-declared role or field overrides it; a flag role the template does not declare is added. No flag removes a
+template-declared role — removal was considered and not granted, so a template is a floor, never a ceiling.
+
+Partial templates are legal by construction, because validation applies to the union rather than to the file. That
+splits the requirements in two, and the split is the whole point:
+
+| Requirement | Binds on | Why |
+|---|---|---|
+| `version` | the **file** | It describes the file's own format, so no flag could supply it. |
+| `roles[].role` | the **file**, per entry | It is the merge key. An entry with no role name has no identity and cannot participate in a union. Structural, not a value rule. |
+| a harness for every role | the **union** | `{"role": "planner"}` plus `--roles planner:claude` is a legal union. |
+| at least one role | the **union** | A file with `roles` absent or `[]` is a legal defaults-only template; the error is a *union* with no roles. |
+
+The last row reads oddly at a glance and is deliberate: rejecting an empty `roles` in the file would have the design
+second-guess a union that is legal by construction.
+
+**Uniqueness binds per source, and merges across them.** Two `planner` entries inside `roles[]` is an error; two inside
+`--roles` is the existing CLI error; `planner` in both is an override, not a collision.
+
+**Union role order is pinned**, because §6.5's stamping order is a tested contract and would otherwise be asserted
+against something undefined: every template role in file order, then every flag-added role in `--roles` declaration
+order. An override never moves a role — it changes that role's fields and leaves its position alone.
+
+#### Strictness, in decode order
+
+1. **Open the file, then verify the handle** — `os.Open`, then `Stat` on the descriptor. Never `Stat` the path and then
+   read the path: checking one object and reading another is a time-of-check/time-of-use gap, and checking the
+   descriptor that will actually be read has none.
+2. **Regular files only.** A directory, FIFO, device or socket is refused, naming what it is. A template is a regular
+   file: `-` is not special and stdin is not accepted, deliberately rather than by omission. A streamed template cannot
+   be re-read to quote the offending line in an error, and a FIFO would hang `launch` indefinitely — nothing in this
+   design carries a read timeout.
+3. **Symlinks are followed, and every rule binds on the target.** Refusing them would break ordinary arrangements — a
+   templates directory kept in a dotfile repository — for no threat-model gain, since a same-user process that can
+   plant a symlink can plant the file itself.
+4. **Size cap, enforced by rejection.** Read through a limit of 1 MiB plus one byte, and refuse a file that exceeds it.
+   Truncating instead would launch a fleet that differs from the file the caller wrote (§1.1).
+5. **Version before the strict decode.** A token pre-pass reads `version` and rejects any key repeated within any
+   object, anywhere in the document — `encoding/json` is silently last-wins where the CLI errors, and
+   `{"effort": "low", "effort": "max"}` inside one role object is the same ambiguity as a duplicate role.
+   `version` must be present and exactly `1`.
+6. **Strict decode**: unknown fields rejected, one document, nothing trailing.
+7. **Absent, `null` and empty are three different things.** An absent optional field is omitted; `null` and `""` are
+   both errors. The file is therefore *stricter* than the CLI here, and the divergence is one-directional and stated
+   rather than discovered.
+8. **Every surviving value goes through §7's validators, unchanged**, applied to the union.
+
+`dir` existence and is-a-directory are not checked here; that stays at point of use (§12.9).
+
+**Version policy is stated, not implied.** With unknown fields rejected, every future field addition makes new
+templates unreadable by older binaries, **and that is intended**: a binary that ignored a field it did not understand
+would launch a fleet differing from the file it was handed, which is §1.1's first half in its most literal form.
+`version`'s job is therefore not to make old binaries tolerant but to make their refusal legible — which is why it is
+read in the pre-pass and checked *before* the strict decode:
+
+```text
+agentctl: template FILE: version 2 is not supported by this agentctl (supports 1)
+```
+
+Checked the other way round, the same file would fail as `unknown field "…"` and the version field would do nothing the
+unknown-field check was not already doing badly.
+
+#### Errors
+
+Every template failure is **exit 2** (§9), and messages are agentctl-shaped, never decoder-shaped: a bare
+`json: unknown field "efort"` leaks the decoder, names no file and points at no role. Each message names the file, the
+location, the value and the rule; wrapping the decoder's own error underneath is encouraged, as elsewhere (§4.1).
+
+```text
+agentctl: template /srv/fleet.json: unknown field "efort"
+agentctl: template /srv/fleet.json: roles[1].effort: harness "codex" does not support effort "extreme"; supported levels are low, medium, high, xhigh, max
+agentctl: template /srv/fleet.json: roles[2]: duplicate role "planner"
+agentctl: template /srv/fleet.json: roles[0].model: must not be empty; omit the field instead
+```
+
+#### Provenance
+
+`launch` prints no provenance today, so this is a new output contract. One line per role, before the status render,
+only when `--from-template` was supplied. The vocabulary is `relaunch`'s (§6.8) with one constant added — `template`,
+alongside the existing `flag override` and `flags`; `stored` does not apply to `launch`. A parallel triple would give
+two vocabularies for one concept.
+
+```text
+agentctl: launched planner in alpha: harness claude (template), model opus-4-1 (template), effort low (flag override)
+agentctl: launched worker in alpha: harness codex (flags), model default (flags), effort default (flags)
+agentctl: template /srv/fleet.json: dir /srv/work (flag override)
+```
+
+`default` renders an empty model or effort (§12.7). The trailing line appears only when the template supplied `dir`,
+and there is no "recorded value left unchanged" note: `relaunch` has one because `@agentctl_dir` persists, whereas a
+template persists nothing, so such a note would describe no record. `@agentctl_fleet` and `@agentctl_dir` are stamped
+from the effective merged values by the existing path, and are re-validated on every read (SECURITY.md residual 4)
+regardless of origin — being template-sourced confers no trust.
+
+#### Read-only
+
+A template is input. agentctl never generates, echoes, or writes one, so the file-writing invariant in SECURITY.md —
+writes only to fixed paths, with no caller-supplied components — is untouched by this feature and needs no amendment on
+the write side.
+
 ## 7. Validation rules (consolidated)
 
 - Session and role names: `^[a-z0-9][a-z0-9_-]*$`.
@@ -973,6 +1114,22 @@ reporting the provenance of every field is what keeps an override from silently 
 - `--dir`: must be an existing **directory**. On `launch`, a relative value is made absolute before validation and
   reuse; on `relaunch`, it is an explicit one-invocation override and is not persisted. Non-existent path and
   existing-but-a-regular-file are both exit 2, evaluated before any tmux call (§6.1 step 4).
+- **Template `dir` must be absolute.** A relative value is refused, naming it and pointing at `--dir`. A template is a
+  portable artifact, so resolving against the process working directory would let one file launch two different fleets
+  from two directories with no warning — the silent divergence §6.8 already refuses when a *stored* directory is
+  relative, for the same reason: no trustworthy base remains. Resolving against the template's own directory was
+  rejected as worse still, because it would give `--dir foo` and `"dir": "foo"` different meanings for one field.
+  Nothing is lost: `--dir` still accepts a relative path and still overrides the template per field. Where a template
+  must stay portable across machines, the answer is to omit `dir` from the file and supply `--dir` at invocation.
+- **When `--from-template` is supplied, the validation subject is the union** of template and command line (§6.9), not
+  either source alone. Values reach these rules identically whichever source they came from.
+- **One implementation per rule.** Each rule above has exactly one implementation, and the CLI parsers, the template
+  decoder, and the control commands are callers of it — they may format a failure differently (the list parsers name
+  the raw list and the entry index; the template names the file and the role index), but none of them re-decides the
+  rule. The existing inline duplicates of the role, harness and model rules inside the list parsers are consolidated
+  onto the shared predicates as part of this work. That consolidation is behavior-preserving and testable as such: the
+  existing tests pin the CLI message text and must stay green **unchanged**. A pinned message that has to move is
+  evidence the wrapping is wrong, not that the test needs editing.
 
 ## 8. Process-identity policy
 
@@ -1035,6 +1192,12 @@ Exit 4 additionally covers a role that resolves to more than one window (§13.5)
 pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
 failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
 or a version other than `1` (§6.4, §12.6); `attach` uses 6 when control mode cannot be established.
+
+**Template failures are exit 2**, uniformly — unreadable, absent, non-regular or oversize file; decoder errors of every
+kind; an unsupported version; and any union value that fails §7. They share one code because they share one fact: the
+caller supplied an unusable input and nothing ran. That is not an analogy to §6.1 step 1's "exit 2, nothing created" but
+the same guarantee, because the entire template path completes before step 2's preflight, so no template failure can
+occur after anything exists (§6.9).
 
 **Exit 9 — launched with an unproven role; nothing was rolled back.** `launch` created the session, retained it and
 every window it made, and could not establish a process baseline for at least one role within §8's deadline. It extends
@@ -1143,7 +1306,7 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
    An absent marker is **not** "a different version": saying so asserts an event that did not happen (§1.1). A rendered fact cannot lie about causation, which is why the value-rendering shape is the rule rather than one acceptable option among several. This applies to `status`, `control`, `kill`, `attach` and any command added later that reads this gate — the shape is a property of the rule, not of the command that happens to be reporting it. `attach` is included deliberately: it is the only command that hands a human a live keyboard into panes whose metadata semantics we cannot interpret, and "agentctl refused" is recoverable where "operator typed into a misunderstood fleet" is not. Its refusal names the escape hatch (§6.4) — an operator tool should be conservative without pretending to be a boundary. **`status` is carved out** for the *unmanaged* case only: a session with `@agentctl_managed` missing or not `1` is reported, not refused (§6.3). A version present but not `1` remains exit 3 everywhere, `status` included: we can read another version's options but cannot trust their semantics, and reporting them as if they were ours would be a false statement rather than a missing one.
 7. **Defaulted model and effort rendering.** Metadata and JSON carry the empty string `""`; only the human-readable table renders `default`. `status` gains an `effort` field on each agent and an `EFFORT` column between `MODEL` and `PANE`; the JSON document stays at `"schema": 1` because the addition is a new field on an existing object, not a change to any field a consumer already reads.
 8. **Toolchain pin.** `go.mod`'s `go` directive and CI's `go-version` must be identical (initially Go 1.26); drift is a review failure. Owned by issue #1.
-9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
+9. **Validation ownership.** `internal/config` owns all value semantics: `ParseFleet` (roles/models rules) and `ValidateSessionName`. The launch-template decoder (§6.9) is a **source** of values, not a validator: it decides shape — what keys exist, what is required in the file, what is ambiguous — and hands every value to the same predicates the flags use (§7). `internal/cliflags` owns flag mechanics (duplicate-option rejection). The `--dir` existence/is-directory check happens at point of use in the launch flow (`internal/fleet`), not in `config`. An explicitly supplied but empty `--models` (or `--roles`) value is a usage error; an omitted `--models` is valid. Errors for empty list entries (leading/consecutive/trailing commas) name the raw list and the entry index, since no printable entry exists.
 
 ## 13. Canonical tmux argv table
 

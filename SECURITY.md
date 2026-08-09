@@ -66,6 +66,10 @@
 
    Delivery has one bounded TOCTOU: the identity check reads the pane PID and runs `ps`, then delivery targets the pane ID. Pane IDs are not reused, so the target cannot shift to a different pane, but `respawn-pane -k` can replace the process in the same pane between those operations while retaining the pane ID and assigning a new PID. That requires same-user action and remains accepted under the threat model above.
 
+7. **`launch --from-template` reads a caller-named path.** This is the first caller-supplied read path on a command that also drives tmux, so its rules are stated rather than inherited. agentctl opens the file and then verifies the **descriptor** it will read, never stat-ing a path and then reading that path — checking one object and reading another is a time-of-check/time-of-use gap, and this construction has none. Only regular files are accepted: a directory, device or socket is refused, and a FIFO is refused specifically because a blocking read would hang `launch` with no timeout anywhere in the design. `-` is not special and stdin is not accepted. Input is bounded at 1 MiB and an oversize file is **refused, not truncated**, because a truncated template that still parsed would launch a fleet differing from the file. Symlinks are followed and every rule binds on the target: refusing them would break ordinary arrangements for no gain, since a same-user process that can plant a symlink can plant the file.
+
+   What this does **not** change: no value from a template reaches `tmux send-keys`, the payload registry, or a `-t` target; template-sourced values traverse exactly the harness-argv and `shellq` path that flag-sourced values do (spec §12.1), and are validated by the same predicates (spec §7). Being template-sourced confers no trust and skips no gate. A template an agent can write sits inside the same same-user band already excluded from the threat model above, so this feature adds a surface to reason about, not a new privilege.
+
 ## File and socket permissions
 
 agentctl writes files only under `$HOME/.claude/skills/agentctl/` and
@@ -77,8 +81,10 @@ agentctl cannot prove it wrote. When ownership cannot be proved, `--force`
 replaces the target directory and reports every removed file. No launch,
 control, status, or kill path writes to the filesystem; `launch` reads the
 manifests (only) to report skill/binary version skew. The skill content is a
-build-time constant; target paths are fixed with no caller-supplied
-components; a failed `$HOME` resolution is a refusal, not a fallback.
+build-time constant; target **write** paths are fixed with no caller-supplied
+components; a failed `$HOME` resolution is a refusal, not a fallback. That
+statement is about the write side, and remains true: `launch --from-template`
+adds a caller-named *read* path (residual 7) and no write path.
 Otherwise agentctl creates no persistent files (no database, no state
 directory) and writes nothing inside application repositories. It relies on
 tmux's default private socket (`0700` directory) and AMQ's documented
