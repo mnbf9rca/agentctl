@@ -220,17 +220,12 @@ func parseRoles(roles string) (FleetConfig, error) {
 		if harnessName == "" {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, "harness is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
 
-		var harness Harness
-		switch harnessName {
-		case string(HarnessClaude):
-			harness = HarnessClaude
-		case string(HarnessCodex):
-			harness = HarnessCodex
-		default:
+		harness, err := ParseHarness(harnessName)
+		if err != nil {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("unknown harness %q", harnessName))
 		}
 		if _, duplicate := seen[role]; duplicate {
@@ -269,11 +264,11 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 		if model == "" {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, "model is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
-		if !modelExpression.MatchString(model) {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q must match %s", model, modelPattern))
+		if err := ValidateModelName(model); err != nil {
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q %s", model, validationReason(err)))
 		}
 		if _, duplicate := modelRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("duplicate model entry for role %q", role))
@@ -313,8 +308,8 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 		if effort == "" {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "effort is empty")
 		}
-		if !nameExpression.MatchString(role) {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q must match %s", role, namePattern))
+		if err := ValidateRoleName(role); err != nil {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
 		if _, duplicate := effortRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("duplicate effort entry for role %q", role))
@@ -324,11 +319,8 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
 		harness := fleet.Roles[roleIndex].Harness
-		if !supportsEffort(harness, effort) {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf(
-				"harness %q does not support effort %q; supported levels are %s",
-				harness, effort, strings.Join(effortLevels[harness], ", "),
-			))
+		if err := ValidateEffort(harness, effort); err != nil {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err))
 		}
 
 		effortRoles[role] = struct{}{}
@@ -345,6 +337,14 @@ func supportsEffort(harness Harness, effort string) bool {
 		}
 	}
 	return false
+}
+
+func validationReason(err error) string {
+	validation, ok := err.(*ValidationError)
+	if !ok {
+		return err.Error()
+	}
+	return validation.Reason
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {
