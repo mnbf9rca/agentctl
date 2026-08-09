@@ -136,7 +136,8 @@ further is printed.
 ## 4. CLI surface
 
 ```
-agentctl launch  --session S [--from-template FILE] [--roles R:H,...] [--models R:M,...] [--efforts R:L,...] [--dir PATH]
+agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
+agentctl launch  --session S --from-template FILE [--roles R:H,...] [--models R:M,...] [--efforts R:L,...] [--dir PATH]
 agentctl relaunch [--session S] [--harness H] [--model M] [--dir PATH] ROLE
 agentctl attach   [--session S]
 agentctl status   [--session S | --all] [--json]
@@ -146,6 +147,13 @@ agentctl kill     [--session S]
 ```
 
 Everything else in the brief's CLI section applies verbatim: no `--launch` alternative syntax, no arbitrary-payload options of any kind, duplicate command-line options rejected.
+
+**`launch` has two forms, and `--roles` is required in the first.** `--from-template` is the only thing that makes
+`--roles` optional, and it makes it optional rather than forbidden: a template may supply the whole roster, or the
+flag may add roles beside it (§6.9). Without a template, `--roles` remains required exactly as before — a bare
+`agentctl launch --session S` is a usage error (exit 2), because a fleet with no roles is not a fleet. The two forms
+are written separately above rather than as one line with everything bracketed, because a single line cannot express
+"one of these two is required" without saying it in prose anyway.
 
 **`status` never narrows silently.** Bare `agentctl status` reports **every** session on the tmux server (§6.3.1).
 Ambient context — `AGENTCTL_SESSION`, or the tmux session the caller happens to be sitting in — does not select a
@@ -1018,6 +1026,11 @@ splits the requirements in two, and the split is the whole point:
 
 The last row reads oddly at a glance and is deliberate: rejecting an empty `roles` in the file would have the design
 second-guess a union that is legal by construction.
+
+It is also the only thing that relaxes `--roles`. Without `--from-template`, `--roles` is required (§4); with one, it
+becomes optional because the template can supply the roster instead. What is never optional is the union: whichever
+combination of file and flags produced it, a launch whose union declares no roles is a usage error, refused before
+anything is created.
 
 **Uniqueness binds per source, and merges across them.** Two `planner` entries inside `roles[]` is an error; two inside
 `--roles` is the existing CLI error; `planner` in both is an override, not a collision.
