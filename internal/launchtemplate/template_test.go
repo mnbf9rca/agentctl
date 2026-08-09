@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -132,6 +133,39 @@ func TestDecoderRefusesEveryNonRegularDescriptorBeforeReading(t *testing.T) {
 				t.Fatalf("events = %#v, want %#v", events, want)
 			}
 		})
+	}
+}
+
+func TestDecodeRefusesWriterlessFIFOWithoutBlocking(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "fleet.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Decode(fifo)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		assertTemplateError(t, err, "template "+fifo+": must be a regular file; opened object is named pipe")
+	case <-time.After(time.Second):
+		// Release a decoder blocked in a plain read-only open so a failing test
+		// still returns instead of leaking the goroutine indefinitely.
+		unblock, err := os.OpenFile(fifo, os.O_RDWR|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatalf("Decode() did not return within one second; cleanup open: %v", err)
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+		if err := unblock.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("Decode() did not return within one second")
 	}
 }
 

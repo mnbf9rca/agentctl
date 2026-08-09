@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // MaxBytes is the largest launch template agentctl will read.
@@ -27,7 +28,8 @@ type File interface {
 // OpenFunc opens one caller-supplied template path.
 type OpenFunc func(string) (File, error)
 
-// Decoder supplies the template file seam. A nil Open uses os.Open.
+// Decoder supplies the template file seam. A nil Open uses a non-blocking,
+// read-only os.OpenFile so a writerless FIFO can be opened and refused.
 type Decoder struct {
 	Open OpenFunc
 }
@@ -76,7 +78,9 @@ func Decode(path string) (Document, error) {
 func (d Decoder) Decode(path string) (Document, error) {
 	open := d.Open
 	if open == nil {
-		open = func(path string) (File, error) { return os.Open(path) }
+		open = func(path string) (File, error) {
+			return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		}
 	}
 	file, err := open(path)
 	if err != nil {
