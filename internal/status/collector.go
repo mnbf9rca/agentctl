@@ -205,7 +205,7 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 			continue
 		}
 		if window.Process == "" {
-			agent.State = StateUnexpectedProcess
+			agent.State = StateNoBaseline
 			report.Agents = append(report.Agents, agent)
 			continue
 		}

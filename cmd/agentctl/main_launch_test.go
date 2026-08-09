@@ -161,6 +161,71 @@ func TestRunLaunchSuccessRendersObservedStatus(t *testing.T) {
 	}
 }
 
+func TestRunLaunchWithUnprovenRoleReportsObservationAndSummaryRendersStatusAndExitsNine(t *testing.T) {
+	responses := launchOneRoleTimeoutResponses()
+	responses = append(responses,
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("1\n")},
+		tmuxx.Response{Stdout: []byte("planner\n")},
+		tmuxx.Response{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\n")},
+		tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+	deps := launchTestDependencies(runner)
+	useInstantLaunchClock(&deps)
+	var stdout, stderr bytes.Buffer
+
+	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, deps)
+
+	if code != exitLaunchUnproven {
+		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitLaunchUnproven, stderr.String())
+	}
+	wantStdout := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
+		"fleet    planner  claude   default  default  %42            no-baseline\n"
+	if got := stdout.String(); got != wantStdout {
+		t.Fatalf("stdout = %q, want %q", got, wantStdout)
+	}
+	wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (last observed: \"env\", not repeated); window @23 was left in place\n" +
+		"agentctl: session \"fleet\" launched; 1 of 1 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role until \"agentctl relaunch ROLE\" recovers it\n"
+	if got := stderr.String(); got != wantStderr {
+		t.Fatalf("stderr = %q, want %q", got, wantStderr)
+	}
+	assertNoKillCall(t, runner)
+	processCalls := 0
+	for _, call := range runner.Calls {
+		if call.Executable == "ps" {
+			processCalls++
+		}
+	}
+	if processCalls != 51 {
+		t.Fatalf("process calls = %d, want 51 launch attempts and no post-launch probe; calls=%#v", processCalls, runner.Calls)
+	}
+}
+
+func TestConfirmLaunchKeepsExitNineWhenStatusCannotBeConfirmed(t *testing.T) {
+	collector := selectedStatusCollectorStub{err: errors.New("observation failed")}
+	result := fleet.LaunchResult{
+		Session:       tmuxx.Session{ID: "$17", Name: "fleet"},
+		TotalRoles:    2,
+		UnprovenRoles: []string{"planner", "reviewer"},
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := confirmLaunch(context.Background(), &stdout, &stderr, collector, result)
+
+	if code != exitLaunchUnproven {
+		t.Fatalf("confirmLaunch() = %d, want %d", code, exitLaunchUnproven)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role until \"agentctl relaunch ROLE\" recovers it\n" +
+		"agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: observation failed\n"
+	if got := stderr.String(); got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
 func TestRunLaunchRendersObservedMissingRoleWithoutChangingSuccess(t *testing.T) {
 	responses := append(launchOneRoleResponses(""),
 		tmuxx.Response{Stdout: []byte("1\n")},
@@ -547,6 +612,25 @@ func launchOneRoleResponses(sessions string) []tmuxx.Response {
 		{Stdout: []byte("claude\n")}, {Stdout: []byte("claude\n")}, {},
 		{}, {}, {},
 	}
+}
+
+func launchOneRoleTimeoutResponses() []tmuxx.Response {
+	responses := append([]tmuxx.Response(nil), launchOneRoleResponses("")[:12]...)
+	for index := range 51 {
+		process := "env\n"
+		if index%2 == 1 {
+			process = "claude\n"
+		}
+		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
+	}
+	return append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
+}
+
+func useInstantLaunchClock(deps *launchDependencies) {
+	var elapsed time.Duration
+	base := time.Unix(0, 0)
+	deps.fleet.Now = func() time.Time { return base.Add(elapsed) }
+	deps.fleet.Sleep = func(duration time.Duration) { elapsed += duration }
 }
 
 func launchTwoRoleResponses() []tmuxx.Response {

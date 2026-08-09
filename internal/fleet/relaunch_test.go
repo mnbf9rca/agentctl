@@ -120,6 +120,261 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 	)...)
 }
 
+func TestRelaunchRecoversNoBaselineWindowAfterPreflightAndDirectoryCheckByExactID(t *testing.T) {
+	responses := storedMetadataResponses(
+		"planner",
+		"planner:claude:fable:max",
+		"/repo",
+		"@23\tplanner\tplanner\tclaude\tfable\tmax\t\n"+
+			"@24\tpeer\t\t\t\t\t\n",
+	)
+	responses = append(responses,
+		tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")},
+		tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
+		createdPlannerWindowResponse(),
+		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
+		tmuxx.Response{Stdout: []byte("2.1.220\n")},
+		tmuxx.Response{Stdout: []byte("2.1.220\n")},
+		tmuxx.Response{},
+	)
+	fake := tmuxx.NewFakeRunner(responses...)
+	var events []string
+	runner := eventRunner{fake: fake, events: &events}
+	launcher := New(runner, Dependencies{
+		LookPath: func(name string) (string, error) {
+			events = append(events, "look:"+name)
+			return "/bin/" + name, nil
+		},
+		Stat: func(path string) (fs.FileInfo, error) {
+			events = append(events, "stat:"+path)
+			return testFileInfo{mode: fs.ModeDir | 0o755}, nil
+		},
+	})
+
+	result, err := launcher.Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	if result.RecoveredWindowID != "@23" {
+		t.Fatalf("RelaunchResult.RecoveredWindowID = %q, want @23", result.RecoveredWindowID)
+	}
+	wantEvents := []string{"look:tmux", "look:amq", "look:claude", "stat:/repo", "kill:@23"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want preflight and directory before exact-ID kill %#v", events, wantEvents)
+	}
+	wantCalls := append(metadataReadCalls(),
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@23"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{
+			"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/repo",
+			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
+			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
+			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
+		}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", windowListFormat}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "fable"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "max"}},
+		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
+		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "2.1.220"}},
+	)
+	assertCalls(t, fake, wantCalls...)
+}
+
+func TestRelaunchRefusesSoleNoBaselineWindowBeforePreflightWithoutMutation(t *testing.T) {
+	responses := storedMetadataResponses(
+		"planner",
+		"planner:claude:opus-4-1:high",
+		"/srv/work",
+		"@23\tplanner\tplanner\tclaude\topus-4-1\thigh\t\n",
+	)
+	responses = append(responses, tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")})
+	runner := tmuxx.NewFakeRunner(responses...)
+	launcher := New(runner, Dependencies{
+		LookPath: func(string) (string, error) {
+			t.Fatal("sole-window refusal reached executable preflight")
+			return "", nil
+		},
+		Stat: func(string) (fs.FileInfo, error) {
+			t.Fatal("sole-window refusal reached directory validation")
+			return nil, nil
+		},
+	})
+
+	_, err := launcher.Relaunch(context.Background(), tmuxx.Session{ID: "$4", Name: "alpha"}, RelaunchRequest{Role: "planner"})
+
+	var sole *SoleWindowRecoveryError
+	if !errors.As(err, &sole) {
+		t.Fatalf("Relaunch() error = %v, want *SoleWindowRecoveryError", err)
+	}
+	want := "it is the only window in session alpha, so removing it would destroy the session. Recreate the fleet instead:\n" +
+		"  agentctl kill --session alpha\n" +
+		"  agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work"
+	if got := err.Error(); got != want {
+		t.Fatalf("Relaunch() error = %q, want %q", got, want)
+	}
+	wantCalls := metadataReadCalls()
+	wantCalls = append(wantCalls, tmuxx.Call{Executable: "tmux", Args: []string{
+		"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}",
+	}})
+	assertCalls(t, runner, wantCalls...)
+	assertNoWindowKill(t, runner)
+	assertNoCreationCall(t, runner)
+}
+
+func TestRelaunchSoleWindowRemedyReconstructsOnlyKnownFleetValues(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		responses []tmuxx.Response
+		request   RelaunchRequest
+		want      string
+	}{
+		{
+			name: "stored fleet omits valueless flags",
+			responses: storedMetadataResponses(
+				"planner,reviewer",
+				"planner:claude::,reviewer:codex:gpt-5.6:high",
+				"/srv/work",
+				"@23\tplanner\tplanner\tclaude\t\t\t\n",
+			),
+			request: RelaunchRequest{Role: "planner"},
+			want: "it is the only window in session epic123, so removing it would destroy the session. Recreate the fleet instead:\n" +
+				"  agentctl kill --session epic123\n" +
+				"  agentctl launch --session epic123 --roles planner:claude,reviewer:codex --models reviewer:gpt-5.6 --efforts reviewer:high --dir /srv/work",
+		},
+		{
+			name: "single-role legacy fleet uses effective supplied values",
+			responses: storedMetadataResponses(
+				"planner", "", "", "@23\tplanner\tplanner\tclaude\topus-4-1\thigh\t\n",
+			),
+			request: RelaunchRequest{
+				Role: "planner", Harness: stringPtr("claude"), Model: stringPtr("opus-4-1"),
+				Effort: stringPtr("high"), Directory: stringPtr("/srv/work space"),
+			},
+			want: "it is the only window in session epic123, so removing it would destroy the session. Recreate the fleet instead:\n" +
+				"  agentctl kill --session epic123\n" +
+				"  agentctl launch --session epic123 --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir '/srv/work space'",
+		},
+		{
+			name: "multi-role legacy fleet omits unreconstructable command block",
+			responses: storedMetadataResponses(
+				"planner,reviewer", "", "", "@23\tplanner\tplanner\tclaude\t\t\t\n",
+			),
+			request: RelaunchRequest{Role: "planner", Harness: stringPtr("claude"), Directory: stringPtr("/srv/work")},
+			want: "it is the only window in session epic123, so removing it would destroy the session. Recreate the fleet instead, " +
+				"but agentctl could not reconstruct an equivalent launch command from this session's metadata",
+		},
+		{
+			name: "relative stored directory omits unreconstructable command block",
+			responses: storedMetadataResponses(
+				"planner", "planner:claude::", "relative/work", "@23\tplanner\tplanner\tclaude\t\t\t\n",
+			),
+			request: RelaunchRequest{Role: "planner", Directory: stringPtr("/srv/work")},
+			want: "it is the only window in session epic123, so removing it would destroy the session. Recreate the fleet instead, " +
+				"but agentctl could not reconstruct an equivalent launch command from this session's metadata",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := append(tt.responses, tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")})
+			runner := tmuxx.NewFakeRunner(responses...)
+
+			_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), tt.request)
+
+			var sole *SoleWindowRecoveryError
+			if !errors.As(err, &sole) {
+				t.Fatalf("Relaunch() error = %v, want *SoleWindowRecoveryError", err)
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("Relaunch() error = %q, want %q", got, tt.want)
+			}
+			assertNoWindowKill(t, runner)
+			assertNoCreationCall(t, runner)
+		})
+	}
+}
+
+func TestRelaunchNoBaselineRecoveryDoesNotKillBeforePreflightAndDirectoryPass(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		lookPath preflight.LookPathFunc
+		stat     func(string) (fs.FileInfo, error)
+		wantType any
+	}{
+		{
+			name: "preflight failure",
+			lookPath: func(name string) (string, error) {
+				if name == "claude" {
+					return "", errors.New("missing")
+				}
+				return "/bin/" + name, nil
+			},
+			stat:     func(string) (fs.FileInfo, error) { return testFileInfo{mode: fs.ModeDir | 0o755}, nil },
+			wantType: &preflight.MissingExecutableError{},
+		},
+		{
+			name:     "directory failure",
+			lookPath: presentExecutable,
+			stat:     func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist },
+			wantType: &StoredDirectoryError{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			responses := storedMetadataResponses("planner", "planner:claude::", "/repo",
+				"@23\tplanner\tplanner\tclaude\t\t\t\n@24\tpeer\t\t\t\t\t\n")
+			responses = append(responses, tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")})
+			runner := tmuxx.NewFakeRunner(responses...)
+			launcher := New(runner, Dependencies{LookPath: tt.lookPath, Stat: tt.stat})
+
+			_, err := launcher.Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
+			if err == nil {
+				t.Fatal("Relaunch() error = nil, want refusal")
+			}
+			switch tt.wantType.(type) {
+			case *preflight.MissingExecutableError:
+				var want *preflight.MissingExecutableError
+				if !errors.As(err, &want) {
+					t.Fatalf("Relaunch() error = %v, want MissingExecutableError", err)
+				}
+			case *StoredDirectoryError:
+				var want *StoredDirectoryError
+				if !errors.As(err, &want) {
+					t.Fatalf("Relaunch() error = %v, want StoredDirectoryError", err)
+				}
+			}
+			assertNoWindowKill(t, runner)
+		})
+	}
+}
+
+func TestRelaunchNoBaselineRecoveryKillFailureCreatesNothing(t *testing.T) {
+	responses := storedMetadataResponses("planner", "planner:claude::", "/repo",
+		"@23\tplanner\tplanner\tclaude\t\t\t\n@24\tpeer\t\t\t\t\t\n")
+	responses = append(responses,
+		tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")},
+		tmuxx.Response{Err: errors.New("window disappeared")},
+	)
+	runner := tmuxx.NewFakeRunner(responses...)
+
+	_, err := relaunchLauncher(runner, nil).Relaunch(context.Background(), relaunchSession(), RelaunchRequest{Role: "planner"})
+
+	var kill *RecoveryKillError
+	if !errors.As(err, &kill) {
+		t.Fatalf("Relaunch() error = %v, want *RecoveryKillError", err)
+	}
+	if got, want := err.Error(), "failed to relaunch planner; could not remove unproven window @23 in epic123: tmux kill window: window disappeared; nothing was created"; got != want {
+		t.Fatalf("Relaunch() error = %q, want %q", got, want)
+	}
+	assertNoCreationCall(t, runner)
+	wantLast := tmuxx.Call{Executable: "tmux", Args: []string{"kill-window", "-t", "@23"}}
+	if got := runner.Calls[len(runner.Calls)-1]; !reflect.DeepEqual(got, wantLast) {
+		t.Fatalf("last call = %#v, want exact-ID recovery kill %#v", got, wantLast)
+	}
+}
+
 func TestRelaunchCreatesWithoutAnIndexArgument(t *testing.T) {
 	responses := storedMetadataResponses("planner", "planner:claude::", "/repo", "")
 	responses = append(responses,
@@ -544,20 +799,20 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("2.1.220\n")}},
 			wantState: status.StateRunning,
-			message:   "role planner already has 1 window in epic123 (@23 running); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 running); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 		{
 			name:      "dead",
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t1\t1\n")}},
 			wantState: status.StateDead,
-			message:   "role planner already has 1 window in epic123 (@23 dead); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 dead); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 		{
 			name:      "unmanaged without stored role",
 			windows:   "@23\tplanner\t\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateUnmanaged,
-			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch accepts only an absent role or a recoverable no-baseline window",
 			wantCalls: []tmuxx.Call{
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
@@ -575,27 +830,27 @@ func TestRelaunchRefusesAnyExistingRoleWindowRenderingObservedState(t *testing.T
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t2\n%43\t4243\t0\t2\n")}},
 			wantState: status.StateUnmanaged,
-			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 unmanaged); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 		{
 			name:      "zero panes",
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("")}},
 			wantState: status.StateMissing,
-			message:   "role planner already has 1 window in epic123 (@23 missing); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 missing); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 		{
 			name:      "unexpected process",
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			extra:     []tmuxx.Response{{Stdout: []byte("%42\t4242\t0\t1\n")}, {Stdout: []byte("bash\n")}},
 			wantState: status.StateUnexpectedProcess,
-			message:   "role planner already has 1 window in epic123 (@23 unexpected-process); relaunch creates only absent role windows",
+			message:   "role planner already has 1 window in epic123 (@23 unexpected-process); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 		{
 			name:      "ambiguous",
 			windows:   "@23\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n@31\tplanner\tplanner\tclaude\tfable\t\t2.1.220\n",
 			wantState: status.StateAmbiguous,
-			message:   "role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch creates only absent role windows",
+			message:   "role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch accepts only an absent role or a recoverable no-baseline window",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -991,12 +1246,17 @@ func relaunchPrefixResponses(end int) []tmuxx.Response {
 
 func assertNoCreation(t *testing.T, runner *tmuxx.FakeRunner) {
 	t.Helper()
+	assertNoCreationCall(t, runner)
+	assertNoWindowKill(t, runner)
+}
+
+func assertNoCreationCall(t *testing.T, runner *tmuxx.FakeRunner) {
+	t.Helper()
 	for _, call := range runner.Calls {
 		if call.Executable == "tmux" && len(call.Args) > 0 && (call.Args[0] == "new-window" || call.Args[0] == "new-session") {
 			t.Fatalf("unexpected creation call: %#v", call)
 		}
 	}
-	assertNoWindowKill(t, runner)
 }
 
 func assertNoWindowKill(t *testing.T, runner *tmuxx.FakeRunner) {
@@ -1006,4 +1266,20 @@ func assertNoWindowKill(t *testing.T, runner *tmuxx.FakeRunner) {
 			t.Fatalf("unexpected kill call: %#v", call)
 		}
 	}
+}
+
+type eventRunner struct {
+	fake   *tmuxx.FakeRunner
+	events *[]string
+}
+
+func (r eventRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	if executable == "tmux" && len(args) == 3 && args[0] == "kill-window" {
+		*r.events = append(*r.events, "kill:"+args[2])
+	}
+	return r.fake.Output(ctx, executable, args...)
+}
+
+func (r eventRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	return r.fake.RunInteractive(ctx, executable, args...)
 }

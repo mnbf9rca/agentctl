@@ -8,6 +8,7 @@ const (
 	StateRunning           State = "running"
 	StateDead              State = "dead"
 	StateMissing           State = "missing"
+	StateNoBaseline        State = "no-baseline"
 	StateUnexpectedProcess State = "unexpected-process"
 	StateUnmanaged         State = "unmanaged"
 	StateAmbiguous         State = "ambiguous"
@@ -18,6 +19,7 @@ var states = [...]State{
 	StateUnmanaged,
 	StateMissing,
 	StateDead,
+	StateNoBaseline,
 	StateUnexpectedProcess,
 	StateRunning,
 }

@@ -3,7 +3,7 @@ name: agentctl
 description: Use when operating an agentctl fleet from inside it — checking sibling agent status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
 compatibility: Requires the agentctl binary on PATH, run from inside an agentctl-managed tmux window.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Driving agentctl
@@ -50,11 +50,14 @@ agentctl kill --session SESSION
 
 Status is roster-driven: roles come from fleet metadata, not from whatever
 windows exist. The states `ambiguous`, `unmanaged`, `missing`, `dead`,
-`unexpected-process`, `running` are distinct claims with distinct meanings —
-see [references/status-states.md](references/status-states.md). Never infer
+`no-baseline`, `unexpected-process`, `running` are distinct claims with
+distinct meanings — see
+[references/status-states.md](references/status-states.md). Never infer
 liveness from anything else (pane text, AMQ traffic, silence). An exited
 agent normally reports `missing`, not `dead`, because managed windows close
-on exit.
+on exit. `no-baseline` means launch retained the role without proving its
+process identity; control commands still fail closed, and only the operator
+may decide whether to recover it with `relaunch`.
 
 ## 4. Rules the binary does not enforce
 

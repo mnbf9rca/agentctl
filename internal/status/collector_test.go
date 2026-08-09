@@ -251,10 +251,10 @@ func TestCollectorAppliesStatePrecedenceAndSkipsUnneededProbes(t *testing.T) {
 			wantCallCount: 5,
 		},
 		{
-			name:          "empty baseline is unexpected without process probe",
+			name:          "empty baseline is no-baseline without process probe",
 			windows:       "@7\tplanner\tplanner\tclaude\tfable\tmax\t\n",
 			afterWindows:  []tmuxx.Response{{Stdout: []byte("%12\t111\t0\t1\n")}},
-			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", PaneID: "%12", State: StateUnexpectedProcess}},
+			wantAgents:    []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", Window: "planner", PaneID: "%12", State: StateNoBaseline}},
 			wantCallCount: 5,
 		},
 		{

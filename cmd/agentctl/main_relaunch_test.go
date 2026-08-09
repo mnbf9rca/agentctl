@@ -84,6 +84,16 @@ func TestRunRelaunchReportsWhatItCreatedAndEveryFieldsProvenance(t *testing.T) {
 			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), effort default (stored), dir /elsewhere (flag override)\n" +
 				"agentctl: planner now runs in /elsewhere; the fleet's recorded directory /repo is unchanged\n",
 		},
+		{
+			name: "recovery states the destroyed window",
+			result: fleet.RelaunchResult{
+				Role: "planner", Session: "epic123", Harness: "claude",
+				Directory: "/repo", WindowID: "@71", PaneID: "%88", RecoveredWindowID: "@23",
+				HarnessFrom: fleet.ProvenanceStored, ModelFrom: fleet.ProvenanceStored, EffortFrom: fleet.ProvenanceStored, DirectoryFrom: fleet.ProvenanceStored,
+			},
+			want: "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model default (stored), effort default (stored), dir /repo (stored)\n" +
+				"recovered: removed window @23, which carried no @agentctl_process baseline, and recreated planner\n",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			relauncher := relauncherFunc(func(context.Context, tmuxx.Session, fleet.RelaunchRequest) (fleet.RelaunchResult, error) {
@@ -247,7 +257,18 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 				{ID: "@23", State: status.StateRunning},
 			}},
 			code: exitRole,
-			want: "agentctl: refusing to relaunch planner; role planner already has 1 window in epic123 (@23 running); relaunch creates only absent role windows\n",
+			want: "agentctl: refusing to relaunch planner; role planner already has 1 window in epic123 (@23 running); relaunch accepts only an absent role or a recoverable no-baseline window\n",
+		},
+		{
+			name: "sole no-baseline window would destroy session",
+			err: &fleet.SoleWindowRecoveryError{
+				Role: "planner", Session: "alpha",
+				LaunchCommand: "agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work",
+			},
+			code: exitRole,
+			want: "agentctl: refusing to relaunch planner; it is the only window in session alpha, so removing it would destroy the session. Recreate the fleet instead:\n" +
+				"  agentctl kill --session alpha\n" +
+				"  agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work\n",
 		},
 		{
 			name: "dead window is not a relaunch",
@@ -255,7 +276,7 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 				{ID: "@23", State: status.StateDead},
 			}},
 			code: exitRole,
-			want: "agentctl: refusing to relaunch planner; role planner already has 1 window in epic123 (@23 dead); relaunch creates only absent role windows\n",
+			want: "agentctl: refusing to relaunch planner; role planner already has 1 window in epic123 (@23 dead); relaunch accepts only an absent role or a recoverable no-baseline window\n",
 		},
 		{
 			name: "ambiguous role",
@@ -263,7 +284,7 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 				{ID: "@23", State: status.StateAmbiguous}, {ID: "@31", State: status.StateAmbiguous},
 			}},
 			code: exitRole,
-			want: "agentctl: refusing to relaunch planner; role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch creates only absent role windows\n",
+			want: "agentctl: refusing to relaunch planner; role planner already has 2 windows in epic123 (@23 ambiguous, @31 ambiguous); relaunch accepts only an absent role or a recoverable no-baseline window\n",
 		},
 		{
 			name: "stored directory unusable",
@@ -288,6 +309,24 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 			err:  &fleet.WindowCreationError{Role: "planner", Cause: errors.New("invalid tmux creation output")},
 			code: exitTmux,
 			want: "agentctl: invalid tmux creation output; a window named planner may exist; inspect with tmux list-windows\n",
+		},
+		{
+			name: "recovery kill failure",
+			err: &fleet.RecoveryKillError{
+				Role: "planner", Session: "epic123", WindowID: "@23", Cause: &tmuxx.TmuxError{Err: errors.New("tmux kill window: target vanished")},
+			},
+			code: exitTmux,
+			want: "agentctl: failed to relaunch planner; could not remove unproven window @23 in epic123: tmux kill window: target vanished; nothing was created\n",
+		},
+		{
+			name: "failure after successful recovery preserves both facts",
+			err: &fleet.RecoveredWindowError{
+				Role: "planner", WindowID: "@23",
+				Cause: &fleet.RelaunchError{Role: "planner", WindowID: "@71", Cause: errors.New("stamp failed")},
+			},
+			code: exitLaunch,
+			want: "agentctl: failed to relaunch planner; removed window @71: stamp failed\n" +
+				"recovered: removed window @23, which carried no @agentctl_process baseline; planner was not recreated\n",
 		},
 		{
 			name: "post-ownership rollback",

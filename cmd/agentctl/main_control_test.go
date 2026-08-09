@@ -244,7 +244,7 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 				}, Pane: plannerPane,
 			},
 			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send clear; epic123:planner has empty @agentctl_process baseline\n",
+			wantError: "agentctl: refusing to clear planner; window @4 has no @agentctl_process baseline; recover the role with \"agentctl relaunch planner\"\n",
 		},
 		{
 			name:      "process unavailable",

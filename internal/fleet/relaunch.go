@@ -9,6 +9,7 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
+	"github.com/mnbf9rca/agentctl/internal/shellq"
 	"github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -48,6 +49,10 @@ type RelaunchResult struct {
 	Directory string
 	WindowID  tmuxx.WindowID
 	PaneID    tmuxx.PaneID
+
+	// RecoveredWindowID is the pre-existing no-baseline window removed before
+	// creation. It is empty for the ordinary absent-role path.
+	RecoveredWindowID tmuxx.WindowID
 
 	HarnessFrom   Provenance
 	ModelFrom     Provenance
@@ -134,12 +139,29 @@ type ObservedWindow struct {
 	State status.State
 }
 
-// WindowPresentError reports that the role's window has not gone away. Relaunch
-// recreates what is absent; it never removes or restarts what exists.
+// WindowPresentError reports an existing-window state outside the one bounded
+// no-baseline recovery case.
 type WindowPresentError struct {
 	Session tmuxx.Session
 	Role    string
 	Windows []ObservedWindow
+}
+
+// SoleWindowRecoveryError refuses a recovery kill that would destroy the
+// containing session. LaunchCommand is empty when the session metadata cannot
+// reconstruct an equivalent fleet.
+type SoleWindowRecoveryError struct {
+	Role          string
+	Session       string
+	LaunchCommand string
+}
+
+func (e *SoleWindowRecoveryError) Error() string {
+	prefix := fmt.Sprintf("it is the only window in session %s, so removing it would destroy the session. Recreate the fleet instead", e.Session)
+	if e.LaunchCommand == "" {
+		return prefix + ", but agentctl could not reconstruct an equivalent launch command from this session's metadata"
+	}
+	return fmt.Sprintf("%s:\n  agentctl kill --session %s\n  %s", prefix, e.Session, e.LaunchCommand)
 }
 
 func (e *WindowPresentError) Error() string {
@@ -151,7 +173,7 @@ func (e *WindowPresentError) Error() string {
 	if len(e.Windows) == 1 {
 		noun = "window"
 	}
-	return fmt.Sprintf("role %s already has %d %s in %s (%s); relaunch creates only absent role windows",
+	return fmt.Sprintf("role %s already has %d %s in %s (%s); relaunch accepts only an absent role or a recoverable no-baseline window",
 		e.Role, len(e.Windows), noun, e.Session.Name, strings.Join(rendered, ", "))
 }
 
@@ -214,6 +236,34 @@ func (e *WindowCreationError) Error() string {
 
 func (e *WindowCreationError) Unwrap() error { return e.Cause }
 
+// RecoveryKillError reports that relaunch classified one window as
+// no-baseline but could not remove that exact ID. Nothing has been created.
+type RecoveryKillError struct {
+	Role     string
+	Session  string
+	WindowID tmuxx.WindowID
+	Cause    error
+}
+
+func (e *RecoveryKillError) Error() string {
+	return fmt.Sprintf("failed to relaunch %s; could not remove unproven window %s in %s: %v; nothing was created",
+		e.Role, e.WindowID, e.Session, e.Cause)
+}
+
+func (e *RecoveryKillError) Unwrap() error { return e.Cause }
+
+// RecoveredWindowError preserves the fact that a no-baseline window was
+// removed before a later relaunch failure. Cause retains the existing typed
+// error classification and message.
+type RecoveredWindowError struct {
+	Role     string
+	WindowID tmuxx.WindowID
+	Cause    error
+}
+
+func (e *RecoveredWindowError) Error() string { return e.Cause.Error() }
+func (e *RecoveredWindowError) Unwrap() error { return e.Cause }
+
 // RelaunchError reports a post-ownership relaunch failure and its one cleanup
 // attempt. Only the window this invocation created is ever removed.
 type RelaunchError struct {
@@ -233,9 +283,10 @@ func (e *RelaunchError) Error() string {
 
 func (e *RelaunchError) Unwrap() error { return e.Cause }
 
-// Relaunch recreates one absent role window inside an existing managed session.
-// Stored per-role configuration is authoritative; explicit options override it
-// per field and every field's provenance is reported.
+// Relaunch recreates one absent role window or recovers one bounded
+// no-baseline window inside an existing managed session. Stored per-role
+// configuration is authoritative; explicit options override it per field and
+// every field's provenance is reported.
 func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request RelaunchRequest) (RelaunchResult, error) {
 	if err := config.ValidateRoleName(request.Role); err != nil {
 		return RelaunchResult{}, err
@@ -267,8 +318,15 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 	if err != nil {
 		return RelaunchResult{}, err
 	}
-	if err := l.requireAbsentWindow(ctx, session, request.Role); err != nil {
+	recoveredWindowID, windowCount, err := l.classifyRelaunchWindow(ctx, session, request.Role)
+	if err != nil {
 		return RelaunchResult{}, err
+	}
+	if recoveredWindowID != "" && windowCount == 1 {
+		return RelaunchResult{}, &SoleWindowRecoveryError{
+			Role: role.Name, Session: session.Name,
+			LaunchCommand: recoveryLaunchCommand(session.Name, role, directory, provenance),
+		}
 	}
 	if err := preflight.CheckExecutables(config.FleetConfig{Roles: []config.RoleConfig{role}}, l.lookPath); err != nil {
 		return RelaunchResult{}, err
@@ -276,45 +334,60 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 	if err := l.checkRelaunchDirectory(session, request, role.Name, directory); err != nil {
 		return RelaunchResult{}, err
 	}
+	if recoveredWindowID != "" {
+		if err := l.tmux.KillWindow(ctx, recoveredWindowID); err != nil {
+			return RelaunchResult{}, &RecoveryKillError{
+				Role: role.Name, Session: session.Name, WindowID: recoveredWindowID, Cause: tmuxx.ClassifyError(err),
+			}
+		}
+	}
 
 	created, err := l.newWindow(ctx, session.ID, session.Name, role, directory)
 	if err != nil {
 		if errors.Is(err, tmuxx.ErrCreationOutput) {
-			return RelaunchResult{}, &WindowCreationError{Role: role.Name, Cause: err}
+			return RelaunchResult{}, recoveredWindowError(recoveredWindowID, role.Name, &WindowCreationError{Role: role.Name, Cause: err})
 		}
-		return RelaunchResult{}, tmuxx.ClassifyError(err)
+		return RelaunchResult{}, recoveredWindowError(recoveredWindowID, role.Name, tmuxx.ClassifyError(err))
 	}
 	if err := l.verifyCreatedWindow(ctx, session, role.Name, created.WindowID); err != nil {
-		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
+		return RelaunchResult{}, recoveredWindowError(recoveredWindowID, role.Name, l.rollbackWindow(ctx, created.WindowID, role.Name, err))
 	}
 	if err := l.stampWindow(ctx, created.WindowID, created.PanePID, role); err != nil {
-		return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
+		return RelaunchResult{}, recoveredWindowError(recoveredWindowID, role.Name, l.rollbackWindow(ctx, created.WindowID, role.Name, err))
 	}
 	if provenance.rewritesFleet() {
 		updated := replaceRole(provenance.storedRoles, role)
 		if err := l.tmux.SetSessionOption(ctx, session.ID, optionFleet, EncodeFleet(updated)); err != nil {
-			return RelaunchResult{}, l.rollbackWindow(ctx, created.WindowID, role.Name, err)
+			return RelaunchResult{}, recoveredWindowError(recoveredWindowID, role.Name, l.rollbackWindow(ctx, created.WindowID, role.Name, err))
 		}
 	}
 
 	result := RelaunchResult{
-		Role:          role.Name,
-		Session:       session.Name,
-		Harness:       string(role.Harness),
-		Model:         role.Model,
-		Effort:        role.Effort,
-		Directory:     directory,
-		WindowID:      created.WindowID,
-		PaneID:        created.PaneID,
-		HarnessFrom:   provenance.harness,
-		ModelFrom:     provenance.model,
-		EffortFrom:    provenance.effort,
-		DirectoryFrom: provenance.directory,
+		Role:              role.Name,
+		Session:           session.Name,
+		Harness:           string(role.Harness),
+		Model:             role.Model,
+		Effort:            role.Effort,
+		Directory:         directory,
+		WindowID:          created.WindowID,
+		PaneID:            created.PaneID,
+		RecoveredWindowID: recoveredWindowID,
+		HarnessFrom:       provenance.harness,
+		ModelFrom:         provenance.model,
+		EffortFrom:        provenance.effort,
+		DirectoryFrom:     provenance.directory,
 	}
 	if provenance.directory == ProvenanceOverride && provenance.storedDirectory != directory {
 		result.StoredDirectory = provenance.storedDirectory
 	}
 	return result, nil
+}
+
+func recoveredWindowError(windowID tmuxx.WindowID, role string, cause error) error {
+	if windowID == "" {
+		return cause
+	}
+	return &RecoveredWindowError{Role: role, WindowID: windowID, Cause: cause}
 }
 
 // sources records where each effective field came from and what the session
@@ -326,6 +399,7 @@ type sources struct {
 	directory       Provenance
 	storedRoles     []config.RoleConfig
 	storedDirectory string
+	roster          []string
 }
 
 func (s sources) rewritesFleet() bool {
@@ -374,7 +448,7 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 
 	switch {
 	case fleetValue == "" && directoryValue == "":
-		return legacyConfiguration(session, request)
+		return legacyConfiguration(session, request, rosterRoles)
 	case fleetValue == "":
 		return config.RoleConfig{}, "", sources{}, &MetadataError{
 			Session: session,
@@ -416,6 +490,7 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 		directory:       ProvenanceStored,
 		storedRoles:     storedRoles,
 		storedDirectory: directoryValue,
+		roster:          rosterRoles,
 	}
 	role := storedRoles[roleIndex(storedRoles, request.Role)]
 	directory := directoryValue
@@ -443,7 +518,7 @@ func (l Launcher) resolveConfiguration(ctx context.Context, session tmuxx.Sessio
 // directory is never defaulted to the invocation directory: silently relaunching
 // a role somewhere the rest of the fleet does not live is the hazard this
 // refusal exists to prevent.
-func legacyConfiguration(session tmuxx.Session, request RelaunchRequest) (config.RoleConfig, string, sources, error) {
+func legacyConfiguration(session tmuxx.Session, request RelaunchRequest, roster []string) (config.RoleConfig, string, sources, error) {
 	if request.Harness == nil || request.Directory == nil {
 		return config.RoleConfig{}, "", sources{}, &LegacySessionError{Session: session, Role: request.Role}
 	}
@@ -463,16 +538,17 @@ func legacyConfiguration(session tmuxx.Session, request RelaunchRequest) (config
 		model:     ProvenanceFlags,
 		effort:    ProvenanceFlags,
 		directory: ProvenanceFlags,
+		roster:    roster,
 	}, nil
 }
 
-// requireAbsentWindow refuses unless the role matches exactly zero windows. A
-// window with no panes refuses too: recreating beside it would manufacture the
-// ambiguity §13.5 fails closed on.
-func (l Launcher) requireAbsentWindow(ctx context.Context, session tmuxx.Session, role string) error {
+// classifyRelaunchWindow accepts an absent role or exactly one live managed
+// window with no baseline. Every other observed state refuses. A window with
+// no panes refuses too: recreating beside it would manufacture ambiguity.
+func (l Launcher) classifyRelaunchWindow(ctx context.Context, session tmuxx.Session, role string) (tmuxx.WindowID, int, error) {
 	windows, err := l.tmux.ListWindows(ctx, session.ID)
 	if err != nil {
-		return tmuxx.ClassifyError(err)
+		return "", 0, tmuxx.ClassifyError(err)
 	}
 	matches := make([]tmuxx.Window, 0, 1)
 	for _, window := range windows {
@@ -481,13 +557,89 @@ func (l Launcher) requireAbsentWindow(ctx context.Context, session tmuxx.Session
 		}
 	}
 	if len(matches) == 0 {
-		return nil
+		return "", len(windows), nil
 	}
 	observed, err := l.observeWindows(ctx, matches, role)
 	if err != nil {
-		return err
+		return "", len(windows), err
 	}
-	return &WindowPresentError{Session: session, Role: role, Windows: observed}
+	if len(observed) == 1 && observed[0].State == status.StateNoBaseline {
+		return observed[0].ID, len(windows), nil
+	}
+	return "", len(windows), &WindowPresentError{Session: session, Role: role, Windows: observed}
+}
+
+func recoveryLaunchCommand(session string, role config.RoleConfig, directory string, provenance sources) string {
+	roles := provenance.storedRoles
+	launchDirectory := provenance.storedDirectory
+	if roles == nil {
+		if len(provenance.roster) != 1 || provenance.roster[0] != role.Name {
+			return ""
+		}
+		roles = []config.RoleConfig{role}
+		launchDirectory = directory
+	} else if !filepath.IsAbs(launchDirectory) {
+		return ""
+	}
+	arguments := []string{"agentctl", "launch", "--session", session, "--roles", encodeRoleHarnesses(roles)}
+	if models := encodeRoleModels(roles); models != "" {
+		arguments = append(arguments, "--models", models)
+	}
+	if efforts := encodeRoleEfforts(roles); efforts != "" {
+		arguments = append(arguments, "--efforts", efforts)
+	}
+	arguments = append(arguments, "--dir", launchDirectory)
+	return joinDisplayCommand(arguments)
+}
+
+func encodeRoleHarnesses(roles []config.RoleConfig) string {
+	entries := make([]string, len(roles))
+	for index, role := range roles {
+		entries[index] = role.Name + ":" + string(role.Harness)
+	}
+	return strings.Join(entries, ",")
+}
+
+func encodeRoleModels(roles []config.RoleConfig) string {
+	entries := make([]string, 0, len(roles))
+	for _, role := range roles {
+		if role.Model != "" {
+			entries = append(entries, role.Name+":"+role.Model)
+		}
+	}
+	return strings.Join(entries, ",")
+}
+
+func encodeRoleEfforts(roles []config.RoleConfig) string {
+	entries := make([]string, 0, len(roles))
+	for _, role := range roles {
+		if role.Effort != "" {
+			entries = append(entries, role.Name+":"+role.Effort)
+		}
+	}
+	return strings.Join(entries, ",")
+}
+
+func joinDisplayCommand(arguments []string) string {
+	rendered := make([]string, len(arguments))
+	for index, argument := range arguments {
+		rendered[index] = displayShellWord(argument)
+	}
+	return strings.Join(rendered, " ")
+}
+
+func displayShellWord(value string) string {
+	if value != "" && strings.IndexFunc(value, func(character rune) bool {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') {
+			return false
+		}
+		return !strings.ContainsRune("_@%+=:,./-", character)
+	}) == -1 {
+		return value
+	}
+	return shellq.Quote(value)
 }
 
 // verifyCreatedWindow closes the absence-check/create race before any success
@@ -551,7 +703,7 @@ func (l Launcher) observeWindow(ctx context.Context, window tmuxx.Window, role s
 		return status.StateDead, nil
 	}
 	if window.Process == "" {
-		return status.StateUnexpectedProcess, nil
+		return status.StateNoBaseline, nil
 	}
 	process, err := l.tmux.ProcessName(ctx, pane.PID)
 	if err != nil {
