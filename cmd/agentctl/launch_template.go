@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -40,6 +41,17 @@ type mergedTemplateRole struct {
 	templateIndex int
 	fromTemplate  bool
 	sources       launchRoleProvenance
+}
+
+func decodeLaunchTemplate(path *string) (*launchtemplate.Document, error) {
+	if path == nil {
+		return nil, nil
+	}
+	document, err := launchtemplate.Decode(*path)
+	if err != nil {
+		return nil, err
+	}
+	return &document, nil
 }
 
 func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions) (launchConfiguration, error) {
@@ -188,5 +200,25 @@ func wrapTemplateDirectoryError(path, value string, err error) error {
 	reason := strings.TrimPrefix(validation.Reason, "template path ")
 	return &launchtemplate.Error{
 		Path: path, Location: "dir", Reason: fmt.Sprintf("path %q %s", value, reason), Cause: err,
+	}
+}
+
+func writeLaunchTemplateProvenance(stdout io.Writer, session string, configuration launchConfiguration, directory string) {
+	if configuration.template == nil {
+		return
+	}
+	for index, role := range configuration.fleet.Roles {
+		source := configuration.template.roles[index]
+		fmt.Fprintf(stdout,
+			"agentctl: launched %s in %s: harness %s (%s), model %s (%s), effort %s (%s)\n",
+			role.Name, session,
+			role.Harness, source.harness,
+			renderModel(role.Model), source.model,
+			renderEffort(role.Effort), source.effort,
+		)
+	}
+	if configuration.template.directorySupplied {
+		fmt.Fprintf(stdout, "agentctl: template %s: dir %s (%s)\n",
+			configuration.template.path, directory, configuration.template.directoryFrom)
 	}
 }

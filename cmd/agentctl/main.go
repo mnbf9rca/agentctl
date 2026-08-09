@@ -53,7 +53,8 @@ Commands:
 `
 
 var commandUsage = map[string]string{
-	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
+	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n" +
+		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
 	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE\n\n" +
 		"Recreates a role window that is absent or recovers one live managed window with no process baseline when another window keeps the session alive.\n" +
 		"It refuses every other existing-window state and reports configuration provenance.\n",
@@ -214,18 +215,28 @@ func runWithDependencies(
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
+		document, err := decodeLaunchTemplate(options.fromTemplate)
+		if err != nil {
+			return usageError(stderr, err.Error(), usage)
+		}
 		if err := config.ValidateSessionName(options.session); err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
-		fleetConfig, err := config.ParseFleet(options.roles, options.models, options.efforts)
+		launchConfig := launchConfiguration{directory: options.directory}
+		if document == nil {
+			launchConfig.fleet, err = config.ParseFleet(options.roles, options.models, options.efforts)
+		} else {
+			launchConfig, err = mergeLaunchTemplate(*document, options)
+		}
 		if err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
 		deps.launch.fleet.Stderr = stderr
-		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, fleetConfig, options.directory)
+		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, launchConfig.fleet, launchConfig.directory)
 		if code := launchResult(stderr, err, usage); code != exitOK {
 			return code
 		}
+		writeLaunchTemplateProvenance(stdout, options.session, launchConfig, launched.Directory)
 		code := confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
 		writeSkillLaunchNotices(stderr, deps.launch.skillHome, deps.launch.skillVersion)
 		return code
@@ -575,18 +586,20 @@ func attachError(stderr io.Writer, err error) int {
 }
 
 type launchOptions struct {
-	session   string
-	roles     string
-	rolesSet  bool
-	models    *string
-	efforts   *string
-	directory *string
+	session      string
+	roles        string
+	rolesSet     bool
+	fromTemplate *string
+	models       *string
+	efforts      *string
+	directory    *string
 }
 
 func parseLaunch(arguments []string) (launchOptions, error) {
 	flags := cliflags.New("launch")
 	session := flags.String("session", "", "session name")
 	roles := flags.String("roles", "", "role and harness assignments")
+	fromTemplate := flags.String("from-template", "", "JSON launch template")
 	models := flags.String("models", "", "role and model assignments")
 	efforts := flags.String("efforts", "", "role and effort assignments")
 	directory := flags.String("dir", "", "working directory")
@@ -599,6 +612,10 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 	}
 
 	options := launchOptions{session: *session, roles: *roles, rolesSet: flags.WasSet("roles")}
+	if flags.WasSet("from-template") {
+		templateValue := *fromTemplate
+		options.fromTemplate = &templateValue
+	}
 	if flags.WasSet("models") {
 		modelValue := *models
 		options.models = &modelValue
