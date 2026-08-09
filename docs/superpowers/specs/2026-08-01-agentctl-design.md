@@ -1282,9 +1282,9 @@ Consequently:
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and preserves rollback when observations remain unsettled through the timeout boundary; equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and, when observations remain unsettled through the timeout boundary, stamps no `@agentctl_process`, issues no kill, and lets the remaining roles continue (§6.6) while `relaunch` still rolls back its own created window (§8); equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
-  renders `unmanaged`; alive-pane-with-unavailable-identity and empty-baseline both render `unexpected-process`; zero
+  renders `unmanaged`; alive-pane-with-unavailable-identity renders `unexpected-process` and an empty baseline renders `no-baseline` (§6.3), with no process probe issued for the latter; zero
   panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
   executable, not the baseline; unmanaged session renders `managed:false` with an empty agents array and exit 0 while a
   non-`1` version still exits 3; the fake `Runner` recorded **no** row-7 calls and **no** row-14 call for any role whose
@@ -1594,6 +1594,7 @@ Three consequences bind the implementation:
 ## 14. Out of scope
 
 Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2 — unblocked but not implemented by
-§6.5's metadata) and restarting a role whose window still exists (§6.8 refuses `dead` rather than folding it into
-`missing`; a `restart` command would be filed separately if demand appears). `status` deliberately does not read
+§6.5's metadata) and restarting a role whose window still exists, **except** the bounded
+`no-baseline` recovery in §6.8 (which refuses `dead` rather than folding it into `missing`, and refuses every other
+present-window state; a general `restart` command would be filed separately if demand appears). `status` deliberately does not read
 `@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; per-harness effort allowlist enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
