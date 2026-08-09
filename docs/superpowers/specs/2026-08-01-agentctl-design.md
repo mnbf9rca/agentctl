@@ -244,16 +244,24 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
 6. After each window: stamp metadata in the exact order of §6.5, then capture the process baseline by polling
    `ps -o comm= -p <pane_pid>` (§13.2 row 14) — using the pid returned by the creation record (§13.2 rows 2–3), never a
    lookup — until §8's stable-pair rule accepts a non-`amq` observation, and store the result as
-   `@agentctl_process`. Poll parameters are fixed by §8. Timeout means the role failed to launch.
-7. Any failure after the session is owned — including baseline-capture timeout: stop, kill by the typed session ID,
+   `@agentctl_process`. Poll parameters are fixed by §8. Timeout does **not** fail the launch: no
+   `@agentctl_process` option is set for that window, the window is left in place, nothing is killed, and the
+   remaining roles continue to launch (§6.6). The role is then *unproven* — it exists, and agentctl has no evidence
+   of what is running in it.
+7. Any failure after the session is owned — excluding baseline-capture timeout, which is not a rollback-class
+   failure (§6.6): stop, kill by the typed session ID,
    report on stderr, exit 8. Failures *before* ownership are a different case. Both are specified in §6.6.
-8. After every role has launched successfully, reuse the typed session ID returned by `new-session` and run the same
+8. After every role has been attempted, reuse the typed session ID returned by `new-session` and run the same
    roster-driven collection and human-table rendering as `agentctl status --session S`; do not re-resolve the session
    by name. This is a fresh observation, not a rendering of the launch request: a role already missing, dead, unmanaged,
    or otherwise degraded is reported in that observed state. Those rows do not change exit 0, because the fleet launch
    itself succeeded. If collection or rendering cannot complete, write
    `agentctl: session "S" launched, but post-launch status could not be confirmed: CAUSE` to stderr and still exit 0;
-   the confirmation is advisory and cannot truthfully reclassify or roll back an already-successful launch.
+   the confirmation is advisory and cannot truthfully reclassify or roll back an already-successful launch. When one
+   or more roles are unproven, `launch` emits the §6.6 unproven-role messages, still renders this status observation,
+   and exits **9** (§9) instead of 0. A failed status confirmation remains advisory in that case too: it cannot
+   reclassify the launch in either direction, so the stderr line above is unchanged and the exit code stays 0, or 9
+   when a role is unproven.
 
 ### 6.2 clear / compact
 
@@ -266,6 +274,12 @@ Each unit is independently testable against the fake `Runner`; no unit reads ter
    exactly one pane and the pane is alive → exit 5. This stored-role comparison is the sole window-ownership check
    before pane validation; window `@agentctl_managed` and window version metadata are not read.
 5. Process identity against the recorded baseline (§8). Mismatch, empty baseline, or identity unavailable → exit 5.
+   All three fail closed at the same code, but the message states which one occurred (§1.1), and the empty-baseline
+   refusal names the remedy now that one exists:
+
+   ```text
+   agentctl: refusing to clear ROLE; window W has no @agentctl_process baseline; recover the role with "agentctl relaunch ROLE"
+   ```
 6. Self-target guard: when running inside tmux and `$TMUX_PANE` equals the resolved target pane, refuse → exit 5
    (`refusing to clear own pane`).
 7. Deliver via `DeliverPayload` (§13.6) to the resolved pane ID.
@@ -322,8 +336,9 @@ cause. A command did run, so exit 6 is available here in a way it is not for inp
 | 2 | `unmanaged` | stored window `@agentctl_role` does not exactly equal the roster role, **or more than one pane** |
 | 3 | `missing` | no window with this exact name, or the window has zero panes |
 | 4 | `dead` | pane reports `pane_dead` |
-| 5 | `unexpected-process` | observed executable ≠ stored baseline, **or** the baseline is empty, **or** identity is unavailable for an alive pane |
-| 6 | `running` | everything above passed |
+| 5 | `no-baseline` | the stored `@agentctl_process` is empty |
+| 6 | `unexpected-process` | observed executable ≠ stored baseline, **or** identity is unavailable for an alive pane |
+| 7 | `running` | everything above passed |
 
 No process probe (row 14) is issued once an earlier state applies — the probe is the last resort, not a precondition.
 
@@ -333,12 +348,19 @@ Three mappings are deliberate and easy to get backwards:
   window is created with, so it is no longer ours to describe. This matches control refusing the same window.
 - **Alive pane + identity unavailable → `unexpected-process`.** Identity *unverifiable* is not identity *verified*.
   Reporting `running` here would assert something unproven.
-- **Empty stored baseline → `unexpected-process`.** Same reasoning, and consistent with §8's fail-closed rule.
+- **Empty stored baseline → `no-baseline`, not `unexpected-process`.** Both fail closed identically for control
+  (§6.2 step 5, exit 5), but they are different facts and the operator's response differs. `unexpected-process` says a
+  proven pane is now occupied by something else — an unexplained event, to be investigated, and `relaunch` refuses it
+  (§6.8). `no-baseline` says agentctl never proved anything about this pane, usually because the launch poll timed out
+  (§8) — nothing is unexplained, and `relaunch` recovers it. Rendering both as `unexpected-process` asserted an event
+  ("the process changed") that did not occur in the second case. No §13.2 row 14 probe is issued for a `no-baseline`
+  row: the state is decided from metadata already in hand, so the probe-is-last-resort rule above is unchanged, and a
+  `ps` tool failure cannot fail a status listing on behalf of a row whose state was already settled.
 
 **Rendering.** `unexpected-process` shows the **currently observed** executable, not the stored baseline: the operator
 needs to see what *is* running, not what was expected. Fields that were never probed render as the empty string —
-`missing` → pane ID `''` and process `''`; `dead` → the real pane ID, process `''`; `unmanaged`/`ambiguous` → the
-observed pane ID when trivially known, else `''`, process `''`.
+`missing` → pane ID `''` and process `''`; `dead` → the real pane ID, process `''`; `no-baseline` → the real pane ID,
+process `''`; `unmanaged`/`ambiguous` → the observed pane ID when trivially known, else `''`, process `''`.
 
 Because managed windows run without `remain-on-exit`, an exited agent's window closes and normally reports `missing`,
 not `dead` — documented in `--help` and the README. JSON uses the brief's versioned schema (`"schema": 1`); `state` is a
@@ -603,14 +625,21 @@ means before any *window option*, never before any window.
 6. then, per window, in this order: `@agentctl_managed`, `@agentctl_role`, `@agentctl_harness`, `@agentctl_model`,
    `@agentctl_effort`, the baseline poll, and finally `@agentctl_process`.
 
+When the baseline poll times out (§8), the final `@agentctl_process` call is **not issued**. The option is left unset,
+never set to an empty string: the two are indistinguishable on read (§13.3), so the distinction exists only in the
+recorded call sequence, and that is where it is asserted. Every preceding window option is stamped in the same order —
+the timeout removes the last element of the sequence and reorders nothing.
+
 The stamped window `@agentctl_managed` marker is advisory metadata and remains part of that fixed stamping contract;
 it is not consumed as a window-ownership gate. The stored `@agentctl_role` is the sole window-ownership evidence.
 Agentctl writes it only during per-window stamping and never during session stamping, so a handmade window cannot
 inherit it from the session by construction.
 
 `@agentctl_process` is last by construction: it is the only value that cannot be known before the window is running.
-After the first role reaches that fully stamped state, `launch` clears the three identity variables from the session
-environment with §13.2 row 5a, in declaration order, before it creates a later role window.
+After the first role's per-window stamping concludes — **whether or not a baseline was accepted** — `launch` clears the
+three identity variables from the session environment with §13.2 row 5a, in declaration order, before it creates a
+later role window. The clear exists to stop a *hand-made* window inheriting stale identity (§13.2 row 5a note), a
+hazard entirely independent of whether the first role settled, so an unproven first role must not suppress it.
 
 **`@agentctl_fleet`** records the per-role configuration the roster alone cannot carry: `role:harness:model:effort` quads,
 comma-joined, in roster order. Every field is validated (§7), so neither `:` nor `,` can occur inside a field; a
@@ -651,6 +680,50 @@ session must exist to hold it, so it lands with the other session options rather
 Rollback is gated on **ownership**, and ownership begins at exactly one instant: when `new-session` returns output that
 parses into a session ID. Before that, agentctl owns nothing and destroys nothing. After it, the typed ID is the only
 thing rollback ever targets — a session is never killed by name (§13.1).
+
+**Baseline-poll timeout is not a launch failure.** It is carved out of everything below. On timeout for a role: set no
+`@agentctl_process` for that window, kill nothing, and continue with the remaining roles. Every other failure class —
+window creation, option stamping, creation-output parsing, and anything else after ownership — keeps the whole-session
+rollback in this section unchanged.
+
+The carve-out exists because the timeout's blast radius was inverted relative to its cause. Settling is slowest exactly
+when the host is most loaded, which is when the fleet is largest (SECURITY.md residual 1 measures 18 concurrent workers
+as a real operating condition), so the previous rule destroyed the largest fleets at their most likely failure moment
+because one role settled slowly. Containment does not require destruction: the target chain already refuses every
+control command against an empty `@agentctl_process` (§6.2 step 5, §8), so an unproven role is already inert.
+
+`launch` writes one line per unproven role to stderr, at the point the deadline is reached:
+
+```text
+agentctl: ROLE: no process baseline recorded; pane P did not yield two consecutive identical non-amq observations within 5s (OBSERVATION); window W was left in place
+```
+
+`OBSERVATION` reports what the poll actually saw at its final attempt, in one of exactly three forms, matching §8's
+three terminal conditions:
+
+```text
+last observed: "2.1.222", not repeated
+last observed: "amq"; the exec chain had not advanced past amq
+no identity was available for the pane's root process
+```
+
+It is knowable at the moment of timeout and costs no additional §13.2 row 14 call. It exists because the three
+conditions call for different operator responses — a flapping non-`amq` value means the harness is starting and the
+host is slow, a persistent `amq` means the exec chain is stuck, and an unavailable identity means the pane's root
+process could not be read at all — and a message reporting only "did not settle" would withhold the one fact that
+distinguishes them (§1.1).
+
+After every role has been attempted, `launch` writes exactly one summary line, listing the unproven roles in roster
+order:
+
+```text
+agentctl: session "S" launched; 1 of 4 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role until "agentctl relaunch ROLE" recovers it
+```
+
+The count phrasing takes no plural form — `1 of 4 roles unproven` and `3 of 4 roles unproven` are the same shape — so
+no pluralization rule is needed. Both lines are required: the per-role line is the observation, the summary is the
+claim about the fleet, and neither implies the other. The exit code is **9** (§9), and it applies whether one role or
+every role is unproven; the session is retained in both cases.
 
 **Failure after ownership → exit 8.** Stop, kill the typed session ID, and report exactly one of:
 
@@ -749,7 +822,8 @@ Only a command that is about to create a server has standing to proceed without 
 
 ### 6.8 relaunch
 
-`agentctl relaunch ROLE [--session S] [--harness H] [--model M] [--effort E] [--dir PATH]` recreates **one absent** role window
+`agentctl relaunch ROLE [--session S] [--harness H] [--model M] [--effort E] [--dir PATH]` recreates **one absent role
+window, or one present role window that carries no process baseline,**
 inside an existing managed session. ROLE is positional, mirroring `clear`/`compact`; duplicate options are rejected
 (§12.9) and every supplied value is validated per §7 before anything runs (violations exit 2).
 
@@ -773,13 +847,49 @@ reporting the provenance of every field is what keeps an override from silently 
    (`--model` and `--effort` are optional; absent means empty, the harness defaults). The directory is **never** defaulted to the
    invocation cwd — relaunching one role somewhere the rest of the fleet does not live is exactly the silent
    divergence this refusal exists to prevent.
-4. Window precondition: **exactly zero** windows match ROLE. Any match → exit 4, rendering the observed state by §6.3
-   precedence and every matching window ID (§13.5). `dead` is refused like any other survivor: a dead window exists and
-   its pane may still hold evidence, so relaunch never kills and recreates it. A **zero-pane** window refuses too —
-   creating beside it would manufacture the `ambiguous` §13.5 fails closed on.
+4. Window precondition. **Zero** windows match ROLE → proceed. **Exactly one** window matches and its state by §6.3
+   precedence is `no-baseline` → this is the **recovery case**: record that window ID and continue. No destruction
+   happens at this step. Any other observation → exit 4, rendering the observed state by §6.3 precedence and every
+   matching window ID (§13.5).
+
+   The precedence ordering does the discrimination, and three of its consequences are load-bearing:
+
+   - **`ambiguous` is never recovered.** Two windows sharing the role name refuse at exit 4 exactly as before.
+     Recovery requires exactly one match, so agentctl never chooses which of two windows to destroy.
+   - **`dead` is still refused**, including a dead pane carrying no baseline: `dead` precedes `no-baseline` in §6.3,
+     and a dead window's pane may still hold evidence, so relaunch never kills and recreates it.
+   - **`unmanaged` and a zero-pane window are still refused.** A role-metadata mismatch or a pane count other than one
+     means the window is not ours to describe, let alone destroy; and creating beside a zero-pane window would
+     manufacture the `ambiguous` state §13.5 fails closed on.
+
+   The recovery power is bounded to the never-proven case on purpose. A window with a *recorded* baseline that
+   mismatches the live process stays refused and investigated: a recorded baseline is proof agentctl once observed a
+   settled process in that pane, so a mismatch is an unexplained event and the pane is its only artifact. Recycling it
+   would also reintroduce heal-on-verify — the operator's remedy for "this role is refused" would become a command
+   that destroys the mismatch and mints a fresh baseline — which §8 rejects permanently. A `no-baseline` window holds
+   no such evidence: agentctl never proved anything about it, and the fail-closed chain already makes it
+   uncontrollable.
 5. Preflight `tmux`, `amq` and the effective harness on `PATH` → exit 7. The effective directory must exist and be a
    directory: supplied by `--dir` → exit 2 (parity with launch, §7); read from metadata → exit 3, naming the stored
    path and `--dir` as the remedy, because a stale recorded path is a session-state fact, not a usage error.
+5a. **Recovery kill (recovery case only).** Issue §13.2 row 11a against the exact window ID recorded in step 4. This is
+   the first and only destructive act, and its position is deliberate: every non-destructive check — session gate,
+   metadata validation, roster membership, window classification, `PATH` preflight, and the effective-directory
+   check — has already passed, so agentctl never destroys a window and then discovers it cannot create the
+   replacement.
+
+   A failed kill is a tmux operation failure, not a rollback, because this invocation has created nothing to roll back:
+
+   ```text
+   agentctl: failed to relaunch ROLE; could not remove unproven window W in S: CAUSE; nothing was created
+   ```
+
+   exit **6**. There is no retry, and no fallback to creating a second window beside the survivor — that would
+   manufacture the `ambiguous` state §13.5 fails closed on.
+
+   **No post-kill re-verification is added.** Step 7's post-create verification already fails closed on any survivor:
+   it requires ROLE to resolve to exactly the window this invocation created and rolls back otherwise. A duplicate
+   check between kill and create would be redundant and would widen the race window rather than narrow it.
 6. Create with §13.2 row 3 exactly: `CMD` per §12.1 through the same `shellq` path, `-c DIR`, `-P -F`, and **no index
    argument** — the window lands at the next free index. Operator-visible ordering is unaffected because `status`
    iterates the roster, not the window list. Unparseable creation output is pre-ownership: exit 6, kill nothing, and
@@ -810,9 +920,19 @@ reporting the provenance of every field is what keeps an override from silently 
 
    Same shape and same rules as §6.6, including that `CAUSE` is mandatory in both variants. Exit 8's meaning therefore
    extends from "the session this invocation created was removed" to "**what this invocation created** was removed".
+
+   Where a recovery kill was performed in step 5a, every terminal message of the invocation — success, post-create
+   conflict, and rollback alike — also states that window W was removed. agentctl destroyed it, so §1.1 requires the
+   fact to survive whatever happens afterwards. A rollback following a recovery therefore reports both removals, and
+   leaves the role absent and retryable.
 10. Success (exit 0) states the role, harness, model and effort (`""` in metadata, `default` in human output, §12.7), session,
    window ID, pane ID, directory, and the provenance of each configuration field — `stored`, `flag override`, or
    `flags`. This report is what keeps an override honest: `status` cannot detect a harness swap, so relaunch says so.
+   In the recovery case it adds one line naming what was destroyed:
+
+   ```text
+   recovered: removed window W, which carried no @agentctl_process baseline, and recreated ROLE
+   ```
 
 ## 7. Validation rules (consolidated)
 
@@ -849,8 +969,26 @@ No name pattern-matching. Identity is established by observation at launch and v
   an observed value of literal `amq`. The `amq` comparison is against the exact trimmed value — the bare name, not a
   path — which holds because the window command invokes `amq` by bare name (§13.7). Neither condition is a tmux
   failure; both simply mean "not yet". Any other process-observation error fails immediately. If no stable pair has
-  been accepted by the final boundary attempt, the existing timeout consequence is unchanged: launch rolls back its
-  created session and relaunch rolls back its created window, both with exit 8 (§§6.6, 6.8).
+  been accepted by the final boundary attempt, the consequence differs by command. One principle governs both: **an
+  invocation returns to its prior state where one exists, and never destroys peers.** The two commands stand in
+  different relations to what existed before them, so the same rule yields opposite outcomes:
+
+  - **`launch` records no baseline and destroys nothing.** The role is unproven, its window and the rest of the fleet
+    are retained, and the invocation exits 9 (§6.6, §9). Rolling back would destroy peer roles that launched correctly.
+  - **`relaunch` rolls back the single window this invocation created, exit 8** (§6.8 step 9), unchanged. It *has* a
+    prior state: its precondition is zero windows matching ROLE, so removing the window it just made restores the
+    fleet exactly as it found it, and the role was already absent beforehand, so absent-after is not a regression.
+
+  `launch` cannot take `relaunch`'s path even in principle. Killing a session's only window destroys the session
+  (verified, tmux 3.7b, throwaway socket: `kill-window` against the sole window exited 0 and the next `list-sessions`
+  reported `no server running`), and the first role's window *is* the session until a second role exists — so a
+  per-window rollback during `launch` would destroy the entire fleet for exactly the role the §6.6 carve-out protects.
+
+  An unproven role is inert rather than contained by force: verification requires exact equality with a stored
+  baseline, and an unset `@agentctl_process` can never satisfy it, so every control command refuses at exit 5 and
+  `status` reports `no-baseline` (§6.3). Recovery is `relaunch` (§6.8), which does not re-baseline the existing
+  process — it destroys the pane and observes a new one from scratch. That distinction is what keeps the permanent
+  rejection of heal-on-verify intact.
 - **Verification (control/status).** Re-run the same `ps` query and require **exact equality** with the stored baseline. Mismatch → `unexpected-process` in status; fail closed (exit 5) for control commands. Empty/missing baseline also fails closed.
 
 The stable pair reduces the window for recording a transient process; it does **not** ensure that the process has
@@ -869,6 +1007,14 @@ Exit 4 additionally covers a role that resolves to more than one window (§13.5)
 pre-ownership creation failure during `launch`, carrying the operator warning in §6.6, and any resolver `Runner`/parse
 failure, carrying tmux's own stderr (§4.1). Exit 3 additionally covers an unresolvable or ambiguous session (§4.1) and every `attach` refusal — missing, unmanaged,
 or a version other than `1` (§6.4, §12.6); `attach` uses 6 when control mode cannot be established.
+
+**Exit 9 — launched with an unproven role; nothing was rolled back.** `launch` created the session, retained it and
+every window it made, and could not establish a process baseline for at least one role within §8's deadline. It extends
+the brief's table because no code in it fits: 8 asserts a removal that did not happen, 5 asserts a refusal in which
+nothing was done, and 0 asserts unqualified success. Under §1.1 an exit code is a claim, so the correct response to "no
+existing code states this" is a new code, not the nearest wrong one. Exit 9 makes no claim about which roles are
+unproven or how many; the §6.6 messages carry that. It is `launch`-only: `relaunch` has a prior state to return to and
+keeps exit 8 (§8).
 
 **Exit 1 is the unclassified error** (§1.1). It carries no contract semantics and never will: it asserts only "something went
 wrong that codes 2–8 do not describe". The codes in the table are the opposite — each one is a claim about what
@@ -1062,9 +1208,17 @@ Notes:
   `list-panes`' `#{pane_pid}` for the same pane; and it is **stable across the `exec` chain** — a window created as
   `sh -c 'exec sleep 60'` reported the same pid at creation and after the exec completed. That stability is what makes
   the creation-time pid a valid target for the §8 baseline poll rather than merely a convenient one.
-- **Row 11a.** Exposed **solely** to roll back the window ID the current `relaunch` invocation created (§6.8). No
-  command removes a window it did not create, and `kill-window` is never issued against a window discovered by
-  listing. The `tmuxx` wrapper takes a typed `WindowID`, so a name can never reach `-t`.
+- **Row 11a.** Exposed for exactly two uses, both in `relaunch` (§6.8): rolling back the window ID this invocation
+  created (step 9), and the recovery kill of a single window classified `no-baseline` at step 4 (step 5a). Both target
+  a window ID agentctl resolved itself and holds as a typed `WindowID`, so a name can never reach `-t`. No other
+  command removes a window; `kill-window` is never issued against a window whose state was not classified by §6.3
+  precedence in the same invocation; and the recovery kill never runs when the role resolves to more than one window.
+
+  The second use widens what this row previously permitted — before it, agentctl never removed a window it had not
+  itself created — so it is stated here as a change rather than absorbed silently. The concurrent case is bounded by
+  window-ID behavior: IDs are a monotonic per-server counter and are **not reused within a server lifetime** (probed on
+  tmux 3.7b; a restarted server resets the counter, the same caveat pane IDs already carry), so a losing contender's
+  recorded ID can never name the winner's freshly created window. It fails its kill and exits 6 having created nothing.
 - **Row 10.** Payload and `Enter` stay separate events, with the §3.3 fixed delay between them; `-l` is literal mode and
   `--` guards the leading `/`. Verified end to end: a pane running `cat` received exactly `/clear`.
 - **Row 12.** Only used by the session resolver's inside-tmux fallback, and only to obtain a *name*, which is then fed
