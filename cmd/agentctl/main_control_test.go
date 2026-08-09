@@ -41,10 +41,10 @@ func TestRunControlDeliversRegisteredOperationToResolvedRole(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitOK {
-				t.Fatalf("runWithControlDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 			}
 			want := invocation{operation: tt.operation, session: session, role: tt.role}
 			if !reflect.DeepEqual(got, want) {
@@ -86,10 +86,10 @@ func TestRunControlRejectsCallerPayloadInputsBeforeDependencies(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), tt.args, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitUsage {
-				t.Fatalf("runWithControlDependencies(%q) = %d, want %d", tt.args, code, exitUsage)
+				t.Fatalf("runWithDependencies(%q) = %d, want %d", tt.args, code, exitUsage)
 			}
 			if resolverCalled || controllerCalled {
 				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
@@ -121,10 +121,10 @@ func TestRunControlRejectsMalformedRoleBeforeSessionResolution(t *testing.T) {
 				arguments = []string{"clear", "--session", "epic123", "--", role}
 			}
 
-			code := runWithControlDependencies(context.Background(), arguments, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), arguments, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != exitUsage {
-				t.Fatalf("runWithControlDependencies(role %q) = %d, want %d", role, code, exitUsage)
+				t.Fatalf("runWithDependencies(role %q) = %d, want %d", role, code, exitUsage)
 			}
 			if resolverCalled || controllerCalled {
 				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
@@ -287,10 +287,10 @@ func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithControlDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, resolver, controller)
+			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
 
 			if code != tt.wantCode {
-				t.Fatalf("runWithControlDependencies() = %d, want %d", code, tt.wantCode)
+				t.Fatalf("runWithDependencies() = %d, want %d", code, tt.wantCode)
 			}
 			if stderr.String() != tt.wantError {
 				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantError)

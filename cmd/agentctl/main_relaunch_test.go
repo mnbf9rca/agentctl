@@ -91,10 +91,10 @@ func TestRunRelaunchReportsWhatItCreatedAndEveryFieldsProvenance(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithRelaunchDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, staticResolver(), relauncher)
+			code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{resolver: staticResolver(), relauncher: relauncher})
 
 			if code != exitOK {
-				t.Fatalf("runWithRelaunchDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 			}
 			if stdout.String() != tt.want {
 				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.want)
@@ -131,10 +131,10 @@ func TestRunRelaunchPassesOnlySuppliedOptionsAsOverrides(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithRelaunchDependencies(context.Background(), tt.args, &stdout, &stderr, staticResolver(), relauncher)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: staticResolver(), relauncher: relauncher})
 
 			if code != exitOK {
-				t.Fatalf("runWithRelaunchDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("RelaunchRequest = %#v, want %#v", got, tt.want)
@@ -176,10 +176,10 @@ func TestRunRelaunchRejectsInvalidInvocationsBeforeAnyDependency(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithRelaunchDependencies(context.Background(), tt.args, &stdout, &stderr, resolver, relauncher)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver, relauncher: relauncher})
 
 			if code != exitUsage {
-				t.Fatalf("runWithRelaunchDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, exitUsage, stderr.String())
+				t.Fatalf("runWithDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, exitUsage, stderr.String())
 			}
 			if resolverCalled || relauncherCalled {
 				t.Fatalf("dependency calls = resolver:%v relauncher:%v, want neither", resolverCalled, relauncherCalled)
@@ -342,10 +342,10 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithRelaunchDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, staticResolver(), relauncher)
+			code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{resolver: staticResolver(), relauncher: relauncher})
 
 			if code != tt.code {
-				t.Fatalf("runWithRelaunchDependencies() = %d, want %d; stderr = %q", code, tt.code, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, tt.code, stderr.String())
 			}
 			if stdout.Len() != 0 {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
@@ -375,13 +375,13 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 	)
 	var stdout, stderr bytes.Buffer
 
-	code := runWithAllDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{
+	code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{
 		resolver:   session.New(tmuxx.New(runner), func(string) (string, bool) { return "", false }),
 		relauncher: fleet.New(runner, launchTestDependencies(runner).fleet),
 	})
 
 	if code != exitOK {
-		t.Fatalf("runWithAllDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
 	}
 	want := "agentctl: relaunched planner in epic123: window @71, pane %88, harness claude (stored), model fable (stored), effort max (stored), dir /fleet workspace (stored)\n"
 	if stdout.String() != want {
@@ -431,13 +431,13 @@ func TestRunRelaunchConcurrentLoserRefusesAfterRemovingItsCreatedWindow(t *testi
 	)
 	var stdout, stderr bytes.Buffer
 
-	code := runWithAllDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{
+	code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "epic123", "planner"}, &stdout, &stderr, dependencies{
 		resolver:   session.New(tmuxx.New(runner), func(string) (string, bool) { return "", false }),
 		relauncher: fleet.New(runner, launchTestDependencies(runner).fleet),
 	})
 
 	if code != exitLaunch {
-		t.Fatalf("runWithAllDependencies() = %d, want %d; stderr = %q", code, exitLaunch, stderr.String())
+		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitLaunch, stderr.String())
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want no success output", stdout.String())

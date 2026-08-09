@@ -525,7 +525,7 @@ func agentCommandInventory(registry map[string]parsedCommandSpec) map[string]map
 		}
 		flags := make(map[string]struct{}, len(specification.flags))
 		for _, registered := range specification.flags {
-			flags["--"+registered.name] = struct{}{}
+			flags["--"+registered] = struct{}{}
 		}
 		inventory[command] = flags
 	}
@@ -850,18 +850,13 @@ func TestDocumentedAgentCommandContract(t *testing.T) {
 func TestParsedCommandRegistryCouplesParserAndAgentDocumentation(t *testing.T) {
 	original := parsedCommandRegistry["status"]
 	mutated := original
-	mutated.flags = append(append([]parsedFlagSpec(nil), original.flags...), parsedFlagSpec{
-		name: "synthetic", kind: parsedFlagBool, target: parsedTargetJSON, usage: "synthetic review mutation",
-	})
+	mutated.flags = append(append([]string(nil), original.flags...), "synthetic")
 	parsedCommandRegistry["status"] = mutated
 	t.Cleanup(func() { parsedCommandRegistry["status"] = original })
 
-	options, err := parseCommand("status", []string{"--synthetic"})
-	if err != nil {
-		t.Fatalf("parseCommand() rejected production-registered synthetic flag: %v", err)
-	}
-	if !options.json {
-		t.Fatal("parseCommand() discarded production-registered synthetic flag value; json = false, want true")
+	_, err := parseCommand("status", []string{"--synthetic"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported registered flag") {
+		t.Fatalf("parseCommand() error = %v, want fail-closed unsupported registered flag", err)
 	}
 	invocations, err := markdownInvocations(skills.Tree, skills.Root)
 	if err != nil {
@@ -876,21 +871,6 @@ func TestParsedCommandRegistryCouplesParserAndAgentDocumentation(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("compareAgentDocumentation() = %#v, want registered synthetic flag drift", mismatches)
-	}
-}
-
-func TestParsedCommandRegistryRejectsUnknownProjectionTarget(t *testing.T) {
-	original := parsedCommandRegistry["status"]
-	mutated := original
-	mutated.flags = append(append([]parsedFlagSpec(nil), original.flags...), parsedFlagSpec{
-		name: "synthetic", kind: parsedFlagBool, target: parsedFlagTarget(255), usage: "synthetic review mutation",
-	})
-	parsedCommandRegistry["status"] = mutated
-	t.Cleanup(func() { parsedCommandRegistry["status"] = original })
-
-	_, err := parseCommand("status", []string{"--synthetic"})
-	if err == nil || !strings.Contains(err.Error(), "unknown projection target") {
-		t.Fatalf("parseCommand() error = %v, want fail-closed unknown projection target", err)
 	}
 }
 
