@@ -10,6 +10,7 @@ permissions:
 jobs:
   test:
     runs-on: macos-26
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -21,6 +22,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: hack/check-skill-pairing.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Workflow timeout check
+        run: hack/check-workflow-timeouts.sh
       - name: Environment fingerprint
         run: ./hack/ci-fingerprint.sh
       - name: Set up Go
@@ -58,6 +61,7 @@ jobs:
 
   integration:
     runs-on: macos-26
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

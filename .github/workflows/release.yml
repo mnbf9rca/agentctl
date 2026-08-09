@@ -25,6 +25,7 @@ env:
 jobs:
   release:
     runs-on: macos-26
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       dry_run: ${{ steps.version.outputs.dry_run }}
@@ -152,6 +153,7 @@ jobs:
     needs: release
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    timeout-minutes: 15
     permissions:
       contents: read
     env:
@@ -178,6 +180,7 @@ jobs:
     needs: [release, verify-install]
     if: needs.release.outputs.dry_run != 'true'
     runs-on: macos-26
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
