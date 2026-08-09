@@ -352,25 +352,26 @@ gh pr create --base release --head main \
 
 If this normal `main` to `release` PR conflicts only because `release` carries
 a prior promotion-only commit, preserve both histories with the fallback used
-for the 0.2.0 handoff. Start from current `origin/main`, merge
-`origin/release` with the `ours` strategy, and prove the resulting tree is
-byte-for-byte identical to current main before pushing:
+for the 0.2.0 handoff. First confirm that `release` holds no unique content;
+then start from current `origin/main` and merge `origin/release` with the
+`ours` strategy:
 
 ```bash
 git fetch origin
+git diff --stat origin/main...origin/release
 version="$(hack/next-version.sh)"
 git switch --create "promote/$version" origin/main
 git merge --strategy ours --no-ff origin/release -m "Promote v$version"
-git diff --exit-code origin/main HEAD --
 git push -u origin "promote/$version"
 gh pr create --base release --head "promote/$version" \
   --title "Release v$version" \
   --body-file .github/PULL_REQUEST_TEMPLATE/release-promotion.md
 ```
 
-The diff command must exit 0 with no output. Merge that fallback PR with a
-merge commit; do not squash or rebase it. Do not use the fallback when the
-normal promotion PR is mergeable.
+The pre-merge three-dot diff must print no paths. If it reports anything,
+stop: `release` carries unique content that an `ours` merge would discard.
+Merge the fallback PR with a merge commit; do not squash or rebase it. Do not
+use the fallback when the normal promotion PR is mergeable.
 
 - [ ] The correct box is ticked — "Checklist run" (Parts A–C passed, evidence
       committed on main) or "Checklist not required"

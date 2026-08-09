@@ -14,7 +14,7 @@
 - `docs/superpowers/specs/2026-08-01-agentctl-design.md` and `SECURITY.md` remain normative. This task records already-shipped behavior and does not create new behavior.
 - Human-facing prose earns no source-text tests. Use the existing executable skill-contract, version, release-verifier, and snapshot gates.
 - Record the #177 execution-audit practice as one standing rule and link to its source; do not repeat its rationale.
-- Document the historical promote-branch path only as a fallback for a conflicting `main` to `release` promotion, preserving an exact-tree check and append-only release history.
+- Document the historical promote-branch path only as a fallback for a conflicting `main` to `release` promotion, requiring a pre-merge proof that `release` holds no unique content and preserving append-only release history.
 
 ---
 
@@ -82,7 +82,7 @@
 
 - [ ] **Step 3: Document the promotion fallback once**
 
-  Keep the normal `main` to `release` PR first. If prior promotion-only history makes it conflict, document a `promote/VERSION` branch from current `main`, an `ours` merge of `origin/release`, an exact tree-equivalence check against `main`, and a merge-commit promotion PR from that branch.
+  Keep the normal `main` to `release` PR first. If prior promotion-only history makes it conflict, require an empty pre-merge three-dot diff proving `release` has no unique content, then document a `promote/VERSION` branch from current `main`, an `ours` merge of `origin/release`, and a merge-commit promotion PR from that branch.
 
 ### Task 4: Run release and repository verification
 
