@@ -238,8 +238,8 @@ environment variable.
       `PATH`, removes only the link and never its target, then removes the
       credential-bearing temporary `HOME` on every successful cleanup path.
       If consent aborts before that named server is created, tmux's exact
-      connect-ENOENT response is observed as socket absence so credential-HOME
-      cleanup still completes.
+      single-line connect-ENOENT response for that wrapper-owned socket is
+      observed as socket absence so credential-HOME cleanup still completes.
       If fleet or socket cleanup requires a retry, the link and temporary HOME
       remain together until no owned harness can use them; once fleet and socket
       absence is observed, link removal precedes HOME removal
