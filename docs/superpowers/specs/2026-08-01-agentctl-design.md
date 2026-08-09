@@ -889,10 +889,38 @@ reporting the provenance of every field is what keeps an override from silently 
    (`--model` and `--effort` are optional; absent means empty, the harness defaults). The directory is **never** defaulted to the
    invocation cwd — relaunching one role somewhere the rest of the fleet does not live is exactly the silent
    divergence this refusal exists to prevent.
-4. Window precondition. **Zero** windows match ROLE → proceed. **Exactly one** window matches and its state by §6.3
-   precedence is `no-baseline` → this is the **recovery case**: record that window ID and continue. No destruction
-   happens at this step. Any other observation → exit 4, rendering the observed state by §6.3 precedence and every
-   matching window ID (§13.5).
+4. Window precondition. **Zero** windows match ROLE → proceed. **Exactly one** window matches, its state by §6.3
+   precedence is `no-baseline`, **and the session contains at least one other window** → this is the **recovery
+   case**: record that window ID and continue. No destruction happens at this step. Any other observation → exit 4,
+   rendering the observed state by §6.3 precedence and every matching window ID (§13.5).
+
+   **The sole-window case is refused, not recovered.** Killing a session's only window destroys the session (§8), so a
+   recovery kill there would take the whole fleet with it and then have nothing to create into. §1.2 decides this
+   directly: an invocation destroys only what it created, and the session predates the invocation. Refusing costs the
+   operator nothing that recovery was designed to protect — recovery exists to spare *peer* roles, and a one-role
+   session has none.
+
+   The check is made here, from the window list step 4 already holds, rather than at the kill: refusing before
+   preflight keeps step 5a's kill the first and only destructive act, and costs one comparison. It is a count of the
+   **session's** windows, not of windows matching ROLE — any surviving window keeps the session alive, roster member
+   or not.
+
+   The refusal names both remedy commands, reconstructed from the metadata already read and validated in step 2, so
+   the operator is not left to reassemble a launch line from a fleet that is about to be destroyed:
+
+   ```text
+   agentctl: refusing to relaunch planner; it is the only window in session alpha, so removing it would destroy the session. Recreate the fleet instead:
+     agentctl kill --session alpha
+     agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work
+   ```
+
+   Flags with no stored value are omitted rather than rendered empty — `--models role:` is a usage error (§7), so
+   emitting it would print a command that cannot run. In legacy mode the line is built from the effective values
+   including supplied flags; if any field cannot be reconstructed, the command block is omitted entirely and the
+   refusal says so, because a launch line that would create a *different* fleet is worse than no line at all (§1.1).
+
+   Exit **4**, with every other present-window refusal in this step. Not exit 3: the session is not defective, it is
+   single-role, and exit 3 would assert a state error that did not occur.
 
    The precedence ordering does the discrimination, and three of its consequences are load-bearing:
 
@@ -916,9 +944,19 @@ reporting the provenance of every field is what keeps an override from silently 
    path and `--dir` as the remedy, because a stale recorded path is a session-state fact, not a usage error.
 5a. **Recovery kill (recovery case only).** Issue §13.2 row 11a against the exact window ID recorded in step 4. This is
    the first and only destructive act, and its position is deliberate: every non-destructive check — session gate,
-   metadata validation, roster membership, window classification, `PATH` preflight, and the effective-directory
-   check — has already passed, so agentctl never destroys a window and then discovers it cannot create the
-   replacement.
+   metadata validation, roster membership, window classification, the sole-window precondition, `PATH` preflight, and
+   the effective-directory check — has already passed, so agentctl never destroys a window and then discovers it
+   cannot create the replacement. Step 4's sole-window refusal removes the case agentctl can *observe*, so step 6 has
+   a session to create into in every state agentctl saw.
+
+   It does not guarantee more than that, and the difference matters. This is a check-then-act gate like every other
+   one in the design (SECURITY.md residual 6): a peer window can close between step 4's count and this kill, and a
+   *benign* agent exit is enough, because managed windows run without `remain-on-exit` (§6.3). The target can
+   therefore become the session's last window after the check passed, in which case this kill destroys the session
+   and step 6's creation fails. The outcome is bounded and reported rather than prevented — the removal fact and the
+   creation failure both appear (step 9), so the operator is told what happened to a fleet that is gone. tmux offers
+   no conditional "kill unless last", so re-counting immediately before the kill would narrow the interval without
+   closing it, and is not required.
 
    A failed kill is a tmux operation failure, not a rollback, because this invocation has created nothing to roll back:
 
@@ -1181,6 +1219,10 @@ No name pattern-matching. Identity is established by observation at launch and v
   (verified, tmux 3.7b, throwaway socket: `kill-window` against the sole window exited 0 and the next `list-sessions`
   reported `no server running`), and the first role's window *is* the session until a second role exists — so a
   per-window rollback during `launch` would destroy the entire fleet for exactly the role the §6.6 carve-out protects.
+
+  The same fact bounds `relaunch`'s recovery power one level deeper, which is easy to miss because the two paths look
+  unrelated: a recovery kill against a session's *only* window destroys the session just as surely, and leaves
+  nothing to create the replacement into. §6.8 step 4 therefore refuses that case rather than attempting it.
 
   An unproven role is inert rather than contained by force: verification requires exact equality with a stored
   baseline, and an unset `@agentctl_process` can never satisfy it, so every control command refuses at exit 5 and
