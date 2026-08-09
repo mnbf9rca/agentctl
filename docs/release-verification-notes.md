@@ -54,6 +54,17 @@ part of verification the suite is structurally unable to perform.
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS
 
+**Operator/planner note on the 2026-08-09 block (added after review):** the
+`Part B pre-check:` / `Part B keeper:` lines are absent because they belong to
+the no-server conditional branch (#147), which fires only on a machine with no
+tmux server; this run's machine carried a live server (the working agent
+fleet), so the branch had no occasion to execute. Nothing was skipped: the
+operator ran the entire script. The no-server branch's execution evidence is
+PR #162's gate (executed live with the trap exercised) and the #177/#178
+audit, which ran the wrapper as written from sockets whose inner server was
+absent. This note is authored by the planner, outside the machine-written
+block above.
+
 ### 2026-08-08
 
 - agentctl: `agentctl e81f83a`
