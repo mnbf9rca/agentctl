@@ -946,8 +946,17 @@ reporting the provenance of every field is what keeps an override from silently 
    the first and only destructive act, and its position is deliberate: every non-destructive check — session gate,
    metadata validation, roster membership, window classification, the sole-window precondition, `PATH` preflight, and
    the effective-directory check — has already passed, so agentctl never destroys a window and then discovers it
-   cannot create the replacement. Step 4's sole-window refusal is what guarantees the session outlives this kill, so
-   step 6 always has a session to create into.
+   cannot create the replacement. Step 4's sole-window refusal removes the case agentctl can *observe*, so step 6 has
+   a session to create into in every state agentctl saw.
+
+   It does not guarantee more than that, and the difference matters. This is a check-then-act gate like every other
+   one in the design (SECURITY.md residual 6): a peer window can close between step 4's count and this kill, and a
+   *benign* agent exit is enough, because managed windows run without `remain-on-exit` (§6.3). The target can
+   therefore become the session's last window after the check passed, in which case this kill destroys the session
+   and step 6's creation fails. The outcome is bounded and reported rather than prevented — the removal fact and the
+   creation failure both appear (step 9), so the operator is told what happened to a fleet that is gone. tmux offers
+   no conditional "kill unless last", so re-counting immediately before the kill would narrow the interval without
+   closing it, and is not required.
 
    A failed kill is a tmux operation failure, not a rollback, because this invocation has created nothing to roll back:
 
