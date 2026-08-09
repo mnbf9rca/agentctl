@@ -258,6 +258,10 @@ Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`)
 | `internal/status` | Collector (tmux format strings only) + table/JSON renderers |
 | `internal/attach` | iTerm2 detection, `tmux -CC attach-session -t '=SESSION'` |
 
+The agent-facing skill contract tests exercise documented invocations through the CLI parsers and compare their
+advertised surface with `parsedCommandRegistry`; status state names come from `status.States()`, so those two
+inventories are also deliberate contract-test seams.
+
 Each unit is independently testable against the fake `Runner`; no unit reads terminal contents.
 
 ## 6. Key flows

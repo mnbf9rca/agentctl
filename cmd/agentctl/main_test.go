@@ -241,9 +241,9 @@ func TestRunMapsSessionResolverErrorsToOwnedExitCodes(t *testing.T) {
 			runner := tmuxx.NewFakeRunner(tt.responses...)
 			resolver := session.New(tmuxx.New(runner), tt.lookup)
 			var stdout, stderr bytes.Buffer
-			code := runWithResolver(context.Background(), tt.args, &stdout, &stderr, resolver)
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver})
 			if code != tt.wantCode {
-				t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), tt.wantText) {
 				t.Fatalf("stderr = %q, want substring %q", stderr.String(), tt.wantText)
@@ -272,7 +272,7 @@ func TestRunKillExecutesManagedSessionByResolvedID(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 	if code != exitOK {
 		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
@@ -330,7 +330,7 @@ func TestRunKillRefusalsMapToSessionExitWithoutKilling(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+			code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 			if code != exitSession {
 				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
@@ -359,7 +359,7 @@ func TestRunKillMissingSessionStopsBeforeOwnershipChecks(t *testing.T) {
 	})
 	var stdout, stderr bytes.Buffer
 
-	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, resolver, killer)
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &stdout, &stderr, dependencies{resolver: resolver, killer: killer})
 
 	if code != exitSession {
 		t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
@@ -389,7 +389,7 @@ func TestRunKillTmuxFailuresMapToTmuxExit(t *testing.T) {
 			})
 			var stdout, stderr bytes.Buffer
 
-			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, resolver, kill.New(tmuxx.New(runner)))
+			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, dependencies{resolver: resolver, killer: kill.New(tmuxx.New(runner))})
 
 			if code != exitTmux {
 				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
@@ -412,10 +412,10 @@ func TestActingCommandMalformedTMUXPaneMapsToSessionErrorWithoutTmuxCall(t *test
 			resolver := session.New(tmuxx.New(runner), lookupValues(map[string]string{"TMUX_PANE": pane}))
 			var stdout, stderr bytes.Buffer
 
-			code := runWithResolver(context.Background(), []string{"kill"}, &stdout, &stderr, resolver)
+			code := runWithDependencies(context.Background(), []string{"kill"}, &stdout, &stderr, dependencies{resolver: resolver})
 
 			if code != exitSession {
-				t.Fatalf("runWithResolver() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
+				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), "current tmux session") {
 				t.Fatalf("stderr = %q, want current-source error", stderr.String())
@@ -471,11 +471,11 @@ func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing
 				Schema: 1, Session: "fleet", Managed: true, Agents: []statuspkg.Agent{},
 			}}
 			var stdout, stderr bytes.Buffer
-			code := runWithAllDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
+			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{
 				launch: launchTestDependencies(runner), resolver: resolver, collector: collector,
 			})
 			if code != tt.wantCode {
-				t.Fatalf("runWithAllDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
+				t.Fatalf("runWithDependencies(%q) = %d, want %d; stderr = %q", tt.args, code, tt.wantCode, stderr.String())
 			}
 			if resolveCalls != tt.wantResolve {
 				t.Fatalf("Resolve() calls = %d, want %d", resolveCalls, tt.wantResolve)

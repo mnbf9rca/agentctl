@@ -142,7 +142,7 @@ func runWithRunner(
 	collector := statuspkg.NewCollector(client).WithLookupEnv(statuspkg.LookupEnv(lookupEnv))
 	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
 	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{
+	return runWithDependencies(ctx, arguments, stdout, stderr, dependencies{
 		launch: launchDependencies{
 			runner:       runner,
 			skillHome:    os.UserHomeDir,
@@ -172,32 +172,16 @@ func runVersion(arguments []string, stdout, stderr io.Writer) (bool, int) {
 	return true, exitOK
 }
 
-func runWithResolver(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver})
-}
-
-func runWithDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, killer sessionKiller) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, killer: killer})
-}
-
-func runWithControlDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, controller controlExecutor) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, controller: controller})
-}
-
-func runWithRelaunchDependencies(ctx context.Context, arguments []string, stdout, stderr io.Writer, resolver sessionResolver, relauncher roleRelauncher) int {
-	return runWithAllDependencies(ctx, arguments, stdout, stderr, dependencies{resolver: resolver, relauncher: relauncher})
-}
-
 func runWith(arguments []string, stdout, stderr io.Writer, launch launchDependencies) int {
 	client := tmuxx.New(launch.runner)
-	return runWithAllDependencies(context.Background(), arguments, stdout, stderr, dependencies{
+	return runWithDependencies(context.Background(), arguments, stdout, stderr, dependencies{
 		launch:    launch,
 		resolver:  session.New(client, nil),
 		collector: statuspkg.NewCollector(client),
 	})
 }
 
-func runWithAllDependencies(
+func runWithDependencies(
 	ctx context.Context,
 	arguments []string,
 	stdout, stderr io.Writer,
@@ -655,67 +639,33 @@ type commandOptions struct {
 	directory  *string
 }
 
-type parsedFlagKind uint8
-
-const (
-	parsedFlagString parsedFlagKind = iota
-	parsedFlagBool
-)
-
-type parsedFlagTarget uint8
-
-const (
-	parsedTargetSession parsedFlagTarget = iota + 1
-	parsedTargetJSON
-	parsedTargetHarness
-	parsedTargetModel
-	parsedTargetEffort
-	parsedTargetDirectory
-)
-
-type parsedFlagSpec struct {
-	name   string
-	kind   parsedFlagKind
-	target parsedFlagTarget
-	usage  string
-}
-
 type parsedCommandSpec struct {
 	agentFacing bool
-	flags       []parsedFlagSpec
+	flags       []string
 }
 
 var parsedCommandRegistry = map[string]parsedCommandSpec{
 	"attach": {
-		flags: []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags: []string{"session"},
 	},
 	"status": {
 		agentFacing: true,
-		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
-			{name: "json", kind: parsedFlagBool, target: parsedTargetJSON, usage: "emit JSON"},
-		},
+		flags:       []string{"session", "json"},
 	},
 	"clear": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"compact": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"kill": {
 		agentFacing: true,
-		flags:       []parsedFlagSpec{{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"}},
+		flags:       []string{"session"},
 	},
 	"relaunch": {
-		flags: []parsedFlagSpec{
-			{name: "session", kind: parsedFlagString, target: parsedTargetSession, usage: "session name"},
-			{name: "harness", kind: parsedFlagString, target: parsedTargetHarness, usage: "harness override"},
-			{name: "model", kind: parsedFlagString, target: parsedTargetModel, usage: "model override"},
-			{name: "effort", kind: parsedFlagString, target: parsedTargetEffort, usage: "effort override"},
-			{name: "dir", kind: parsedFlagString, target: parsedTargetDirectory, usage: "working directory override"},
-		},
+		flags: []string{"session", "harness", "model", "effort", "dir"},
 	},
 	"version": {},
 }
@@ -726,66 +676,42 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
 	}
 	flags := cliflags.New(command)
-	type parsedFlagValue struct {
-		specification parsedFlagSpec
-		stringValue   *string
-		boolValue     *bool
-	}
-	values := make([]parsedFlagValue, 0, len(specification.flags))
+	var sessionName, harnessName, modelName, effortName, directory *string
+	var jsonOutput *bool
 	for _, registered := range specification.flags {
-		value := parsedFlagValue{specification: registered}
-		switch registered.kind {
-		case parsedFlagString:
-			value.stringValue = flags.String(registered.name, "", registered.usage)
-		case parsedFlagBool:
-			value.boolValue = flags.Bool(registered.name, false, registered.usage)
+		switch registered {
+		case "session":
+			sessionName = flags.String(registered, "", "session name")
+		case "json":
+			jsonOutput = flags.Bool(registered, false, "emit JSON")
+		case "harness":
+			harnessName = flags.String(registered, "", "harness override")
+		case "model":
+			modelName = flags.String(registered, "", "model override")
+		case "effort":
+			effortName = flags.String(registered, "", "effort override")
+		case "dir":
+			directory = flags.String(registered, "", "working directory override")
 		default:
-			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown kind", command, registered.name)
+			return commandOptions{}, fmt.Errorf("command %q has unsupported registered flag --%s", command, registered)
 		}
-		values = append(values, value)
 	}
 
 	if err := flags.Parse(arguments); err != nil {
 		return commandOptions{}, err
 	}
-	options := commandOptions{}
-	for _, value := range values {
-		registered := value.specification
-		switch registered.target {
-		case parsedTargetSession:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s session projection requires string kind", command, registered.name)
-			}
-			options.session = *value.stringValue
-			options.sessionSet = flags.WasSet(registered.name)
-		case parsedTargetJSON:
-			if value.boolValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s JSON projection requires bool kind", command, registered.name)
-			}
-			options.json = *value.boolValue
-		case parsedTargetHarness:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s harness projection requires string kind", command, registered.name)
-			}
-			options.harness = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetModel:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s model projection requires string kind", command, registered.name)
-			}
-			options.model = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetEffort:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s effort projection requires string kind", command, registered.name)
-			}
-			options.effort = suppliedValue(flags, registered.name, value.stringValue)
-		case parsedTargetDirectory:
-			if value.stringValue == nil {
-				return commandOptions{}, fmt.Errorf("command %q flag --%s directory projection requires string kind", command, registered.name)
-			}
-			options.directory = suppliedValue(flags, registered.name, value.stringValue)
-		default:
-			return commandOptions{}, fmt.Errorf("command %q flag --%s has unknown projection target %d", command, registered.name, registered.target)
-		}
+	options := commandOptions{
+		harness:   suppliedValue(flags, "harness", harnessName),
+		model:     suppliedValue(flags, "model", modelName),
+		effort:    suppliedValue(flags, "effort", effortName),
+		directory: suppliedValue(flags, "dir", directory),
+	}
+	if sessionName != nil {
+		options.session = *sessionName
+		options.sessionSet = flags.WasSet("session")
+	}
+	if jsonOutput != nil {
+		options.json = *jsonOutput
 	}
 
 	positional := flags.Args()
