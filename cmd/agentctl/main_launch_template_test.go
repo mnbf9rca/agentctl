@@ -32,6 +32,25 @@ func TestParseLaunchSupportsTheTemplateFormAndRejectsDuplicateTemplateOptions(t 
 	}
 }
 
+func TestRunLaunchHelpShowsBothLaunchForms(t *testing.T) {
+	t.Parallel()
+
+	var stdout, stderr bytes.Buffer
+	code := runWith([]string{"launch", "--help"}, &stdout, &stderr, launchTestDependencies(tmuxx.NewFakeRunner()))
+
+	if code != exitOK {
+		t.Fatalf("runWith() = %d, want %d", code, exitOK)
+	}
+	for _, form := range []string{"--roles ROLE:HARNESS,...", "--from-template FILE"} {
+		if !strings.Contains(stdout.String(), form) {
+			t.Fatalf("stdout = %q, want launch form containing %q", stdout.String(), form)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestRunLaunchTemplateFailuresExitTwoBeforePreflightOrRunner(t *testing.T) {
 	t.Parallel()
 
