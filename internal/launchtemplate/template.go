@@ -170,7 +170,30 @@ func inspectTokens(path string, contents []byte) (versionState, error) {
 		}
 		return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
 	}
+	if version.present {
+		value, err := decodeVersionValue(contents)
+		if err != nil {
+			return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
+		}
+		version.value = value
+	}
 	return version, nil
+}
+
+func decodeVersionValue(contents []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.UseNumber()
+	var root map[string]json.RawMessage
+	if err := decoder.Decode(&root); err != nil {
+		return nil, err
+	}
+	decoder = json.NewDecoder(bytes.NewReader(root["version"]))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func scanValue(decoder *json.Decoder, location string, root bool, version *versionState) error {
