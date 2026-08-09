@@ -1177,9 +1177,18 @@ order. An override never moves a role — it changes that role's fields and leav
    read the path: checking one object and reading another is a time-of-check/time-of-use gap, and checking the
    descriptor that will actually be read has none.
 2. **Regular files only.** A directory, FIFO, device or socket is refused, naming what it is. A template is a regular
-   file: `-` is not special and stdin is not accepted, deliberately rather than by omission. A streamed template cannot
-   be re-read to quote the offending line in an error, and a FIFO would hang `launch` indefinitely — nothing in this
-   design carries a read timeout.
+   file: `-` is not special and stdin is not accepted, deliberately rather than by omission.
+
+   The reason to refuse a FIFO is **not** that it would hang — rule 1's non-blocking open already prevents that, and a
+   reader who takes the hang as this rule's justification will conclude the rule is now redundant. It is not, and the
+   hazard it guards is worse for being quiet: under `O_RDONLY|O_NONBLOCK` a writerless FIFO **reads as an empty file**
+   — verified on this platform, `read` returned 0 bytes with a nil error — so a template that reached the decoder
+   would fail as malformed JSON rather than as the wrong kind of file, sending the operator to inspect a document that
+   was never read. With a writer present the same read can return a *partial* document, which is worse again, because
+   a prefix of valid JSON can decode successfully into a fleet the caller never described (§1.1).
+
+   The other reasons are structural and apply to every non-regular file: there is no stable size for rule 4's cap to
+   bound, and nothing can be re-read to quote the offending line in an error.
 3. **Symlinks are followed, and every rule binds on the target.** Refusing them would break ordinary arrangements — a
    templates directory kept in a dotfile repository — for no threat-model gain, since a same-user process that can
    plant a symlink can plant the file itself.
