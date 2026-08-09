@@ -21,6 +21,9 @@ type sourceFile struct {
 	file *ast.File
 }
 
+// This syntactic guard catches direct calls through normal, aliased, and dot
+// imports. Function-value indirection is deliberately outside its boundary:
+// evading the repository's own tests is excluded by the same-user threat model.
 func TestExactlyOneProductionShellqJoinCall(t *testing.T) {
 	root := repositoryRoot(t)
 	var sites []string
@@ -72,6 +75,9 @@ func TestExactlyOneProductionShellqJoinCall(t *testing.T) {
 	}
 }
 
+// This syntactic guard catches quoted and raw send-keys literals at every
+// production scope. Strings assembled from multiple literals are deliberately
+// outside its boundary for the same threat-model reason.
 func TestProductionSendKeysLiteralsAreInsideDeliverPayload(t *testing.T) {
 	root := repositoryRoot(t)
 	var violations []string
