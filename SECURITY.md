@@ -94,20 +94,36 @@ The developer-facing `hack/release-verify.sh` Part C walkthrough is separate
 from agentctl's production file-writing surface. For its isolated live harness
 check on macOS, it may copy only the existing fixed path
 `~/.codex/auth.json` from the operator's captured real HOME. A 2026-08-06 probe
-proved that file sufficient for codex-cli 0.146.1. Claude Code 2.1.223 uses the
-macOS Keychain; empty HOME, `.claude.json`-only, `settings.json`-only, and both
-files together all remained logged out despite an authenticated source HOME.
-No HOME file set was therefore proved sufficient, so the verifier copies no
-Claude file and guides interactive Claude sign-in in the fresh HOME. It
-prints the Codex filename only and requires an explicit `y` before copying;
-`n` copies nothing and offers guided manual sign-in for both harnesses. The
-temporary HOME and credential-parent directory are `0700`, the copied file is
-`0600`, and no credential contents are written to output or evidence. Teardown
-removes that credential-bearing HOME as an independent obligation on success,
-failure, refusal, interrupt, and abort, before an outer retry root can be
-retained. The verifier refuses success if credential-HOME removal is not
-observed; its tests use fake auth files under a fake source HOME, including
-unseeded Claude lookalike files that must never cross the launch boundary.
+proved that file sufficient for codex-cli 0.146.1. A 2026-08-08 probe proved
+Claude Code 2.1.226 authenticated from a fresh HOME containing only the exact
+symlink from `$REAL_HOME/Library/Keychains` to
+`$TEMP_HOME/Library/Keychains`. The verifier offers that fixed link separately
+and states before consent that the probe fleet's harnesses can reach the
+operator's login keychain through it; per-item ACLs continue to apply. It
+copies no Claude secret or Keychain data, but token refresh writes through the
+link reach the real login keychain as they would from the operator's daily
+harnesses.
+
+The Codex filename and Claude symlink are printed without credential contents
+and each requires its own explicit `y`. Declining the Claude link offers guided
+sign-in backed by a mode-`0700` isolated Keychains directory and an empty login
+keychain created under the temporary HOME with `security create-keychain`; this
+mints a fresh token. Declining both Claude paths aborts before fleet launch.
+The verifier never seeds `CLAUDE_CODE_OAUTH_TOKEN` because that path can
+silently delete the real Keychain credential on exit
+(anthropics/claude-code#37512); `claude setup-token` is documented only as a
+manual fallback for Keychain-locked contexts such as SSH or launchd.
+
+The temporary HOME and credential-parent directories are `0700`, the copied
+Codex file is `0600`, and no credential contents are written to output or
+evidence. On success, failure, refusal, interrupt, and abort, teardown first
+ends the owned fleet and named tmux server so no harness can still use the
+link, then removes and observes absence of only the exact owned symlink, and
+only then removes the credential-bearing HOME. The target directory is never
+a recursive-removal operand. The verifier refuses success if link or HOME
+removal is not observed; fixture tests retain a sentinel in the fake target on
+every exit path, including abort, while unseeded Claude lookalike files never
+cross the launch boundary.
 
 ## Reporting a vulnerability
 

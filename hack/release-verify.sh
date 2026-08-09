@@ -169,17 +169,21 @@ PART_C_ORIGINAL_PATH=''
 PART_C_HOME=''
 PART_C_PROJECT=''
 PART_C_BIN=''
+PART_C_REAL_SECURITY=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
 PART_C_ACTIVE=0
 PART_C_AUTH_MODE=''
+PART_C_CLAUDE_AUTH_MODE=''
+PART_C_KEYCHAIN_SOURCE=''
+PART_C_KEYCHAIN_LINK=''
+PART_C_KEYCHAIN_LINK_OWNED=0
 
-# Empirical macOS probe, 2026-08-06: codex-cli 0.146.1 was authenticated
+# Empirical macOS probes: codex-cli 0.146.1 was authenticated
 # with the operator HOME, unauthenticated with an empty HOME, and authenticated
-# with only .codex/auth.json copied into that empty HOME. Claude Code 2.1.223
-# was authenticated with the operator HOME but not with an empty HOME,
-# .claude.json alone, settings.json alone, or both files together. Its macOS
-# credential store is the Keychain, so no sufficient HOME-file seed is proven.
+# with only .codex/auth.json copied into that empty HOME. On 2026-08-08, Claude
+# Code 2.1.226 authenticated from a fresh HOME containing only an exact symlink
+# from its Library/Keychains path to the operator's Library/Keychains directory.
 part_c_has_seedable_auth() {
   [ -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ]
 }
@@ -191,6 +195,25 @@ part_c_print_seedable_auth() {
 part_c_seed_auth() {
   install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
   install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
+}
+
+part_c_has_keychain_source() {
+  [ -d "$PART_C_KEYCHAIN_SOURCE" ]
+}
+
+part_c_link_keychains() {
+  install -d -m 0700 "$PART_C_HOME/Library" 2>/dev/null || return 1
+  if ! ln -s "$PART_C_KEYCHAIN_SOURCE" "$PART_C_KEYCHAIN_LINK"; then
+    return 1
+  fi
+  PART_C_KEYCHAIN_LINK_OWNED=1
+  [ -L "$PART_C_KEYCHAIN_LINK" ]
+}
+
+part_c_create_isolated_keychain() {
+  PART_C_REAL_SECURITY=$(command -v security) || return 1
+  install -d -m 0700 "$PART_C_HOME/Library/Keychains" 2>/dev/null || return 1
+  HOME="$PART_C_HOME" "$PART_C_REAL_SECURITY" create-keychain -p '' "$PART_C_HOME/Library/Keychains/login.keychain-db"
 }
 
 part_c_kill_session() {
@@ -251,7 +274,27 @@ part_c_teardown() {
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
   printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
-  if [ -n "$PART_C_ROOT" ] && [ -n "$PART_C_HOME" ]; then
+  if [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
+    if [ -L "$PART_C_KEYCHAIN_LINK" ]; then
+      # Keep this exactly non-recursive and slash-free: rm -rf link/ follows the symlink and destroys the operator's Keychains target.
+      if rm -f -- "$PART_C_KEYCHAIN_LINK" && [ ! -e "$PART_C_KEYCHAIN_LINK" ] && [ ! -L "$PART_C_KEYCHAIN_LINK" ]; then
+        printf 'PART C CLEANUP PASS (temporary Keychains symlink removed)\n'
+        PART_C_KEYCHAIN_LINK_OWNED=0
+      else
+        printf 'PART C CLEANUP FAIL (remove temporary Keychains symlink %s)\n' "$PART_C_KEYCHAIN_LINK" >&2
+        teardown_status=1
+      fi
+    elif [ ! -e "$PART_C_KEYCHAIN_LINK" ]; then
+      printf 'PART C CLEANUP OBSERVED (temporary Keychains symlink already absent)\n'
+      PART_C_KEYCHAIN_LINK_OWNED=0
+    else
+      printf 'PART C CLEANUP FAIL (owned Keychains path is no longer a symlink: %s)\n' "$PART_C_KEYCHAIN_LINK" >&2
+      teardown_status=1
+    fi
+  elif [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ]; then
+    printf 'PART C CLEANUP OBSERVED (temporary Keychains symlink retained until fleet and socket cleanup completes)\n'
+  fi
+  if [ -n "$PART_C_ROOT" ] && [ -n "$PART_C_HOME" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ]; then
     if [ -e "$PART_C_HOME" ]; then
       if rm -rf -- "$PART_C_HOME" && [ ! -e "$PART_C_HOME" ]; then
         printf 'PART C CLEANUP PASS (temporary credential HOME removed)\n'
@@ -262,8 +305,10 @@ part_c_teardown() {
     else
       printf 'PART C CLEANUP OBSERVED (temporary credential HOME already absent)\n'
     fi
+  elif [ -n "$PART_C_ROOT" ]; then
+    printf 'PART C CLEANUP OBSERVED (temporary credential HOME retained for owned-resource cleanup retry)\n'
   fi
-  if [ -n "$PART_C_ROOT" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
+  if [ -n "$PART_C_ROOT" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ]; then
     if rm -rf -- "$PART_C_ROOT"; then
       printf 'PART C CLEANUP PASS (temporary root removed)\n'
       PART_C_ROOT=''
@@ -274,7 +319,7 @@ part_c_teardown() {
   elif [ -n "$PART_C_ROOT" ]; then
     printf 'PART C CLEANUP OBSERVED (temporary root retained for owned-resource cleanup retry)\n'
   fi
-  if [ "$teardown_status" -eq 0 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ -z "$PART_C_ROOT" ]; then
+  if [ "$teardown_status" -eq 0 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ] && [ -z "$PART_C_ROOT" ]; then
     PART_C_ACTIVE=0
   fi
   return "$teardown_status"
@@ -463,9 +508,20 @@ render_results() {
             codex-seeded|manual) ;;
             *) die 'live metadata has invalid part_c_auth_mode' ;;
           esac
+          part_c_claude_auth_mode=$(field part_c_claude_auth_mode "$metadata")
+          if [ -n "$part_c_claude_auth_mode" ]; then
+            case "$part_c_claude_auth_mode" in
+              keychain-linked|isolated-keychain) ;;
+              *) die 'live metadata has invalid part_c_claude_auth_mode' ;;
+            esac
+          fi
           part_c_auth_attestation=$(field part_c_auth_attestation "$metadata")
           [ -n "$part_c_auth_attestation" ] || die 'live metadata is missing part_c_auth_attestation'
-          printf -- '- Checkpoint C.C1 authentication (%s): operator confirmed: %s\n' "$part_c_auth_mode" "$part_c_auth_attestation"
+          if [ -n "$part_c_claude_auth_mode" ]; then
+            printf -- '- Checkpoint C.C1 authentication (%s, %s): operator confirmed: %s\n' "$part_c_claude_auth_mode" "$part_c_auth_mode" "$part_c_auth_attestation"
+          else
+            printf -- '- Checkpoint C.C1 authentication (%s): operator confirmed: %s\n' "$part_c_auth_mode" "$part_c_auth_attestation"
+          fi
           printf -- '- Checkpoint C.C2 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
           printf -- '- Checkpoint C.C3 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
         else
@@ -1182,6 +1238,8 @@ EOF
     PART_C_HOME="$PART_C_ROOT/home"
     PART_C_PROJECT="$PART_C_ROOT/project"
     PART_C_BIN="$PART_C_ROOT/bin"
+    PART_C_KEYCHAIN_SOURCE="$PART_C_ORIGINAL_HOME/Library/Keychains"
+    PART_C_KEYCHAIN_LINK="$PART_C_HOME/Library/Keychains"
 
     step_start C.1 'create isolated temporary HOME, project, and tmux shim'
     install -d -m 0700 "$PART_C_HOME" || {
@@ -1195,20 +1253,16 @@ EOF
     step_pass C.1 'isolated Part C filesystem is active'
 
     step_start C.2 'choose authentication path for the isolated HOME'
-    part_c_seed_offered=0
     if part_c_has_seedable_auth; then
-      part_c_seed_offered=1
       printf 'Part C can seed codex authentication from this empirically proven file:\n'
       part_c_print_seedable_auth
-      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
-      printf 'Claude Code will require guided interactive sign-in in the fresh temporary HOME.\n'
       if ask 'Copy only this Codex file into the temporary Part C HOME?'; then
         if ! part_c_seed_auth; then
           step_fail C.2 'authentication file copy failed'
           part_c_abort 'Part C authentication seeding failed'
         fi
         PART_C_AUTH_MODE=codex-seeded
-        step_pass C.2 'operator consented and the proven Codex authentication file was copied; Claude sign-in remains manual'
+        step_pass C.2 'operator consented and the proven Codex authentication file was copied'
       else
         case "$ASK_RESULT" in
           n) PART_C_AUTH_MODE=manual ;;
@@ -1220,27 +1274,59 @@ EOF
       fi
     else
       printf 'No proven Codex authentication file was found in the real HOME.\n'
-      printf 'No sufficient Claude HOME-file seed is proven for this macOS verifier.\n'
       PART_C_AUTH_MODE=manual
     fi
 
-    if [ "$PART_C_AUTH_MODE" = manual ]; then
-      printf 'No authentication files will be copied into the temporary Part C HOME.\n'
-      if ask 'Continue with guided manual sign-in instead?'; then
-        step_pass C.2 'operator chose guided manual sign-in without copied files'
+    part_c_keychain_offered=0
+    if part_c_has_keychain_source; then
+      part_c_keychain_offered=1
+      printf 'Claude Code 2.1.226 can authenticate through this exact symlink:\n'
+      printf '  %s -> %s\n' "$PART_C_KEYCHAIN_SOURCE" "$PART_C_KEYCHAIN_LINK"
+      printf "Both probe harnesses can reach the operator's login keychain through this link; per-item ACLs still apply.\n"
+      printf 'No Claude credential is copied into the temporary HOME.\n'
+      if ask "Create exactly this Claude Keychains symlink: $PART_C_KEYCHAIN_SOURCE -> $PART_C_KEYCHAIN_LINK?"; then
+        if ! part_c_link_keychains; then
+          step_fail C.2 'Claude Keychains link creation failed'
+          part_c_abort 'Part C Claude Keychains link creation failed'
+        fi
+        PART_C_CLAUDE_AUTH_MODE=keychain-linked
+        step_pass C.2 'operator consented and the exact Claude Keychains symlink was created'
+      else
+        case "$ASK_RESULT" in
+          n) PART_C_CLAUDE_AUTH_MODE=isolated-keychain ;;
+          *)
+            step_fail C.2 'Claude authentication selection input failed'
+            part_c_abort 'Part C Claude authentication selection input failed'
+            ;;
+        esac
+      fi
+    else
+      printf 'No operator Library/Keychains directory was found for the exact Claude symlink.\n'
+      PART_C_CLAUDE_AUTH_MODE=isolated-keychain
+    fi
+
+    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
+      printf 'The fallback creates an isolated empty login keychain under the temporary HOME.\n'
+      printf 'A fresh Claude token will be minted into the isolated temporary keychain.\n'
+      if ask 'Continue with guided Claude sign-in using an isolated empty login keychain instead?'; then
+        if ! part_c_create_isolated_keychain; then
+          step_fail C.2 'isolated login keychain creation failed'
+          part_c_abort 'Part C isolated login keychain creation failed'
+        fi
+        step_pass C.2 'operator chose guided Claude sign-in with an isolated empty login keychain'
       else
         case "$ASK_RESULT" in
           n)
-            if [ "$part_c_seed_offered" -eq 1 ]; then
-              step_fail C.2 'operator declined both authentication paths'
-              part_c_abort 'operator declined authentication copy and guided manual sign-in'
+            if [ "$part_c_keychain_offered" -eq 1 ]; then
+              step_fail C.2 'operator declined both Claude authentication paths'
+              part_c_abort 'operator declined Claude keychain link and isolated-keychain guided sign-in'
             fi
-            step_fail C.2 'operator declined guided manual sign-in'
-            part_c_abort 'operator declined guided manual sign-in'
+            step_fail C.2 'operator declined isolated-keychain guided sign-in'
+            part_c_abort 'operator declined isolated-keychain guided sign-in'
             ;;
           *)
-            step_fail C.2 'manual sign-in selection input failed'
-            part_c_abort 'Part C manual sign-in selection input failed'
+            step_fail C.2 'isolated-keychain sign-in selection input failed'
+            part_c_abort 'Part C isolated-keychain sign-in selection input failed'
             ;;
         esac
       fi
@@ -1274,19 +1360,36 @@ The verifier will attach this Window 1 to the isolated skill fleet now. It runs:
 While attached, use these concrete actions:
 
 EOF
-    if [ "$PART_C_AUTH_MODE" = manual ]; then
+    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ] && [ "$PART_C_AUTH_MODE" = manual ]; then
       cat <<'EOF'
 While attached, complete these authentication steps before checking skills:
 
-1. In the Claude Code tab, complete onboarding and sign in until a ready prompt appears.
+1. In the Claude Code tab, complete onboarding and sign in until a ready prompt appears. This mints a fresh token into the isolated temporary keychain.
 2. In the codex tab, complete sign-in until a ready prompt appears.
+
+EOF
+    elif [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
+      cat <<'EOF'
+While attached, complete these authentication steps before checking skills:
+
+The proven Codex auth.json was copied with your consent.
+In the Claude Code tab, complete onboarding and sign in until a ready prompt appears. This
+mints a fresh token into the isolated temporary keychain. In the codex tab, wait
+for the authenticated ready prompt; do not enter credentials.
+
+EOF
+    elif [ "$PART_C_AUTH_MODE" = manual ]; then
+      cat <<'EOF'
+The Claude Keychains symlink was created with your consent. Claude Code should
+reach an authenticated ready prompt without manual interaction. In the codex tab,
+complete sign-in until a ready prompt appears.
 
 EOF
     else
       cat <<'EOF'
-The proven Codex auth.json was copied with your consent. In the Claude Code tab,
-complete onboarding and interactive sign-in until a ready prompt appears. In the
-codex tab, wait for the authenticated ready prompt; do not enter credentials.
+The proven Codex auth.json and the Claude Keychains symlink were created with
+your consent. Both harnesses should reach authenticated ready prompts without
+manual pane interaction; do not enter credentials.
 
 EOF
     fi
@@ -1313,12 +1416,18 @@ EOF
     fi
     step_pass C.4 'named-socket skill fleet launched and attach guidance completed'
 
-    if [ "$PART_C_AUTH_MODE" = manual ]; then
+    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ] && [ "$PART_C_AUTH_MODE" = manual ]; then
       auth_expected='both harnesses completed manual sign-in and reached ready prompts.'
       auth_prompt='Did both harnesses complete manual sign-in and reach ready prompts?'
+    elif [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
+      auth_expected='Claude Code minted a fresh token through guided sign-in, and codex reached an authenticated ready prompt from the seeded auth.json.'
+      auth_prompt='Did Claude Code mint a fresh token through guided sign-in and did codex authenticate from the seeded auth.json?'
+    elif [ "$PART_C_AUTH_MODE" = manual ]; then
+      auth_expected='Claude Code started authenticated through the consented Keychains symlink, and codex completed manual sign-in.'
+      auth_prompt='Did Claude Code start authenticated through the consented Keychains symlink and did codex complete manual sign-in?'
     else
-      auth_expected='Claude Code completed interactive sign-in, and codex reached an authenticated ready prompt from the seeded auth.json without manual sign-in.'
-      auth_prompt='Did Claude Code complete interactive sign-in and codex authenticate from the seeded auth.json without manual sign-in?'
+      auth_expected='both harnesses started authenticated from the consented seeds without manual pane interaction.'
+      auth_prompt='Did both harnesses start authenticated from the consented seeds without manual pane interaction?'
     fi
     if checkpoint C.C1 'harness authentication ready' "$auth_expected" "$auth_prompt"; then
       PART_C_AUTH_ATTESTATION=$ASK_ANSWER
@@ -1373,6 +1482,7 @@ EOF
     printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
     printf 'part_b_detach_attestation=%s\n' "$PART_B_DETACH_ATTESTATION"
     printf 'part_c_auth_mode=%s\n' "$PART_C_AUTH_MODE"
+    printf 'part_c_claude_auth_mode=%s\n' "$PART_C_CLAUDE_AUTH_MODE"
     printf 'part_c_auth_attestation=%s\n' "$PART_C_AUTH_ATTESTATION"
     printf 'part_c_skill_attestation=%s\n' "$PART_C_SKILL_ATTESTATION"
     printf 'part_c_meaning_attestation=%s\n' "$PART_C_MEANING_ATTESTATION"

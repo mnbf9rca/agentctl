@@ -188,24 +188,41 @@ fails closed after teardown is attempted.
 
 The verifier creates a separate stub fleet on a named throwaway tmux socket,
 an empty temporary project, and a mode-`0700` temporary `HOME`. The macOS probe
-proved only `~/.codex/auth.json` sufficient for file-based seeding; Claude Code
-uses the macOS Keychain, and no tested HOME-file set was proved sufficient. The
-verifier therefore never offers or copies a Claude file.
+proved `~/.codex/auth.json` sufficient for codex file-based seeding. A separate
+Claude Code 2.1.226 probe proved an exact
+`$REAL_HOME/Library/Keychains -> $TEMP_HOME/Library/Keychains` symlink
+sufficient for headless authentication. The verifier never offers or copies a
+Claude credential file.
 If the proven Codex file exists, the verifier prints that exact filename and
 asks once for consent before copying it with mode `0600`; its contents are never
-printed. Claude Code still requires guided interactive sign-in in the fresh
-HOME. If Codex copy consent is declined, the verifier copies nothing and asks
-whether to continue with guided manual sign-in for both harnesses. Declining
-both paths fails Part C before AMQ initialization, skill installation, or fleet
-launch. Harness processes receive only the temporary `HOME`; they never receive
-the operator's real `HOME`.
+printed. Independently, the verifier prints the exact Claude Keychains source
+and destination and asks for separate consent, stating that both probe
+harnesses can reach the operator's login keychain through the link (per-item
+ACLs still apply). The link copies no secret; refresh writes reach the real
+login keychain as they do for the operator's daily harnesses.
+
+If the Claude link is declined or its fixed source is absent, the verifier
+offers guided Claude sign-in instead. On consent it creates a mode-`0700`
+`$TEMP_HOME/Library/Keychains` and an empty `login.keychain-db` there with
+`security create-keychain` before launch; guided sign-in mints a fresh token
+into that isolated keychain. Declining both Claude paths fails Part C before
+AMQ initialization, skill installation, or fleet launch, regardless of the
+independent Codex choice. Harness processes receive only the temporary `HOME`;
+they never receive the operator's real `HOME` value.
+
+Never seed Part C with `CLAUDE_CODE_OAUTH_TOKEN`: the environment-token path can
+silently delete the real Keychain credential on harness exit
+([anthropics/claude-code#37512](https://github.com/anthropics/claude-code/issues/37512)).
+For a manual run where Keychain access is locked, such as SSH or launchd, use
+`claude setup-token` as the documented fallback rather than exporting that
+environment variable.
 
 - [ ] At checkpoint C.C1, answer `y` only if both harnesses reached
-      authenticated ready prompts. On the `codex-seeded` path, complete Claude
-      Code onboarding/sign-in while attached and verify codex reached its ready
-      prompt from the copied `auth.json` without manual sign-in. On the manual
-      path, complete both harness sign-ins while attached before answering this
-      checkpoint
+      authenticated ready prompts. With both consented seeds, verify both
+      harnesses started authenticated with zero manual pane interaction. On the
+      isolated-keychain path, complete Claude onboarding/sign-in and verify it
+      minted a fresh token; complete Codex sign-in only if its independent file
+      copy was declined or unavailable
 - [ ] At checkpoint C.C2, in the
       Claude Code tab, type `/skills`, press Enter, find `agentctl` in the
       displayed inventory, and press `esc` to close it. Repeat those exact
@@ -217,9 +234,12 @@ the operator's real `HOME`.
       checkpoint C.C3 only if both match
 - [ ] After the observations, press `esc`, not uppercase `X`, and wait for the
       post-detach report. The verifier tears down only its named probe fleet and
-      socket, restores `HOME` and `PATH`, and removes the credential-bearing
-      temporary `HOME` on every exit. If named-resource cleanup requires a
-      retry, any retained outer root contains no copied credentials
+      socket before removing the exact Keychains link, restores `HOME` and
+      `PATH`, removes only the link and never its target, then removes the
+      credential-bearing temporary `HOME` on every successful cleanup path.
+      If fleet or socket cleanup requires a retry, the link and temporary HOME
+      remain together until no owned harness can use them; once fleet and socket
+      absence is observed, link removal precedes HOME removal
 
 ## Manual fallback for Parts A–C
 
@@ -227,10 +247,13 @@ This appendix is for troubleshooting a verifier failure or interruption, not
 the normal release path. Do not paste these blocks during a successful normal
 walkthrough: the verifier owns the resources it creates and performs cleanup.
 In particular, never point Part C at the default tmux server or a real `HOME`.
-The normal verifier owns the filename-only consent and secure-copy mechanism.
-For manual troubleshooting, copy no authentication files: complete both
-harness sign-ins after attaching to the isolated fleet, then continue with the
-inventory and status-meaning observations.
+The normal verifier owns both exact consent mechanisms and their safety-ordered
+cleanup. For manual troubleshooting, copy no authentication files and do not
+link the operator's Keychains directory. Create an isolated login keychain,
+complete both harness sign-ins after attaching to the isolated fleet, then
+continue with the inventory and status-meaning observations. In an SSH or
+launchd context where Keychain access stays locked, `claude setup-token` is the
+manual fallback; never export `CLAUDE_CODE_OAUTH_TOKEN` for this probe.
 
 Set up the isolated socket and fleet from the clean primary checkout. The tmux
 shim scopes every tmux command agentctl runs; `amq coop init` scopes AMQ to the
@@ -246,7 +269,10 @@ probe_project="$probe_root/project"
 probe_bin="$probe_root/bin"
 probe_socket="agentctl-skill-verify-$$"
 real_tmux="$(command -v tmux)"
-mkdir -p "$skill_home" "$probe_project" "$probe_bin"
+install -d -m 0700 "$skill_home" "$skill_home/Library/Keychains"
+install -d -m 0755 "$probe_project" "$probe_bin"
+HOME="$skill_home" security create-keychain -p '' \
+  "$skill_home/Library/Keychains/login.keychain-db"
 cat >"$probe_bin/tmux" <<EOF
 #!/usr/bin/env bash
 exec "$real_tmux" -L "$probe_socket" "\$@"
