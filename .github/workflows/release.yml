@@ -111,11 +111,6 @@ jobs:
           if [ "$DRY_RUN" != "true" ] && [ "$amd_out" != "$expected" ]; then
             echo "amd64 version mismatch: got '$amd_out', want '$expected'" >&2; exit 1
           fi
-      - name: Publish (undraft) release
-        if: env.DRY_RUN != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Attest release artifacts
         if: env.DRY_RUN != 'true'
         uses: actions/attest@v4
@@ -126,6 +121,11 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: ./dist/checksums.txt
+      - name: Publish (undraft) release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false
       - name: Mint tap token
         if: env.DRY_RUN != 'true'
         id: tap-token
