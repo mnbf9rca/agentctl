@@ -47,6 +47,19 @@ jobs:
           go-version-file: go.mod
       - name: Install goreleaser
         run: brew install goreleaser
+      - name: Verify goreleaser version
+        run: |
+          set -euo pipefail
+          if ! command -v goreleaser >/dev/null 2>&1; then
+            echo "goreleaser not found on PATH after the install step" >&2
+            exit 1
+          fi
+          actual="$(goreleaser --version | awk '/^GitVersion:/ {print $2; exit}')"
+          if [[ "$actual" != "2.17.1" ]]; then
+            echo "goreleaser is $actual; the last green snapshot used 2.17.1."
+            echo "Re-run the snapshot checks and review the result before changing this pin."
+            exit 1
+          fi
       - name: Environment fingerprint (post-install)
         run: ./hack/ci-fingerprint.sh
       - name: Resolve version
