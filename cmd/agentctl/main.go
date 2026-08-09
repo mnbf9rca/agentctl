@@ -577,6 +577,7 @@ func attachError(stderr io.Writer, err error) int {
 type launchOptions struct {
 	session   string
 	roles     string
+	rolesSet  bool
 	models    *string
 	efforts   *string
 	directory *string
@@ -597,7 +598,7 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 		return launchOptions{}, errors.New("launch accepts no positional arguments")
 	}
 
-	options := launchOptions{session: *session, roles: *roles}
+	options := launchOptions{session: *session, roles: *roles, rolesSet: flags.WasSet("roles")}
 	if flags.WasSet("models") {
 		modelValue := *models
 		options.models = &modelValue
