@@ -89,6 +89,7 @@ func (e *LaunchError) Unwrap() error { return e.Cause }
 // successfully stamped.
 type LaunchResult struct {
 	Session          tmuxx.Session
+	Directory        string
 	TotalRoles       int
 	UnprovenRoles    []string
 	RecoverableRoles []string
@@ -241,6 +242,7 @@ func (l Launcher) Launch(ctx context.Context, session string, fleet config.Fleet
 	}
 	result := LaunchResult{
 		Session:    tmuxx.Session{ID: createdSession.SessionID, Name: session},
+		Directory:  directoryName,
 		TotalRoles: len(fleet.Roles),
 	}
 	if err := l.stampSession(ctx, createdSession.SessionID, fleet.Roles, directoryName); err != nil {

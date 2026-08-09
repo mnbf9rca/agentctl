@@ -152,8 +152,12 @@ func TestLaunchMakesRelativeDirectoryAbsoluteBeforeCreationAndStamping(t *testin
 			runner := tmuxx.NewFakeRunner(successfulOneRoleResponses("")...)
 			launcher := New(runner, Dependencies{LookPath: presentExecutable})
 
-			if _, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr(tt.directory)); err != nil {
+			launched, err := launcher.Launch(context.Background(), "epic123", oneRoleFleet(), directoryPtr(tt.directory))
+			if err != nil {
 				t.Fatalf("Launch() error = %v", err)
+			}
+			if launched.Directory != tt.wantDirectory {
+				t.Fatalf("Launch() directory = %q, want %q", launched.Directory, tt.wantDirectory)
 			}
 
 			wantCreation := tmuxx.Call{Executable: "tmux", Args: []string{

@@ -425,6 +425,26 @@ func TestParseHarnessAcceptsOnlyRegisteredHarnesses(t *testing.T) {
 	}
 }
 
+func TestValidateTemplateDirectoryRequiresAnAbsolutePathAndNamesTheFlagEscapeHatch(t *testing.T) {
+	t.Parallel()
+
+	if err := ValidateTemplateDirectory("/srv/work"); err != nil {
+		t.Fatalf("ValidateTemplateDirectory() error = %v, want nil", err)
+	}
+	err := ValidateTemplateDirectory("relative/work")
+	var validation *ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T %v, want *ValidationError", err, err)
+	}
+	if validation.Option != "dir" || validation.Value != "relative/work" || validation.EntryIndex != -1 {
+		t.Fatalf("ValidationError = %#v, want option=dir value=relative/work entryIndex=-1", validation)
+	}
+	want := `invalid --dir value "relative/work": template path must be absolute; omit dir and supply --dir at invocation`
+	if got := err.Error(); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func assertValidationError(t *testing.T, err error, option, value string, entryIndex int, entry, reason, message string) {
 	t.Helper()
 

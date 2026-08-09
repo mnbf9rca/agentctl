@@ -69,7 +69,7 @@ brew install mnbf9rca/tap/agentctl
 ```
 
 This installs a prebuilt, signed binary and brings in `tmux` as a dependency. Every fleet launch also requires `amq`
-and each harness named in `--roles` (`claude` or `codex`) on `PATH`; agentctl reports the exact missing executable
+and each harness in the effective fleet (`claude` or `codex`) on `PATH`; agentctl reports the exact missing executable
 before creating anything. iTerm2 is needed only for `agentctl attach`.
 
 After installing or upgrading the binary, install its embedded agent-facing skill into both harnesses' user-scope
@@ -211,12 +211,38 @@ with Go instead reports its recorded VCS revision, followed by `+dirty` when Go 
 
 ```text
 agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]
+agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]
 ```
 
-Creates a new managed tmux session. `--session` and `--roles` are required. Supported harnesses are `claude` and
-`codex`. `--models` and `--efforts` are optional and may name only roles present in `--roles`. `--dir` overrides the
-invocation working directory and must name an existing directory. Launch fails rather than adopting an existing
-session.
+Creates a new managed tmux session. `--session` is always required. Without `--from-template`, `--roles` is required
+as before. A template makes `--roles` optional, not forbidden: template roles come first in file order, flags override
+fields on those roles, and roles added by `--roles` follow in flag order. No flag removes a template role. Supported
+harnesses are `claude` and `codex`; `--models` and `--efforts` may name any role in the effective union. `--dir`
+overrides the template or invocation working directory and must name an existing directory. Launch fails rather than
+adopting an existing session.
+
+Templates are strict, read-only JSON inputs with this shape:
+
+```json
+{
+  "version": 1,
+  "dir": "/srv/work",
+  "roles": [
+    { "role": "planner", "harness": "claude", "model": "opus-4-1", "effort": "high" },
+    { "role": "worker", "harness": "codex" }
+  ]
+}
+```
+
+The file never contains a session name. `version` is required; `dir` and `roles` may be omitted, and a role's harness
+may be supplied later by a matching `--roles` entry. Unknown or duplicate fields, duplicate roles, `null`, empty
+strings, trailing JSON documents, non-regular files, and files over 1 MiB are refused. A template
+`dir` must be absolute; omit it and use `--dir` when the invocation should choose a relative or machine-specific path.
+Every effective role and field passes the same validators used by flags before launch continues.
+
+When a template is used, launch prints one provenance line per effective role before the observed status table. It
+labels fields as `template`, `flag override`, or `flags`; a template-supplied directory gets its own line. These lines
+describe the values actually passed to the launch path and recorded in session metadata.
 
 After creation succeeds, `launch` prints the same observed human-readable table as `status --session SESSION`. The
 table is collected from the managed roster and live tmux state rather than echoed from the launch arguments, so a role
@@ -254,7 +280,7 @@ remembering how it was started:
 
 | Session option | Value |
 | --- | --- |
-| `@agentctl_roles` | the declared role names, comma-joined, in declaration order |
+| `@agentctl_roles` | the declared role names, comma-joined, in declaration order (template roles first, then flag-added roles) |
 | `@agentctl_fleet` | `role:harness:model:effort` quads, comma-joined, in the same order; defaulted model and effort values are empty (`planner:claude::`) |
 | `@agentctl_dir` | the exact directory passed to tmux `-c`: the `--dir` value, or the invocation working directory |
 
@@ -510,6 +536,11 @@ tmux. Recorded metadata is re-validated when it is read back: `relaunch` applies
 `@agentctl_fleet` that `launch` applies to `--roles`, `--models`, and `--efforts`. Relaunch rollback removes only the window the
 same invocation created; recovery removes only the exact typed ID of a uniquely classified managed `no-baseline`
 window, after every non-destructive check has passed.
+
+`launch --from-template` is a caller-named read path, not a write path. agentctl opens the path, verifies the opened
+descriptor is a regular file, bounds the read, and strictly decodes it before the effective fleet can reach preflight
+or tmux. Symlinks are followed to their target; `-` is an ordinary filename and stdin is never read. Template values
+gain no trust from their source and follow the same validated harness-argv and quoting path as flag values.
 
 These checks reduce wrong-target accidents but cannot make terminal input transactional. Under deliberate CPU
 saturation, verification observed delayed, missing, and doubled input. No wrong command selection was observed, but a

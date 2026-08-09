@@ -129,7 +129,8 @@ func TestRunRejectsNoCommandWithUsage(t *testing.T) {
 }
 
 func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
-	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n"
+	const launchUsage = "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n" +
+		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n"
 	const statusUsage = "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
 		"A leading * marks the caller's session when agentctl can determine it from tmux.\n" +
@@ -144,6 +145,8 @@ func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 		{name: "session equals", args: []string{"launch", "--session=one", "--session=two", "--roles", "planner:claude"}, option: "session", usage: launchUsage},
 		{name: "roles spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--roles", "reviewer:codex"}, option: "roles", usage: launchUsage},
 		{name: "roles equals", args: []string{"launch", "--session", "fleet", "--roles=planner:claude", "--roles=reviewer:codex"}, option: "roles", usage: launchUsage},
+		{name: "from-template spaced", args: []string{"launch", "--session", "fleet", "--from-template", "/one", "--from-template", "/two"}, option: "from-template", usage: launchUsage},
+		{name: "from-template equals", args: []string{"launch", "--session", "fleet", "--from-template=/one", "--from-template=/two"}, option: "from-template", usage: launchUsage},
 		{name: "models spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models", "planner:fable", "--models", "planner:opus"}, option: "models", usage: launchUsage},
 		{name: "models equals", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models=planner:fable", "--models=planner:opus"}, option: "models", usage: launchUsage},
 		{name: "efforts spaced", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:high", "--efforts", "planner:low"}, option: "efforts", usage: launchUsage},

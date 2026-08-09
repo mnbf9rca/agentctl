@@ -24,6 +24,8 @@ const (
 	ProvenanceOverride Provenance = "flag override"
 	// ProvenanceFlags is a value supplied by flags because the session records none.
 	ProvenanceFlags Provenance = "flags"
+	// ProvenanceTemplate is a value supplied by a launch template.
+	ProvenanceTemplate Provenance = "template"
 )
 
 var errStoredDirectoryNotAbsolute = errors.New("path is not absolute")

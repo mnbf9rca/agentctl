@@ -128,6 +128,63 @@ func TestIntegrationLaunchRecordsTopologyMetadataAndBaseline(t *testing.T) {
 	}
 }
 
+func TestIntegrationLaunchTemplateCreatesTheEffectiveUnionInPinnedOrderWithoutWritingTheSource(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	templateDirectory := t.TempDir()
+	launchDirectory := t.TempDir()
+	templatePath := writeLaunchTemplateFixture(t, templateDirectory, "fleet.json", `{
+  "version": 1,
+  "dir": "/template/default",
+  "roles": [
+    {"role":"planner","harness":"claude","model":"opus","effort":"high"}
+  ]
+}`)
+	before, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := fixture.runAgentctl(
+		"launch",
+		"--session", "integration-template",
+		"--from-template", templatePath,
+		"--roles", "coder:codex",
+		"--models", "coder:gpt-5",
+		"--efforts", "planner:max,coder:high",
+		"--dir", launchDirectory,
+	)
+	if result.exitCode != exitOK || result.stderr != "" {
+		t.Fatalf("launch result = %#v, want success", result)
+	}
+	provenance := "agentctl: launched planner in integration-template: harness claude (template), model opus (template), effort max (flag override)\n" +
+		"agentctl: launched coder in integration-template: harness codex (flags), model gpt-5 (flags), effort high (flags)\n" +
+		"agentctl: template " + templatePath + ": dir " + launchDirectory + " (flag override)\n"
+	if !strings.HasPrefix(result.stdout, provenance) {
+		t.Fatalf("launch stdout = %q, want provenance prefix %q", result.stdout, provenance)
+	}
+	status := fixture.runAgentctl("status", "--session", "integration-template")
+	if status.exitCode != exitOK || status.stderr != "" || !strings.HasSuffix(result.stdout, status.stdout) {
+		t.Fatalf("status = %#v; launch stdout = %q, want observed status suffix", status, result.stdout)
+	}
+
+	sessions := fixture.sessions()
+	if len(sessions) != 1 || sessions[0].Roles != "planner,coder" ||
+		sessions[0].Fleet != "planner:claude:opus:max,coder:codex:gpt-5:high" || sessions[0].Directory != launchDirectory {
+		t.Fatalf("session metadata = %#v, want effective ordered union and override directory", sessions)
+	}
+	windows := fixture.windows(sessions[0].ID)
+	if len(windows) != 2 || windows[0].Role != "planner" || windows[1].Role != "coder" {
+		t.Fatalf("windows = %#v, want template role then flag-added role", windows)
+	}
+	after, err := os.ReadFile(templatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("template contents changed from %q to %q", before, after)
+	}
+}
+
 func TestIntegrationLaunchRetainsUnprovenRoleForRelaunchRecovery(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	fixture.runner.makeProcessUnavailableAfterFirstPID()
