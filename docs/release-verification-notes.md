@@ -54,16 +54,20 @@ part of verification the suite is structurally unable to perform.
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS
 
-**Operator/planner note on the 2026-08-09 block (added after review):** the
-`Part B pre-check:` / `Part B keeper:` lines are absent because they belong to
-the no-server conditional branch (#147), which fires only on a machine with no
-tmux server; this run's machine carried a live server (the working agent
-fleet), so the branch had no occasion to execute. Nothing was skipped: the
-operator ran the entire script. The no-server branch's execution evidence is
-PR #162's gate (executed live with the trap exercised) and the #177/#178
-audit, which ran the wrapper as written from sockets whose inner server was
-absent. This note is authored by the planner, outside the machine-written
-block above.
+**Operator/planner note on the 2026-08-09 block (corrected — the first
+version of this note stated a false cause, see PR #192's gate):** the
+`Part B pre-check:` / `Part B keeper:` lines are absent because this run
+invoked `hack/release-verify.sh` directly rather than through Part A's
+isolated `TMUX_TMPDIR` subshell, so the default socket was the operator's
+live one and the connect-ENOENT branch (#147) did not fire. The branch is
+NOT incapable of firing on a machine with a live server — relocating the
+socket so that it does is the isolated leg's entire purpose, demonstrated
+on this machine during PR #162's gate. The branch's execution evidence for
+this release is PR #162's gate (executed live, trap exercised) and the
+#177/#178 audit, which ran the wrapper as written against an absent inner
+server; the #177 standing rule is satisfied by those executions rather
+than by this run. This note is authored by the planner, outside the
+machine-written block above.
 
 ### 2026-08-08
 
