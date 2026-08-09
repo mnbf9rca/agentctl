@@ -37,13 +37,17 @@ hack/check-skill-version.sh "$release_version"
 Start the default interactive walkthrough with a fresh, isolated default tmux
 socket directory. This deliberately exercises the connect-ENOENT path without
 touching the operator's live default server; the setting is inherited by the
-verifier, agentctl, and their tmux children. The subshell trap removes only the
-temporary directory created for this run:
+verifier, agentctl, and their tmux children. The leg must not inherit an
+ambient tmux client, because `TMUX` takes precedence over `TMUX_TMPDIR` and
+`TMUX_PANE` is an agentctl inside-tmux selection and self-targeting input. The
+subshell trap first kills any server on the isolated socket while its directory
+still exists, then removes only the temporary directory created for this run:
 
 ```bash
 release_tmux_tmpdir="$(mktemp -d /tmp/agentctl-release-tmux.XXXXXX)"
 (
-  trap 'rm -rf -- "$release_tmux_tmpdir"' EXIT
+  trap 'TMUX_TMPDIR="$release_tmux_tmpdir" tmux kill-server 2>/dev/null; rm -rf -- "$release_tmux_tmpdir"' EXIT
+  unset TMUX TMUX_PANE
   export TMUX_TMPDIR="$release_tmux_tmpdir"
   bash hack/release-verify.sh
 )
