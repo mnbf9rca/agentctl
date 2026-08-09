@@ -164,6 +164,24 @@ func (e *SoleWindowRecoveryError) Error() string {
 	return fmt.Sprintf("%s:\n  agentctl kill --session %s\n  %s", prefix, e.Session, e.LaunchCommand)
 }
 
+// UnmarkedWindowRecoveryError refuses a no-baseline window that carries no
+// positive record that launch finished abandoning it. LaunchCommand is empty
+// when the session metadata cannot reconstruct an equivalent fleet.
+type UnmarkedWindowRecoveryError struct {
+	Role          string
+	WindowID      tmuxx.WindowID
+	Session       string
+	LaunchCommand string
+}
+
+func (e *UnmarkedWindowRecoveryError) Error() string {
+	prefix := fmt.Sprintf("window %s has no process baseline and no abandonment record, so agentctl cannot tell an abandoned role from one still starting. If no launch is in progress, recreate the fleet", e.WindowID)
+	if e.LaunchCommand == "" {
+		return prefix + ", but agentctl could not reconstruct an equivalent launch command from this session's metadata"
+	}
+	return fmt.Sprintf("%s:\n  agentctl kill --session %s\n  %s", prefix, e.Session, e.LaunchCommand)
+}
+
 func (e *WindowPresentError) Error() string {
 	rendered := make([]string, len(e.Windows))
 	for index, window := range e.Windows {
@@ -318,14 +336,22 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 	if err != nil {
 		return RelaunchResult{}, err
 	}
-	recoveredWindowID, windowCount, err := l.classifyRelaunchWindow(ctx, session, request.Role)
+	classification, err := l.classifyRelaunchWindow(ctx, session, request.Role)
 	if err != nil {
 		return RelaunchResult{}, err
 	}
-	if recoveredWindowID != "" && windowCount == 1 {
+	launchCommand := recoveryLaunchCommand(session.Name, role, directory, provenance)
+	if classification.UnmarkedWindowID != "" {
+		return RelaunchResult{}, &UnmarkedWindowRecoveryError{
+			Role: role.Name, WindowID: classification.UnmarkedWindowID, Session: session.Name,
+			LaunchCommand: launchCommand,
+		}
+	}
+	recoveredWindowID := classification.RecoveredWindowID
+	if recoveredWindowID != "" && classification.WindowCount == 1 {
 		return RelaunchResult{}, &SoleWindowRecoveryError{
 			Role: role.Name, Session: session.Name,
-			LaunchCommand: recoveryLaunchCommand(session.Name, role, directory, provenance),
+			LaunchCommand: launchCommand,
 		}
 	}
 	if err := preflight.CheckExecutables(config.FleetConfig{Roles: []config.RoleConfig{role}}, l.lookPath); err != nil {
@@ -545,10 +571,16 @@ func legacyConfiguration(session tmuxx.Session, request RelaunchRequest, roster 
 // classifyRelaunchWindow accepts an absent role or exactly one live managed
 // window with no baseline. Every other observed state refuses. A window with
 // no panes refuses too: recreating beside it would manufacture ambiguity.
-func (l Launcher) classifyRelaunchWindow(ctx context.Context, session tmuxx.Session, role string) (tmuxx.WindowID, int, error) {
+type relaunchWindowClassification struct {
+	RecoveredWindowID tmuxx.WindowID
+	UnmarkedWindowID  tmuxx.WindowID
+	WindowCount       int
+}
+
+func (l Launcher) classifyRelaunchWindow(ctx context.Context, session tmuxx.Session, role string) (relaunchWindowClassification, error) {
 	windows, err := l.tmux.ListWindows(ctx, session.ID)
 	if err != nil {
-		return "", 0, tmuxx.ClassifyError(err)
+		return relaunchWindowClassification{}, tmuxx.ClassifyError(err)
 	}
 	matches := make([]tmuxx.Window, 0, 1)
 	for _, window := range windows {
@@ -557,16 +589,22 @@ func (l Launcher) classifyRelaunchWindow(ctx context.Context, session tmuxx.Sess
 		}
 	}
 	if len(matches) == 0 {
-		return "", len(windows), nil
+		return relaunchWindowClassification{WindowCount: len(windows)}, nil
 	}
 	observed, err := l.observeWindows(ctx, matches, role)
 	if err != nil {
-		return "", len(windows), err
+		return relaunchWindowClassification{}, err
 	}
 	if len(observed) == 1 && observed[0].State == status.StateNoBaseline {
-		return observed[0].ID, len(windows), nil
+		classification := relaunchWindowClassification{WindowCount: len(windows)}
+		if matches[0].Unproven == "1" {
+			classification.RecoveredWindowID = observed[0].ID
+		} else {
+			classification.UnmarkedWindowID = observed[0].ID
+		}
+		return classification, nil
 	}
-	return "", len(windows), &WindowPresentError{Session: session, Role: role, Windows: observed}
+	return relaunchWindowClassification{}, &WindowPresentError{Session: session, Role: role, Windows: observed}
 }
 
 func recoveryLaunchCommand(session string, role config.RoleConfig, directory string, provenance sources) string {

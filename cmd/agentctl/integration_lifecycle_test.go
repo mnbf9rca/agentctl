@@ -201,7 +201,7 @@ func TestIntegrationHandmadeRosterWindowIsNeverControlledOrReplaced(t *testing.T
 	fixture.waitHandmadeWindowReady(handmade)
 	for _, option := range []string{
 		"@agentctl_managed", "@agentctl_version", "@agentctl_role", "@agentctl_harness",
-		"@agentctl_model", "@agentctl_effort", "@agentctl_process",
+		"@agentctl_model", "@agentctl_effort", "@agentctl_unproven", "@agentctl_process",
 	} {
 		if got := fixture.windowOption(handmade.ID, option); got != "" {
 			t.Fatalf("handmade window option %s = %q, want absent", option, got)

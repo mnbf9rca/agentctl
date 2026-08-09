@@ -156,12 +156,12 @@ func TestIntegrationLaunchRetainsUnprovenRoleForRelaunchRecovery(t *testing.T) {
 	for _, window := range windows {
 		switch window.Role {
 		case "planner":
-			if window.Process == "" {
+			if window.Process == "" || window.Unproven != "" {
 				t.Fatalf("planner window = %#v, want recorded baseline", window)
 			}
 		case "coder":
-			if window.Process != "" {
-				t.Fatalf("coder window = %#v, want empty baseline", window)
+			if window.Process != "" || window.Unproven != "1" {
+				t.Fatalf("coder window = %#v, want empty baseline and abandonment record", window)
 			}
 			originalCoder = window.ID
 		}
@@ -185,7 +185,7 @@ func TestIntegrationLaunchRetainsUnprovenRoleForRelaunchRecovery(t *testing.T) {
 	fixture.waitStubInvocations(3)
 	fixture.waitRoleMarkers("coder")
 	for _, window := range fixture.windows(session.ID) {
-		if window.Role == "coder" && (window.ID == originalCoder || window.Process == "") {
+		if window.Role == "coder" && (window.ID == originalCoder || window.Process == "" || window.Unproven != "") {
 			t.Fatalf("coder after recovery = %#v, want new proven window", window)
 		}
 	}

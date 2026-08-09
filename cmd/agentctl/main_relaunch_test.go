@@ -271,6 +271,17 @@ func TestRunRelaunchMapsEveryRefusalToItsExitCodeAndMessage(t *testing.T) {
 				"  agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work\n",
 		},
 		{
+			name: "unmarked no-baseline window may still be starting",
+			err: &fleet.UnmarkedWindowRecoveryError{
+				Role: "planner", WindowID: "@23", Session: "alpha",
+				LaunchCommand: "agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work",
+			},
+			code: exitRole,
+			want: "agentctl: refusing to relaunch planner; window @23 has no process baseline and no abandonment record, so agentctl cannot tell an abandoned role from one still starting. If no launch is in progress, recreate the fleet:\n" +
+				"  agentctl kill --session alpha\n" +
+				"  agentctl launch --session alpha --roles planner:claude --models planner:opus-4-1 --efforts planner:high --dir /srv/work\n",
+		},
+		{
 			name: "dead window is not a relaunch",
 			err: &fleet.WindowPresentError{Session: session, Role: "planner", Windows: []fleet.ObservedWindow{
 				{ID: "@23", State: status.StateDead},
@@ -404,9 +415,9 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("planner,reviewer\n")},
 		tmuxx.Response{Stdout: []byte("planner:claude:fable:max,reviewer:codex::\n")},
 		tmuxx.Response{Stdout: []byte("/fleet workspace\n")},
-		tmuxx.Response{Stdout: []byte("@65\treviewer\treviewer\tcodex\t\t\tcodex\n")},
+		tmuxx.Response{Stdout: []byte("@65\treviewer\treviewer\tcodex\t\t\t\tcodex\n")},
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
-		tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\n")},
+		tmuxx.Response{Stdout: []byte("@71\tplanner\t\t\t\t\t\t\n")},
 		tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
 		tmuxx.Response{Stdout: []byte("2.1.220\n")},
@@ -433,14 +444,14 @@ func TestRunRelaunchTranscriptRecreatesTheRoleThroughTheRunner(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_roles"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_fleet"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_dir"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/fleet workspace",
 			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
 			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'claude' '--' '--model' 'fable' '--effort' 'max'",
 		}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "claude"}},
@@ -463,8 +474,8 @@ func TestRunRelaunchConcurrentLoserRefusesAfterRemovingItsCreatedWindow(t *testi
 		tmuxx.Response{},
 		tmuxx.Response{Stdout: []byte("@71\t%88\t5150\n")},
 		tmuxx.Response{Stdout: []byte(
-			"@70\tplanner\tplanner\tclaude\t\t\tclaude\n" +
-				"@71\tplanner\t\t\t\t\t\n",
+			"@70\tplanner\tplanner\tclaude\t\t\t\tclaude\n" +
+				"@71\tplanner\t\t\t\t\t\t\n",
 		)},
 		tmuxx.Response{},
 	)

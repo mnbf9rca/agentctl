@@ -168,7 +168,7 @@ func TestRunLaunchWithUnprovenRoleReportsObservationAndSummaryRendersStatusAndEx
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\n")},
+		tmuxx.Response{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\t\n")},
 		tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")},
 	)
 	runner := tmuxx.NewFakeRunner(responses...)
@@ -608,7 +608,7 @@ func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testin
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-panes", "-t", "@65", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
@@ -671,7 +671,7 @@ func healthyPostLaunchResponses() []tmuxx.Response {
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("planner\n")},
-		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		{Stdout: []byte("%42\t4242\t0\t1\n")},
 		{Stdout: []byte("claude\n")},
 	}
@@ -682,7 +682,7 @@ func healthyMultiRolePostLaunchResponses() []tmuxx.Response {
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("1\n")},
 		{Stdout: []byte("planner,reviewer\n")},
-		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\thigh\tclaude\n@65\treviewer\treviewer\tcodex\tgpt-5.6\t\tcodex\n")},
+		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\thigh\t\tclaude\n@65\treviewer\treviewer\tcodex\tgpt-5.6\t\t\tcodex\n")},
 		{Stdout: []byte("%42\t4242\t0\t1\n")},
 		{Stdout: []byte("claude\n")},
 		{Stdout: []byte("%87\t8686\t0\t1\n")},
@@ -695,7 +695,7 @@ func postLaunchStatusCalls() []tmuxx.Call {
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
 		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
 		{Executable: "tmux", Args: []string{"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
 		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
 	}

@@ -546,21 +546,21 @@ func (f *integrationFixture) hasSession(name string) bool {
 
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {
 	f.t.Helper()
-	const format = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}\t#{pane_current_path}"
+	const format = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}\t#{pane_current_path}"
 	output := f.tmuxOutput("list-windows", "-t", string(sessionID), "-F", format)
 	lines := nonemptyLines(output)
 	windows := make([]integrationWindow, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.SplitN(line, "\t", 8)
-		if len(fields) != 8 {
+		fields := strings.SplitN(line, "\t", 9)
+		if len(fields) != 9 {
 			f.t.Fatalf("parse integration window %q: got %d fields", line, len(fields))
 		}
 		windows = append(windows, integrationWindow{
 			Window: tmuxx.Window{
 				ID: tmuxx.WindowID(fields[0]), Name: fields[1], Role: fields[2], Harness: fields[3],
-				Model: fields[4], Effort: fields[5], Process: fields[6],
+				Model: fields[4], Effort: fields[5], Unproven: fields[6], Process: fields[7],
 			},
-			Directory: fields[7],
+			Directory: fields[8],
 		})
 	}
 	return windows

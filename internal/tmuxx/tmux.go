@@ -12,7 +12,7 @@ const (
 	sessionFormat        = "#{session_id}\t#{session_name}"
 	createdSessionFormat = "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}"
 	createdWindowFormat  = "#{window_id}\t#{pane_id}\t#{pane_pid}"
-	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}"
+	windowFormat         = "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"
 	paneFormat           = "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"
 )
 
@@ -70,13 +70,14 @@ type CreatedWindow struct {
 
 // Window is one parsed window and its agentctl metadata.
 type Window struct {
-	ID      WindowID
-	Name    string
-	Role    string
-	Harness string
-	Model   string
-	Effort  string
-	Process string
+	ID       WindowID
+	Name     string
+	Role     string
+	Harness  string
+	Model    string
+	Effort   string
+	Unproven string
+	Process  string
 }
 
 // Pane is one parsed pane and its objective tmux state.
@@ -270,21 +271,22 @@ func (c Client) ListWindows(ctx context.Context, sid SessionID) ([]Window, error
 
 	windows := make([]Window, 0, len(records))
 	for index, record := range records {
-		fields := strings.SplitN(record, "\t", 7)
-		if len(fields) != 7 || fields[1] == "" {
-			return nil, fmt.Errorf("parse tmux window record %d: expected 7 fields and a nonempty name", index+1)
+		fields := strings.SplitN(record, "\t", 8)
+		if len(fields) != 8 || fields[1] == "" {
+			return nil, fmt.Errorf("parse tmux window record %d: expected 8 fields and a nonempty name", index+1)
 		}
 		if err := validateID(fields[0], '@'); err != nil {
 			return nil, fmt.Errorf("parse tmux window record %d: %w", index+1, err)
 		}
 		windows = append(windows, Window{
-			ID:      WindowID(fields[0]),
-			Name:    fields[1],
-			Role:    fields[2],
-			Harness: fields[3],
-			Model:   fields[4],
-			Effort:  fields[5],
-			Process: fields[6],
+			ID:       WindowID(fields[0]),
+			Name:     fields[1],
+			Role:     fields[2],
+			Harness:  fields[3],
+			Model:    fields[4],
+			Effort:   fields[5],
+			Unproven: fields[6],
+			Process:  fields[7],
 		})
 	}
 	return windows, nil

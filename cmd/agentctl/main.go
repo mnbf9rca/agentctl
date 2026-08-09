@@ -889,7 +889,8 @@ func relaunchCauseError(stderr io.Writer, role, usage string, err error) int {
 	var unknownRole *fleet.UnknownRoleError
 	var present *fleet.WindowPresentError
 	var soleWindow *fleet.SoleWindowRecoveryError
-	if errors.As(err, &unknownRole) || errors.As(err, &present) || errors.As(err, &soleWindow) {
+	var unmarkedWindow *fleet.UnmarkedWindowRecoveryError
+	if errors.As(err, &unknownRole) || errors.As(err, &present) || errors.As(err, &soleWindow) || errors.As(err, &unmarkedWindow) {
 		relaunchRefusal(stderr, role, err)
 		return exitRole
 	}

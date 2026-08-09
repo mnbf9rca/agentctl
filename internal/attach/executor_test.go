@@ -109,9 +109,9 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte(
-			"@7\tplanner\tplanner\tclaude\t\t\tclaude\n" +
-				"@8\tcoder\tcoder\tcodex\t\t\tcodex\n" +
-				"@9\treviewer\treviewer\tclaude\t\t\tclaude\n",
+			"@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n" +
+				"@8\tcoder\tcoder\tcodex\t\t\t\tcodex\n" +
+				"@9\treviewer\treviewer\tclaude\t\t\t\tclaude\n",
 		)},
 		tmuxx.Response{},
 	)
@@ -138,7 +138,7 @@ func TestExecuteAttachesOnlyAfterManagedVersionGateByResolvedID(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"list-windows", "-t", "$4", "-F",
-			"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+			"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
 	)
@@ -176,7 +176,7 @@ func TestExecuteOmitsWindowCountWhenTheAdvisoryReadFails(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{
 			"list-windows", "-t", "$4", "-F",
-			"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+			"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
 	)
@@ -188,7 +188,7 @@ func TestExecuteNarratesASingleObservedWindowGrammatically(t *testing.T) {
 	runner := tmuxx.NewFakeRunner(
 		tmuxx.Response{Stdout: []byte("1\n")},
 		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\tclaude\n")},
+		tmuxx.Response{Stdout: []byte("@7\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
 		tmuxx.Response{},
 	)
 	var narration bytes.Buffer
@@ -383,7 +383,7 @@ func TestExecuteClassifiesTmuxFailuresAndStopsAtFailedOperation(t *testing.T) {
 				{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
 				{Executable: "tmux", Args: []string{
 					"list-windows", "-t", "$4", "-F",
-					"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_process}",
+					"#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}",
 				}},
 				{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
 			},

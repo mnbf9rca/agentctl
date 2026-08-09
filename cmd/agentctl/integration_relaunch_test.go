@@ -110,6 +110,7 @@ func TestIntegrationRelaunchRefusesSoleNoBaselineWindowWithoutMutation(t *testin
 	}
 	originalWindowID := windows[0].ID
 	fixture.tmuxOutput("set-option", "-wu", "-t", string(originalWindowID), "@agentctl_process")
+	fixture.tmuxOutput("set-option", "-w", "-t", string(originalWindowID), "@agentctl_unproven", "1")
 
 	report := parseIntegrationStatus(t, fixture.runAgentctl("status", "--session", session.Name, "--json"))
 	if len(report.Agents) != 1 || report.Agents[0].State != statuspkg.StateNoBaseline {
