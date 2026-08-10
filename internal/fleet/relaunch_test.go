@@ -65,7 +65,7 @@ func createdPlannerWindowResponse() tmuxx.Response {
 func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T) {
 	responses := storedMetadataResponses(
 		"planner,reviewer",
-		"planner:codex:gpt-5.6:minimal,reviewer:codex::",
+		"planner:codex:gpt-5.6:EXtreme,reviewer:codex::",
 		"/fleet workspace",
 		"@65\treviewer\treviewer\tcodex\t\t\t\tcodex\n",
 	)
@@ -89,7 +89,7 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 		Session:       "epic123",
 		Harness:       "codex",
 		Model:         "gpt-5.6",
-		Effort:        "minimal",
+		Effort:        "EXtreme",
 		Directory:     "/fleet workspace",
 		WindowID:      "@71",
 		PaneID:        "%88",
@@ -106,14 +106,14 @@ func TestRelaunchStoredConfigurationRecreatesWindowAndStampsInOrder(t *testing.T
 			"new-window", "-d", "-t", "$4", "-n", "planner", "-c", "/fleet workspace",
 			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
-			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'codex' '--' '--model' 'gpt-5.6' '--config' 'model_reasoning_effort=\"minimal\"'",
+			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'planner' 'codex' '--' '--model' 'gpt-5.6' '--config' 'model_reasoning_effort=\"EXtreme\"'",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", windowListFormat}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_role", "planner"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_harness", "codex"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_model", "gpt-5.6"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "minimal"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_effort", "EXtreme"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "5150"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@71", "@agentctl_process", "codex"}},
@@ -774,8 +774,8 @@ func TestRelaunchRefusesDefectiveFleetMetadata(t *testing.T) {
 			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude:--dangerously:": entry 1 "planner:claude:--dangerously:" has invalid model "--dangerously"`,
 		},
 		{
-			name: "invalid effort charset", roster: "planner", fleetValue: "planner:claude::HIGH", directory: "/repo",
-			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude::HIGH": entry 1 "planner:claude::HIGH" has invalid effort "HIGH"`,
+			name: "invalid effort charset", roster: "planner", fleetValue: "planner:claude::high=evil", directory: "/repo",
+			message: `managed session "epic123" has invalid @agentctl_fleet "planner:claude::high=evil": entry 1 "planner:claude::high=evil" has invalid effort "high=evil"`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1290,7 +1290,7 @@ func TestRelaunchRejectsInvalidValuesBeforeAnyCommand(t *testing.T) {
 		{name: "flag-shaped role", request: RelaunchRequest{Role: "-planner"}},
 		{name: "unknown harness", request: RelaunchRequest{Role: "planner", Harness: stringPtr("bash")}},
 		{name: "smuggled model", request: RelaunchRequest{Role: "planner", Model: stringPtr("--dangerously")}},
-		{name: "invalid effort charset", request: RelaunchRequest{Role: "planner", Effort: stringPtr("HIGH")}},
+		{name: "invalid effort charset", request: RelaunchRequest{Role: "planner", Effort: stringPtr("high=evil")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := tmuxx.NewFakeRunner()

@@ -437,7 +437,7 @@ func TestLaunchRendersAndStampsPerRoleEffort(t *testing.T) {
 	})
 	fleet := config.FleetConfig{Roles: []config.RoleConfig{
 		{Name: "planner", Harness: config.HarnessClaude, Model: "fable", Effort: "max"},
-		{Name: "reviewer", Harness: config.HarnessCodex, Effort: "minimal"},
+		{Name: "reviewer", Harness: config.HarnessCodex, Effort: "EXtreme"},
 	}}
 
 	if _, err := launcher.Launch(context.Background(), "epic123", fleet, nil); err != nil {
@@ -455,7 +455,7 @@ func TestLaunchRendersAndStampsPerRoleEffort(t *testing.T) {
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_version", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_roles", "planner,reviewer"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_fleet", "planner:claude:fable:max,reviewer:codex::minimal"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_fleet", "planner:claude:fable:max,reviewer:codex::EXtreme"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_dir", "/invocation cwd"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_role", "planner"}},
@@ -472,13 +472,13 @@ func TestLaunchRendersAndStampsPerRoleEffort(t *testing.T) {
 			"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/invocation cwd",
 			"-e", "AGENTCTL_SESSION=epic123", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1",
 			"-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--",
-			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'reviewer' 'codex' '--' '--config' 'model_reasoning_effort=\"minimal\"'",
+			"exec 'amq' 'coop' 'exec' '--session' 'epic123' '--me' 'reviewer' 'codex' '--' '--config' 'model_reasoning_effort=\"EXtreme\"'",
 		}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_managed", "1"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_role", "reviewer"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_harness", "codex"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_model", ""}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_effort", "minimal"}},
+		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_effort", "EXtreme"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
 		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
 		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_process", "codex"}},

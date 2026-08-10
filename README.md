@@ -256,12 +256,14 @@ resolves it; other roles continue launching and keep their own independently obs
 
 #### Effort levels
 
-`--efforts` accepts `low`, `medium`, `high`, `xhigh`, and `max` for both harnesses. The level is validated before
-anything is created: an unknown level, a level for an undefined role, a duplicate role entry, or an explicitly empty
-`--efforts=` is a usage error (exit 2) and no tmux command runs. A role with no effort entry is launched with **no**
-effort argument at all, leaving the harness on its own default.
+`--efforts` accepts opaque harness-specific mode names matching the same charset as model identifiers:
+`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. A value outside that charset, a value for an undefined role, a duplicate role entry,
+or an explicitly empty `--efforts=` is a usage error (exit 2) before any tmux command runs. A well-formed name agentctl
+does not recognize is forwarded unchanged; the selected harness owns the acceptance decision, so an unsupported name
+surfaces as a harness startup failure rather than a pre-launch agentctl refusal. A role with no effort entry is launched
+with **no** effort argument at all, leaving the harness on its own default.
 
-Each harness receives the level in its own syntax, assembled only from these validated levels:
+Each harness receives the exact validated value in its own syntax:
 
 | Harness | Rendered arguments | Verified against |
 | --- | --- | --- |
@@ -269,9 +271,8 @@ Each harness receives the level in its own syntax, assembled only from these val
 | `codex` | `--config 'model_reasoning_effort="LEVEL"'` | codex-cli 0.146.0 |
 
 The main codex CLI has no `--effort` flag, so the level is supplied as a configuration override; the `--effort` flag
-that exists for the separate Codex Security CLI is not used. codex's own reasoning-effort enum also carries `none`,
-`minimal`, and `ultra`, which agentctl deliberately does not expose: the accepted set is restricted to the levels
-verified on both harnesses, and anything outside it is rejected rather than forwarded.
+that exists for the separate Codex Security CLI is not used. Names such as codex's `none`, `minimal`, and `ultra` pass
+the charset and are forwarded; agentctl does not maintain a catalogue of harness capabilities.
 
 The selected level is recorded in window metadata (`@agentctl_effort`) and reported by `status`.
 

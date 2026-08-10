@@ -9,15 +9,13 @@ import (
 )
 
 const (
-	namePattern   = `^[a-z0-9][a-z0-9_-]*$`
-	modelPattern  = `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`
-	effortPattern = `^[a-z][a-z0-9-]*$`
+	namePattern  = `^[a-z0-9][a-z0-9_-]*$`
+	modelPattern = `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`
 )
 
 var (
-	nameExpression   = regexp.MustCompile(namePattern)
-	modelExpression  = regexp.MustCompile(modelPattern)
-	effortExpression = regexp.MustCompile(effortPattern)
+	nameExpression  = regexp.MustCompile(namePattern)
+	modelExpression = regexp.MustCompile(modelPattern)
 )
 
 // Harness identifies an agent harness supported by agentctl.
@@ -38,14 +36,14 @@ type RoleConfig struct {
 
 // ValidateEffort checks one opaque harness effort against the safe charset.
 func ValidateEffort(effort string) error {
-	if effortExpression.MatchString(effort) {
+	if modelExpression.MatchString(effort) {
 		return nil
 	}
 	return &ValidationError{
 		Option:     "effort",
 		Value:      effort,
 		EntryIndex: -1,
-		Reason:     fmt.Sprintf("effort %q must match %s", effort, effortPattern),
+		Reason:     fmt.Sprintf("effort %q must match %s", effort, modelPattern),
 	}
 }
 
