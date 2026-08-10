@@ -27,6 +27,30 @@ checklist mechanism whose implementation changed since the previous release
 and record the result. This is the execution-audit practice established by
 [issue #177](https://github.com/mnbf9rca/agentctl/issues/177).
 
+### Issue #182 shim and interim-diagnostic gate
+
+For a release containing issue #182 work, run the nested-PTY SIGHUP probe once per installed harness version from a
+clean checkout. Each invocation creates its own private HOME and PTY, never contacts tmux, signals only its recorded
+shim fixture, and refuses to overwrite evidence:
+
+```bash
+shim_probe_dir="$(mktemp -d /tmp/agentctl-shim-sighup.XXXXXX)"
+hack/probe-shim-sighup.sh --harness claude --output "$shim_probe_dir/claude.txt"
+hack/probe-shim-sighup.sh --harness codex --output "$shim_probe_dir/codex.txt"
+```
+
+- [ ] Each record names the exact harness version, positive shim/child PIDs, matching parent topology, a nonempty PTY,
+      and a nonempty `child_command` exactly equal to the selected harness path, plus
+      `signal_target=owned-shim-only`, shim termination, child outcome, and `default_tmux_targeted=false`
+- [ ] `go test ./hack -run TestProbeShimSIGHUP -count=1` passed, including the intermediate-child refusal,
+      owned-descendant cleanup, unrelated-process sentinel, and tmux canary
+- [ ] The release notes record both observed child outcomes; no SIGHUP result is used as absence evidence
+- [ ] Focused aggregate tests cover below/equal/above pane counts and near misses, and the exact emitted line remains
+      `note: all N roster roles are missing; unmanaged window "W" has N panes`
+- [ ] Operator recovery guidance still cites the tracked
+      [incident replay](security/2026-08-10-issue-182-replay-evidence.md), `classifyRelaunchWindow`, sole-window exit 3,
+      the eight-pane duplicate interval, inference-qualified low-duplication order, and `kill` plus `launch`
+
 ## Part A — Start the verifier
 
 Resolve the release version and prove that the embedded skill documents that

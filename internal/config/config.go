@@ -10,6 +10,11 @@ import (
 const (
 	namePattern  = `^[a-z0-9][a-z0-9_-]*$`
 	modelPattern = `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`
+
+	// MaxSessionNameBytes is the maximum encoded length of a session name.
+	MaxSessionNameBytes = 32
+	// MaxRoleNameBytes is the maximum encoded length of a role name.
+	MaxRoleNameBytes = 32
 )
 
 var (
@@ -91,6 +96,14 @@ func (e *ValidationError) FormatReason(subject string) string {
 
 // ValidateSessionName validates a tmux session name accepted by agentctl.
 func ValidateSessionName(name string) error {
+	if len(name) > MaxSessionNameBytes {
+		return &ValidationError{
+			Option:     "session",
+			Value:      name,
+			EntryIndex: -1,
+			Reason:     fmt.Sprintf("must be at most %d bytes", MaxSessionNameBytes),
+		}
+	}
 	if !nameExpression.MatchString(name) {
 		return &ValidationError{
 			Option:     "session",
@@ -104,6 +117,15 @@ func ValidateSessionName(name string) error {
 
 // ValidateRoleName validates one role name accepted by agentctl control commands.
 func ValidateRoleName(role string) error {
+	if len(role) > MaxRoleNameBytes {
+		return &ValidationError{
+			Option:          "role",
+			Value:           role,
+			EntryIndex:      -1,
+			Reason:          fmt.Sprintf("must be at most %d bytes", MaxRoleNameBytes),
+			TemplateSubject: "value",
+		}
+	}
 	if !nameExpression.MatchString(role) {
 		return &ValidationError{
 			Option:          "role",

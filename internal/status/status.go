@@ -38,6 +38,7 @@ type Report struct {
 	Agents  []Agent `json:"agents"`
 	Current bool    `json:"current,omitempty"`
 	Defect  string  `json:"defect,omitempty"`
+	Note    string  `json:"note,omitempty"`
 }
 
 // SessionsReport is the versioned status document for every session on the

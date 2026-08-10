@@ -2,7 +2,13 @@
 
 ## Security model
 
-`agentctl` is a personal, single-user, on-machine fleet launcher: it creates tmux sessions running AI coding agents via `amq coop exec` and delivers a small fixed set of control keystrokes to them. Like [AMQ](https://github.com/avivsinai/agent-message-queue), it prioritizes **correctness and accident-prevention over defense against a local attacker with code-execution parity**: anyone who can run processes as your user already owns your tmux socket, your shell, and your agents.
+`agentctl` is a personal, single-user, on-machine fleet launcher. The shipped pre-0.5 path creates tmux sessions
+running AI coding agents via `amq coop exec` and delivers fixed control keystrokes. The approved 0.5.0 cutover instead
+uses per-role resident shims, local operation-name sockets, durable child records, shim-owned nested PTYs, optional tmux
+presentation, and foreground no-tmux roles (design §15). Those paths are design invariants until their atomic cutover
+PR marks them shipped. Like [AMQ](https://github.com/avivsinai/agent-message-queue), agentctl prioritizes **correctness
+and accident-prevention over defense against a local attacker with code-execution parity**: anyone who can run
+processes as your user already owns your local sockets, shell, terminal processes, and agents.
 
 ### Threat model — what agentctl defends against
 
@@ -50,6 +56,12 @@ grant for `golang.org/x/text`, under paths that name each module unambiguously.
 CI inspects every snapshot archive and refuses one missing any of those
 materials.
 
+The approved shim implementation will add `golang.org/x/sys/unix` only for the narrow Darwin `flock`,
+`LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` process-observation surface. PR 1 intentionally adds no module,
+checksum, license, or archive entry before a production importer exists. The importing PR must pin/review the version,
+run the existing dependency/vulnerability gates, and add its license to every release archive. The stdlib PTY lane
+does not import `x/sys`.
+
 ## Known risks and accepted residuals
 
 1. **Keystroke delivery is not transactional, and degrades under host saturation.** `tmux send-keys` succeeding proves tmux accepted the keys, not that the TUI executed the command; a payload can land on a modal dialog or mid-render. Both harnesses open an autocomplete popup on a slash command and Enter selects the **highlighted** entry; in the 2026-08-01 evidence, the full payload highlighted the exact match. Evidence is split and version-pinned: fixed-injection behavior (junk cleared, payload executed, conversation reset) re-verified 2026-08-05 on Claude Code 2.1.222 / codex-cli 0.146.0 (`docs/release-verification-notes.md`, verify-live at `bb68e3b`); the popup-highlight observation and all saturation measurements are from 2026-08-01 on 2.1.220 / 0.146.0 — codex unchanged across the legs, Claude advanced two patches, so this is not a blanket re-verification; the `--measure` suite re-runs only if `internal/tmuxx.payloadDelay` changes. Measured under saturation (18 busy workers, codex, 1000ms delay, 20 loaded trials): **demonstrated** — input corruption (payload delay, loss-to-empty, blank redraws, one doubled `/clearclear` that matched nothing); **not observed** — ambiguous truncation or wrong-highlight selection, zero of each; **every observed failure left the payload unexecuted** — the fail-safe direction. The composite risk (a truncation forming a prefix the popup resolves to a different command, executing it silently) is therefore *possible but unobserved*, and the popup ranks the harness's whole palette, so the collision space cannot be enumerated or bounded by agentctl. Timing floors: Claude 750ms under load; codex **no floor established** at any tested candidate — the 1s constant is retained as best-evidenced, not proven sufficient; both are adversarial-ceiling figures. Saturation degradation is per role: a launch-time baseline-poll timeout leaves that role unproven and inert (residual 2), peers keep running, `launch` exits 9. **Responsibility:** the orchestrator — which both causes the load and chooses the timing, where agentctl is forbidden the machine-state inference (§6.3) — must not issue control commands while its fleet saturates the host; a human operator inherits the same rule.
@@ -59,7 +71,9 @@ materials.
 3. **Environment staleness.** tmux windows inherit the server's environment, which may predate the current shell; later-exported credentials may not reach agents. Documented, not solved.
 4. **Metadata is advisory.** `@agentctl_*` options are readable and writable by any same-user process; they gate agentctl's own actions but are not tamper-proof. `relaunch` re-validates everything it reads back (residual "Silent fleet divergence" above), closing the accident and trivially-tampered cases without claiming a trust boundary a same-user process could not already bypass directly.
 5. **Launched-window identity variables are informational.** `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, `AGENTCTL_MANAGED=1` are passed as separate `-e NAME=value` argv elements from validated values; session-environment copies are removed after the first window is stamped (failure reported, not fatal; the managed windows themselves are unaffected). Any same-user process can export the same names, so agentctl never reads them back when validating a control, `kill`, or `status` target — validation rests on `@agentctl_*` and the fail-closed chain. `AGENTCTL_SESSION` remains a session-*selection* source only (spec §4.1); every subsequent check is unchanged.
-6. **Concurrency is unsynchronized.** No locking anywhere; gates are check-then-act, with observed outcomes bounded:
+6. **The shipped pre-0.5 lifecycle is unsynchronized.** No locking exists on that current path; gates are
+   check-then-act, with observed outcomes bounded. The ratified shim claim below replaces this row only at the atomic
+   0.5.0 cutover:
 
    | Race | Current outcome |
    | --- | --- |
@@ -75,10 +89,29 @@ materials.
 
    Recovery classification reads advisory metadata then kills by the classified ID; a same-user process can arrange a window's destruction that way, but could destroy it directly — no added capability. Delivery has one bounded TOCTOU: identity reads the pane PID and runs `ps`, then delivery targets the pane ID; pane IDs are not reused, but `respawn-pane -k` can swap the process in the same pane between the two. Same-user action; accepted.
 7. **`launch --from-template` reads a caller-named path** — the first caller-supplied read path on a command that drives tmux. The file is opened `O_RDONLY|O_NONBLOCK` and the **descriptor** is verified — never stat-then-read, so no check/use gap. Only regular files are accepted: directories, devices, and sockets are refused, and a FIFO is refused because under the non-blocking open it reads as empty or partial — malformed, or worse, a valid prefix describing a fleet the caller never wrote (the non-blocking flag is what makes that refusal reachable: a plain open of a writerless FIFO blocks inside `open(2)`; the flag is inert for accepted regular files). `-` is not special; stdin is not accepted. Input is bounded at 1 MiB and oversize is **refused, not truncated** — a truncated-but-parsing template would launch a different fleet than the file. Symlinks are followed with every rule binding on the target: a same-user process that can plant a symlink can plant the file. Template-sourced values confer no trust and skip no gate: they traverse exactly the harness-argv/`shellq` path and §7 predicates flag values do, and nothing from a template reaches `send-keys`, the registry, or a `-t` target.
+8. **Approved shim-plane residuals.** Same-user unlink/rebind or lockfile/record edits remain out of scope; the detection
+   contract compares the advisory recorded shim PID with kernel `LOCAL_PEERPID` and reports disagreement without
+   calling either side authentication. `$HOME`, `os.UserConfigDir()`, `AGENTCTL_RUNTIME_ROOT`, and
+   `AGENTCTL_STATE_ROOT` are declared, capped, validated, same-user-selectable inputs, not trust anchors. Predictable
+   `/tmp/agentctl-<uid>` pre-creation can cause refusal-only denial of service; agentctl never repairs or adopts an
+   unsafe tree. The ancestry accident guard refuses both observed self-target and ancestry-undetermined, with distinct
+   facts/codes; process-table restrictions can therefore deny control without creating a bypass. PID identity is
+   observational: `EPERM`, token mismatch, or token-read failure refuses and may wedge recovery, but never becomes
+   absence. Only `kill(pid,0)` returning `ESRCH` permits absence/relaunch. Version-pinned SIGHUP termination evidence
+   reduces expected orphan frequency but is not an oracle. Details and manual `child-starting` remedy: design
+   §§15.2–15.8.
 
 ## File and socket permissions
 
-agentctl writes files only under `$HOME/.claude/skills/agentctl/` and `$HOME/.agents/skills/agentctl/`, only via `agentctl skill install` (directories `0755`, files `0644`, plus a `.agentctl-skill.json` manifest recording version and SHA-256 of every file). Installs are manifest-checked and refuse to overwrite files agentctl cannot prove it wrote; `--force` replaces the directory and reports every removed file. No launch, control, status, or kill path writes to the filesystem (`launch` reads manifests only, to report version skew). Skill content is a build-time constant; target **write** paths are fixed with no caller-supplied components (`--from-template`, residual 7, adds a caller-named *read* path only); a failed `$HOME` resolution is a refusal, not a fallback. Otherwise agentctl creates no persistent files and writes nothing inside application repositories, relying on tmux's private socket (`0700`) and AMQ's documented `0700`/`0600` permissions.
+The shipped pre-0.5 lifecycle writes files only through skill installation under
+`$HOME/.claude/skills/agentctl/` and `$HOME/.agents/skills/agentctl/` (directories `0755`, files `0644`, manifest
+checked). No shipped launch/control/status/kill path writes lifecycle state yet. At the approved 0.5.0 cutover,
+volatile mode-`0600` socket/lock artifacts live below descriptor-verified mode-`0700`
+`/tmp/agentctl-<uid>/v1`; durable mode-`0600` reservation/child/config records live below descriptor-verified
+`os.UserConfigDir()/agentctl/state-v1`. The exact record path is
+`<resolved-state-root>/sessions/<session>/roles/<role>.json`; the lockfile records the fully resolved durable root.
+Declared overrides receive identical validation and never confer trust. No lifecycle path writes inside application
+repositories.
 
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 
@@ -86,20 +119,48 @@ The developer-facing `hack/release-verify.sh` Part C walkthrough is separate fro
 
 The Codex filename and Claude symlink are printed without credential contents and each requires its own explicit `y`. Declining the link offers guided sign-in backed by a mode-`0700` isolated Keychains directory and an empty login keychain created with `security create-keychain` (minting a fresh token); declining both Claude paths aborts before fleet launch. The verifier never seeds `CLAUDE_CODE_OAUTH_TOKEN` — that path can silently delete the real Keychain credential on exit (anthropics/claude-code#37512); `claude setup-token` is documented only as a manual fallback for Keychain-locked contexts (SSH, launchd). The temporary HOME and credential-parent directories are `0700`, the copied Codex file and synthesized Claude onboarding file `0600`, and no credential contents are written to output or evidence. On success, failure, refusal, interrupt, and abort, teardown first ends the owned fleet and named tmux server (so no harness can still use the link), then removes and observes absence of only the exact owned symlink, then removes the credential-bearing HOME; the target directory is never a recursive-removal operand, and the verifier refuses success if link or HOME removal is not observed. When consent aborts before the wrapper-owned tmux server exists, tmux's exact single-line connect-ENOENT response is accepted as factual socket absence so teardown can continue. Fixture tests retain a sentinel in the fake target on every exit path, and unseeded Claude credential lookalikes never cross the launch boundary.
 
-## Binding constraints for the issue-182 per-agent shim (design phase — no shipped behavior yet)
+## Ratified constraints for the issue-182 per-agent shim
 
-The [issue-182 design paper](docs/superpowers/specs/2026-08-09-issue-182-identity-delivery-options.md) selects a per-agent PTY shim as the structural fix. Nothing here describes shipped behavior; these constraints come from the design-phase adversarial review (2026-08-09, empirical prototypes on this machine — rationale and evidence in the paper) and the maintainer rulings that followed it, and **bind every implementation PR**, landing ahead of implementation per this repository's design-delta rule.
+The [approved design §15](docs/superpowers/specs/2026-08-01-agentctl-design.md#15-approved-050-per-agent-shim-contract)
+supersedes the options paper and makes these ratified invariants. They bind every implementation PR. They do not claim
+the production cutover has shipped; each behavior PR updates shipped wording with its importer/wiring.
 
-1. **The role claim is a kernel-arbitrated lock, not a socket file.** An exclusive `flock` (or equivalent auto-released-on-death primitive) on a per-role lockfile, held for the shim's lifetime; the socket is bound only while the lock is held, and reclaim after any death is lock acquisition alone. Bare `bind()` claims and probe-connect → `unlink` → `bind` reclaim are inadmissible (demonstrated: the socket file survives SIGKILL and blocks rebind; unlink-based reclaim can silently orphan a live shim).
-2. **Socket-path forgery is a named residual with a detection contract.** Same-user unlink-and-rebind leaves no tmux-enumerable trace; it stays out of the threat model, but `status` must cross-check lock-holder identity against the socket answerer and report disagreement as a fact.
-3. **Runtime directory discipline.** A fixed, short path template; only validated session/role names as components; created `0700` with an exclusive primitive and verified by descriptor. Darwin's 104-byte `sun_path` ceiling holds by construction: `internal/config` gains name-length caps (its own spec amendment) sized against the template's worst case.
-4. **The wire protocol carries operation names only** — tokens from the closed, argument-free registry, nothing else; no text channel to the PTY writer; the shim is the sole writer to the harness PTY.
-5. **The shim is the enforcement point for socket callers.** The implementation must enumerate which of `internal/target`'s checks are retired, moved into the shim, or moot, and record the outcome here. The self-target guard is redesigned on a non-environment mechanism (advisory variables are never targeting inputs — residual 5 stands) or its removal for tmux-less operation is documented as a decision.
-6. **No role is reported absent while its recorded child may be alive.** SIGHUP on shim death is not termination (demonstrated: a child ignoring it survives). Either prove per harness, version-pinned, that SIGHUP terminates the harness in this configuration, or define an explicit orphan state observed from the recorded child PID and a relaunch rule that cannot start a second harness beside a survivor.
-7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and corrupt early bytes (demonstrated); delivery gates on an observed settle condition (e.g. the harness tty leaving cooked/echo mode), in the spirit of the §8 baseline poll.
-8. **Ownership and exit codes are specified before code.** A spec §6.6-equivalent names the single ownership instant among fork → lock → bind → PTY open → exec → settle, assigns each failure point to carve-out or rollback (kill order defined given constraint 6), and outcomes get a §9-discipline exit-code map.
+Existing shipped claims are amended only at the listed cutover PR; until then their current-path wording remains true:
+
+| Existing shipped claim | Approved Option S amendment | Shipped-wording owner |
+|---|---|---|
+| The tmux managed/version, exact role-window, one-live-pane, process-baseline, and `$TMUX_PANE` chain gates control. | Runtime name/version/answerer/readiness/ancestry gates replace it; tmux becomes presentation only. | PR 7 atomic cutover |
+| `@agentctl_role` and `@agentctl_process` are advisory role identity/baseline evidence. | They cease to establish identity; the held `flock`, durable child identity, and connected answerer observations govern. | PRs 2 and 5 implement; PR 7 cuts over |
+| No launch/control/status/kill lifecycle path writes persistent state. | Durable role/config records use the descriptor-verified state root and volatile claim/socket artifacts use the runtime root. | PRs 2 and 5 implement; PR 7 cuts over |
+| The lifecycle is unsynchronized and bounded by check-then-act races. | A lifetime `flock` serializes ownership; residual same-user edits and refusal outcomes remain. | PRs 2 and 5 implement; PR 7 cuts over |
+| Fixed control payloads reach tmux through `send-keys`. | The client's only delivery instruction is a closed operation name; framing/version, validated session/role identity, and typed response facts remain permitted by the exact wire schema. The shim is the sole PTY writer. Non-transactional TUI-delivery residual 1 remains. | PRs 4 and 6 implement; PR 7 cuts over |
+| `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, `AGENTCTL_MANAGED`, and `TMUX_PANE` are informational and never prove a target. | Unchanged: none becomes a runtime identity, answerer, readiness, or ancestry input. | No wording transition required |
+
+1. **The role claim is a kernel-arbitrated lock, not a socket file.** Successful exclusive `flock(LOCK_EX)` on a per-role lockfile is the sole ownership instant, and the lock is held for the shim's lifetime; the socket is bound only while the lock is held, and reclaim after any death is lock acquisition alone. Bare `bind()` claims and probe-connect → `unlink` → `bind` reclaim are inadmissible (demonstrated: the socket file survives SIGKILL and blocks rebind; unlink-based reclaim can silently orphan a live shim).
+2. **Socket-path forgery is a named residual with an honest detection contract.** Same-user unlink-and-rebind remains out of scope. The lockfile body is advisory; `LOCAL_PEERPID` is the kernel answerer fact. `status` reports advisory-record/kernel-answerer disagreement and never calls it kernel-vs-kernel proof.
+3. **Runtime directory discipline.** The production base is `/tmp/agentctl-<decimal-uid>/v1`; session/role names are each capped at 32 ASCII bytes, producing a 98-byte worst-case production socket path (99 with NUL). Overrides are independently checked against Darwin `sun_path[104]`. Volatile and durable roots are created `0700` exclusively and descriptor-verified. `$HOME`/`os.UserConfigDir()` and both root overrides are declared, capped, same-user-selectable residual surfaces. Predictable `/tmp` pre-creation refuses.
+4. **The only delivery instruction is a closed operation name.** The request otherwise carries only framing/version
+   and validated session/role identity, and the response carries only framing/version and typed objective facts, exactly
+   as design §15.5 specifies. No field can carry caller-supplied PTY text, raw keys, arguments, model values, or
+   environment values; the shim is the sole writer to the harness PTY.
+5. **The shim is the enforcement point.** Design §15.5 retires tmux metadata/window/pane checks, moves role validation and version/answerer/readiness checks, and replaces `$TMUX_PANE` with one fail-closed ancestry snapshot seeded from `LOCAL_PEERPID`. Advisory environment never targets.
+6. **No role is absent while its recorded child may live.** A pre-fork durable `child-starting` reservation upgrades with PID/raw start token. `kill(pid,0)` `ESRCH` is the sole absence permission; nil, `EPERM`, other errors, token mismatch, and token-reader errors refuse distinctly. The live probe observed both pinned harness children terminate after shim SIGHUP, but explicit orphan/indeterminate states remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3.
+7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and
+   corrupt early bytes (demonstrated). Design §15.3 fixes the observation: `TIOCGETA` on the retained PTY master at
+   `t=0`, every 50ms, and the inclusive 5s boundary; ready means one snapshot has both `ICANON` and `ECHO` clear while
+   the listener/relay/child remain live. Errors, child exit, and final cooked/echo flags have distinct bounded factual
+   outcomes; prompts and terminal contents never participate.
+8. **Ownership and exit codes are specified before code.** Successful `flock(LOCK_EX)` is the sole ownership instant. Design §§15.3/15.8 assign every pre/post-child failure and rollback, and give observed-self-target and ancestry-undetermined distinct typed messages/codes.
 9. **Delivery claims stay factual.** Keystroke delivery remains non-transactional (residual 1 applies unchanged); the shim reports what it wrote and observed, and execution is never asserted from delivery.
-10. **The wire protocol is version-gated, fail closed.** S makes agentctl a two-process system, so a CLI may meet a shim launched by a different agentctl version. The socket protocol carries a version, checked first, exactly as `@agentctl_version=1` gates sessions today: a mismatched or absent version is a refusal that renders the observed value, never a best-effort parse. No migration or dual-dialect support is owed across the tmux-metadata → shim transition (single-operator install; flag-day accepted by the maintainer, 2026-08-09) — the gate exists for version skew, not coexistence.
+10. **The wire protocol is version-gated, fail closed.** S makes agentctl a two-process system, so a CLI may meet a
+    shim launched by a different agentctl version. Design §15.5 pins `ShimProtocolVersion=1`, a four-byte big-endian
+    length header, a 4096-byte maximum JSON payload, a two-second per-frame I/O deadline,
+    server-hello/request/response order, and a version-only token pre-pass before schema or operation interpretation
+    in both directions. A mismatched, malformed, duplicate, or absent version refuses with the exact §15.8 fact. No
+    diagnostic swaps the source: the current client names the connected shim hello version, while the current shim
+    names the client request version without interpreting its operation/session/role. Frame-read and frame-write
+    failures likewise use distinct literals and closed cause sets. No migration or dual-dialect support is owed across
+    the tmux-metadata → shim transition; the gate exists for skew, not coexistence.
 
 ## Reporting a vulnerability
 

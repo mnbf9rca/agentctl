@@ -59,6 +59,111 @@ func TestCollectorReportsHealthyFleetInRosterOrder(t *testing.T) {
 	}
 }
 
+func TestCollectorMergedLayoutAggregateNoteThreshold(t *testing.T) {
+	t.Parallel()
+
+	const note = `all 4 roster roles are missing; unmanaged window "joined" has 4 panes`
+	for _, test := range []struct {
+		name      string
+		paneCount int
+		wantNote  string
+	}{
+		{name: "below", paneCount: 3},
+		{name: "equal", paneCount: 4, wantNote: note},
+		{name: "above", paneCount: 5},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var paneRows strings.Builder
+			for index := 0; index < test.paneCount; index++ {
+				fmt.Fprintf(&paneRows, "%%%d\t%d\t0\t%d\n", index+20, index+200, test.paneCount)
+			}
+			runner := tmuxx.NewFakeRunner(
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("1\n")},
+				tmuxx.Response{Stdout: []byte("planner,build1,build2,review\n")},
+				tmuxx.Response{Stdout: []byte("@12\tjoined\t\t\t\t\t\t\n")},
+				tmuxx.Response{Stdout: []byte(paneRows.String())},
+			)
+
+			got, err := NewCollector(tmuxx.New(runner)).Collect(context.Background(), "fleet", "$4")
+			if err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			if got.Note != test.wantNote {
+				t.Fatalf("Collect() note = %q, want %q", got.Note, test.wantNote)
+			}
+			wantLastCall := tmuxx.Call{
+				Executable: "tmux",
+				Args:       []string{"list-panes", "-t", "@12", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"},
+			}
+			if lastCall := runner.Calls[len(runner.Calls)-1]; !reflect.DeepEqual(lastCall, wantLastCall) {
+				t.Fatalf("last call = %#v, want exact aggregate pane observation %#v", lastCall, wantLastCall)
+			}
+			for _, causal := range []string{"joined panes", "merged panes", "caused"} {
+				if strings.Contains(strings.ToLower(got.Note), causal) {
+					t.Fatalf("Collect() note = %q, want observation without causal language %q", got.Note, causal)
+				}
+			}
+		})
+	}
+}
+
+func TestCollectorMergedLayoutAggregateNoteRejectsNearMisses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		windows   string
+		paneRows  string
+		wantCalls int
+	}{
+		{
+			name:      "one roster role still has a window",
+			windows:   "@7\tplanner\tplanner\tclaude\t\t\t\tbaseline\n@12\tjoined\t\t\t\t\t\t\n",
+			paneRows:  "%7\t111\t0\t1\n",
+			wantCalls: 6,
+		},
+		{
+			name:      "two role-less windows",
+			windows:   "@12\tjoined-a\t\t\t\t\t\t\n@13\tjoined-b\t\t\t\t\t\t\n",
+			wantCalls: 4,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			responses := []tmuxx.Response{
+				{Stdout: []byte("1\n")},
+				{Stdout: []byte("1\n")},
+				{Stdout: []byte("planner,build1,build2,review\n")},
+				{Stdout: []byte(test.windows)},
+			}
+			if test.paneRows != "" {
+				responses = append(responses,
+					tmuxx.Response{Stdout: []byte(test.paneRows)},
+					tmuxx.Response{Stdout: []byte("claude\n")},
+				)
+			}
+			runner := tmuxx.NewFakeRunner(responses...)
+			got, err := NewCollector(tmuxx.New(runner)).Collect(context.Background(), "fleet", "$4")
+			if err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			if got.Note != "" {
+				t.Fatalf("Collect() note = %q, want empty", got.Note)
+			}
+			if len(runner.Calls) != test.wantCalls {
+				t.Fatalf("recorded calls = %d, want %d: %#v", len(runner.Calls), test.wantCalls, runner.Calls)
+			}
+		})
+	}
+}
+
 func TestCollectorRendersUnmanagedSessionAfterCheckingAbsentVersion(t *testing.T) {
 	t.Parallel()
 

@@ -187,6 +187,64 @@ other seven:
 agentctl relaunch --session epic123 codex2
 ```
 
+### Interim layout warning and issue-182 recovery
+
+Until the 0.5.0 per-agent shim lands, do not use `join-pane`, `break-pane`, or another layout operation that destroys
+managed role windows. Role identity is still stored on those windows in the shipped path. This warning is an interim
+measure, not the structural fix tracked by issue #182.
+
+`status` prints this note only for the exact observed aggregate: every roster role is `missing`, exactly one role-less
+window exists, and that window's pane count equals the roster size:
+
+```text
+note: all 4 roster roles are missing; unmanaged window "joined" has 4 panes
+```
+
+The note is noncausal. It does not prove panes were joined or identify the processes in that window. Inspect the
+role-less absorber and its exact ID before acting:
+
+```bash
+tmux list-windows -t '=epic123' -F '#{window_id} #{window_name} #{@agentctl_role} #{window_panes}'
+```
+
+The [live throwaway replay](docs/security/2026-08-10-issue-182-replay-evidence.md) observed these endpoints for four
+roles:
+
+- Closing the sole absorbing window first destroyed the session; subsequent `status` and `relaunch` exited 3 with
+  `session not found`.
+- Relaunching all four roles first succeeded, but temporarily left eight live harness panes: four stale panes in the
+  absorber plus four replacements.
+- `agentctl kill --session epic123` followed by the complete original `agentctl launch ...` recovered the full
+  session and is the alternative when conversation preservation is unnecessary.
+
+For lower duplication while preserving the session, use this supported order: relaunch one missing role first so a
+replacement window keeps the session alive; remove only the exact absorber window ID; then relaunch the remaining
+missing roles:
+
+```bash
+agentctl relaunch --session epic123 planner
+tmux kill-window -t @ABSORBER_ID
+agentctl relaunch --session epic123 codex1
+# repeat relaunch for each remaining missing role
+```
+
+The replay observed each constituent endpoint but did not separately replay that exact optimized sequence, so the
+low-duplication order is an inference, not a replay claim. Current code admits a vanished role through
+`classifyRelaunchWindow` in `internal/fleet/relaunch.go`; the options paper's `requireAbsentWindow` name is stale.
+Never remove the absorber first when it is the session's only window.
+
+For a combined viewer, create a grouped tmux session instead of moving panes between managed windows. Grouped sessions
+share the window set but not session options, so the viewer cannot pass agentctl's managed-session gate:
+
+```bash
+tmux new-session -d -t '=epic123' -s epic123-view
+tmux attach-session -t '=epic123-view'
+tmux kill-session -t '=epic123-view'
+```
+
+Use the grouped session for viewing only; run agentctl commands against `epic123`. Removing the viewer session leaves
+the source session present while it exists.
+
 When the fleet is no longer needed, terminate the managed tmux session:
 
 ```bash
