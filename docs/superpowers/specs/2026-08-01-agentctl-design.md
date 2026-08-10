@@ -1801,15 +1801,42 @@ Startup order is fixed:
 4. Create the nested PTY and start the unchanged harness argv through the injected non-shell child boundary.
 5. After `os/exec.Start` reports success, observe child PID and raw `kinfo_proc.p_starttime` timeval and atomically
    upgrade the durable record.
-6. Bind/listen while the claim remains held, start relay, and observe the PTY settle condition. No control is accepted.
-7. Publish ready only after listener, relay, durable child identity, and settle observation all exist.
+6. Bind/listen while the claim remains held, start relay, and run the exact readiness observation below. No control is
+   accepted.
+7. Publish ready only after listener, relay, durable child identity, and the readiness predicate all exist.
+
+The readiness constants and predicate are fixed:
+
+| Constant | Value |
+|---|---:|
+| `ShimReadinessPollInterval` | `50ms` |
+| `ShimReadinessTimeout` | `5s` |
+| `ShimReadinessLocalFlagMask` | `ICANON | ECHO` |
+| `ShimOwnedTeardownPollInterval` | `50ms` |
+| `ShimOwnedTeardownTimeout` | `5s` |
+
+The shim calls `TIOCGETA` on the retained PTY master; on Darwin that snapshot observes the slave's shared line
+discipline. The first observation is at `t=0`, subsequent observations are on fixed 50ms boundaries, and a final
+observation is guaranteed at `t=5s` (101 scheduled observations including both boundaries). The harness tty is ready
+only when one snapshot has both `ICANON == 0` and `ECHO == 0`, while the listener and relay remain live and the
+recorded child has not exited. Terminal contents, prompts, timing since the last byte, and harness-specific strings are
+never readiness evidence.
+
+`EINTR` retries `TIOCGETA` immediately within the same scheduled observation; another ioctl error is
+`readiness-observation-failed` immediately. If repeated `EINTR` consumes the final deadline, the same outcome carries
+the exact cause `TIOCGETA remained interrupted through the 5s readiness deadline`; it is not called a cooked-mode
+timeout because no final flag snapshot was observed. An observed child exit before readiness is
+`child-exited-before-ready`. If the final successful snapshot still has either masked bit set, the typed cause is
+`readiness-timeout` and records the two final booleans exactly as `ICANON=true|false ECHO=true|false`. Every one of
+these post-start failures enters the cleanup/absence rules below; none publishes ready.
 
 Failure before step 2 owns no role: remove only artifacts created by this invocation, signal no process, and report
 the observed input/tool fact. Failure after ownership but before a successful child start removes this invocation's
 socket and `child-starting`, releases the lock, and returns to absence because failed start proves no child started.
-Failure after successful child start closes readiness/listening, sends SIGHUP to the owned PTY/process group, waits a
-bounded teardown interval, then applies §15.4. Version-pinned SIGHUP evidence informs teardown but never proves
-absence.
+Failure after successful child start closes readiness/listening, sends SIGHUP to the owned PTY/process group, and
+applies §15.4 immediately, every 50ms, and at the inclusive 5s boundary. Observed `ESRCH` ends the poll. The final
+non-ESRCH observation is retained and rendered through the exit-9 row; there is no automatic SIGTERM/SIGKILL
+escalation or extra grace period. Version-pinned SIGHUP evidence informs teardown but never proves absence.
 
 Only observed `ESRCH` permits deleting the durable child record or reporting absent/relaunchable. Matching live child,
 `EPERM`, token disagreement, token-reader failure, or another observation retains the record and reports the exact
@@ -1847,9 +1874,45 @@ environment, and wall-clock conversion do not participate.
 ### 15.5 Socket enforcement and target-chain disposition
 
 A client resolves the validated session/role path, reads the advisory lockfile, connects, and checks protocol version
-before parsing any other field. Darwin `LOCAL_PEERPID` supplies the kernel-observed answerer PID. It must equal the
-advisory shim PID; disagreement is `answerer-disagreement`, not a kernel-vs-kernel claim. Same-user unlink/rebind stays
-outside the threat model, while status reports the observable disagreement.
+before parsing any other field. The protocol constants are:
+
+| Constant | Value |
+|---|---:|
+| `ShimProtocolVersion` | `1` |
+| `ShimFrameHeaderBytes` | `4` |
+| `ShimFrameMaxPayloadBytes` | `4096` |
+| `ShimProtocolIOTimeout` | `2s` |
+
+Each frame is a four-byte unsigned big-endian payload length followed by exactly that many UTF-8 JSON bytes. Lengths
+from 1 through 4096 are accepted; zero, a value above 4096, EOF in either header or payload, invalid UTF-8, trailing
+bytes inside a single JSON value, and a non-object top level are `protocol-frame-invalid`. A connection carries,
+in order, exactly one server hello, one client request, and one server response, then the server closes it. The hello
+payload encoded by version 1 is exactly `{"version":1}`. The request schema contains only `version`, `session`,
+`role`, and `operation`; `operation` is one closed registry name. The response schema contains only `version`,
+`outcome`, and the following typed objective fields: `state`, `shim_pid`, `child_pid`, `bytes_written`,
+`submit_observed`, `cause`, `cleanup`, `record_path`, `local_root`, `recorded_root`, `recorded_token`, `observed_token`,
+`caller_pid`, `target_pid`, `final_icanon`, and `final_echo`. Each outcome's strict decoder admits only its defined
+subset; an irrelevant otherwise-known field is rejected. Neither schema has an extension map or arbitrary
+input/payload field.
+
+Each frame read or write sets one absolute two-second deadline covering both header and payload. A partial transfer at
+the deadline is reported with its observed byte count; a zero-byte timeout is not EOF. No phase inherits unused time
+from the prior phase, and no retry extends a deadline.
+
+Parsing order is normative in both directions. After framing and JSON lexical validity, a token pre-pass examines only
+the top-level `version` member. A missing version, a duplicate version member, a non-integer version, or an integer
+other than `ShimProtocolVersion` returns `protocol-skew` before unknown fields, schema fields, operation lookup, state
+lookup, or side effects. The rendered observed version is respectively `absent`, `duplicate`, the raw JSON token, or
+the decimal integer. Only an exact integer `1` permits a second strict pass, which rejects duplicate or unknown fields,
+missing required fields, an unknown operation, or the wrong JSON type. Thus a foreign-version frame with otherwise
+unknown fields always reports skew; it is never partially interpreted. The server hello lets a current client reject
+a foreign shim before sending a request, and the request's version lets a current shim reject a foreign client before
+reading its session, role, or operation. There is no negotiation, downgrade, migration dialect, newline framing, or
+best-effort decode.
+
+After the current client accepts the hello, Darwin `LOCAL_PEERPID` supplies the kernel-observed answerer PID. It must
+equal the advisory shim PID; disagreement is `answerer-disagreement`, not a kernel-vs-kernel claim. Same-user
+unlink/rebind stays outside the threat model, while status reports the observable disagreement.
 
 For control, take one typed `ps -eo pid=,ppid=` snapshot through the Runner. Starting at the caller's PID, walk parent
 links looking for the `LOCAL_PEERPID` shim. A complete walk finding it is `observed-self-target`. Missing links,
@@ -1927,24 +1990,86 @@ agentctl: refusing to attach session "S"; no tmux presentation was observed; sta
 
 ### 15.8 Shim-plane exit map
 
-| Typed outcome | Exit | Required factual message |
-|---|---:|---|
-| completed lifecycle/status or accepted delivery write | 0 | only operation/bytes/state observed |
-| unclassified internal failure | 1 | no borrowed meaning |
-| invalid name/root/flag/request | 2 | input and rule; no role mutation |
-| missing fleet/session, protocol skew, no-tmux attach | 3 | missing/observed version/presentation |
-| role outside roster or absent where present required | 4 | role and observed records |
-| `observed-self-target` | 5 | `refusing to OP ROLE; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
-| orphan, indeterminate, unsettled, answerer/root/token disagreement, present-not-ours | 5 | exact state; never `missing` |
-| `ancestry-undetermined` | 6 | `refusing to OP ROLE; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
-| external process/protocol observation failed | 6 | operation and cause |
-| required executable absent | 7 | executable; no role mutation |
-| owned rollback/cleanup attempted after failure | 8 | removed, remaining, launch cause, cleanup cause |
-| ownership retained but readiness unestablished | 9 | retained role and refusal/remedy state |
+Every diagnostic is one line on stderr with the `agentctl: ` prefix and trailing newline. In the templates below,
+uppercase words are typed substitutions, not discretionary prose. `SESSION`, `ROLE`, every path/root/executable/flag,
+`CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
+integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
+`EXPECTED_TYPE`, `REMAINING`, and boolean literals are closed canonical tokens rendered without quotes. A raw start
+token renders as `{sec:SEC,usec:USEC}`. A command must select one typed row and its literal template. It may not
+paraphrase, append a generic category, or borrow another row's exit code. `status` table and JSON documents are the
+sole successful status output and therefore add no diagnostic line.
 
-Observed self-target and ancestry-undetermined deliberately have different codes/messages: one observed ancestry; the
-other did not determine it. Delivery cancellation after bytes but before submit is exit 5 and states residue, never
-success.
+| Typed outcome | Exit | Exact factual message template |
+|---|---:|---|
+| `launch-complete` | 0 | `agentctl: launched session SESSION; N roles are ready` |
+| `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
+| `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
+| `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
+| `delivery-submitted` | 0 | `agentctl: OP for role ROLE in session SESSION wrote BYTES bytes and observed submit` |
+| `unclassified` | 1 | `agentctl: OP failed for session SESSION: CAUSE (unclassified)` |
+| `run-child-failed` | 1 | `agentctl: foreground role ROLE in session SESSION exited with status STATUS (child-exit)` |
+| `run-child-signaled` | 1 | `agentctl: foreground role ROLE in session SESSION terminated by signal SIGNAL (child-signal)` |
+| `invalid-session` | 2 | `agentctl: invalid session SESSION: RULE; no role was mutated` |
+| `invalid-role` | 2 | `agentctl: invalid role ROLE: RULE; no role was mutated` |
+| `invalid-root` | 2 | `agentctl: invalid ROOT_KIND ROOT: RULE; no role was mutated` |
+| `invalid-flag` | 2 | `agentctl: invalid flag FLAG: RULE; no role was mutated` |
+| `invalid-request` | 2 | `agentctl: invalid shim request for session SESSION role ROLE: RULE; no role was mutated` |
+| `session-missing` | 3 | `agentctl: session SESSION was not found` |
+| `fleet-config-missing` | 3 | `agentctl: session SESSION has no durable fleet configuration` |
+| `protocol-skew-absent` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; shim protocol version was absent; expected 1 (protocol-skew)` |
+| `protocol-skew-observed` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; shim protocol version was OBSERVED; expected 1 (protocol-skew)` |
+| `attach-no-presentation` | 3 | `agentctl: refusing to attach session SESSION; no tmux presentation was observed; status and control remain available without tmux` |
+| `role-outside-roster` | 4 | `agentctl: role ROLE is not in the durable roster for session SESSION` |
+| `role-missing-when-required` | 4 | `agentctl: role ROLE in session SESSION has no live claim or durable role record (missing)` |
+| `role-stale-when-required` | 4 | `agentctl: role ROLE in session SESSION has stale child PID CHILD after kill(CHILD, 0) returned ESRCH (stale-record)` |
+| `observed-self-target` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
+| `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
+| `orphan` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and recorded child PID CHILD was present with a matching start token (orphan)` |
+| `indeterminate-child-starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and the durable record is child-starting; independently prove child absence, then remove RECORD_PATH (indeterminate-child-starting)` |
+| `starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM holds the claim and the durable record is STATE (starting)` |
+| `concurrent-contender` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; flock returned EWOULDBLOCK while lockfile shim PID SHIM holds the role claim (concurrent-contender)` |
+| `cleanup-failed` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable cleanup is incomplete after CAUSE and child observation is OBSERVATION (cleanup-failed)` |
+| `answerer-disagreement-pid` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; lockfile shim PID RECORDED differs from connected LOCAL_PEERPID ANSWERER (answerer-disagreement)` |
+| `answerer-disagreement-claim` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; LOCAL_PEERPID ANSWERER answered without the matching held role claim (answerer-disagreement)` |
+| `state-root-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; resolved state root LOCAL_ROOT differs from lockfile-recorded state root RECORDED_ROOT (state-root-disagreement)` |
+| `present-token-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; child PID CHILD start token OBSERVED_TOKEN differs from recorded token RECORDED_TOKEN (present-token-disagreement)` |
+| `present-not-ours` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; kill(CHILD, 0) returned EPERM (present-not-ours)` |
+| `delivery-cancelled-clean` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled before any payload byte was written (delivery-cancelled)` |
+| `delivery-cancelled-with-residue` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled after BYTES payload bytes were written but before submit; terminal input may contain residue (delivery-cancelled-with-residue)` |
+| `ancestry-undetermined` | 6 | `agentctl: refusing to OP role ROLE in session SESSION; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
+| `presence-observation-failed` | 6 | `agentctl: could not observe child PID CHILD for role ROLE in session SESSION: kill(CHILD, 0) returned CAUSE (could-not-observe)` |
+| `token-observation-failed` | 6 | `agentctl: could not observe the start token for child PID CHILD in session SESSION role ROLE: CAUSE (could-not-observe)` |
+| `protocol-frame-invalid` | 6 | `agentctl: could not read shim protocol for role ROLE in session SESSION: CAUSE (protocol-frame-invalid)` |
+| `protocol-schema-invalid` | 6 | `agentctl: could not interpret version-1 shim protocol for role ROLE in session SESSION: CAUSE (protocol-schema-invalid)` |
+| `required-executable-missing` | 7 | `agentctl: required executable EXECUTABLE was not found; no role was mutated` |
+| `readiness-timeout-cleaned` | 8 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; cleanup observed child absence and removed every artifact owned by this invocation (readiness-timeout)` |
+| `readiness-observation-failed-cleaned` | 8 | `agentctl: could not observe harness tty readiness for role ROLE in session SESSION: CAUSE; cleanup observed child absence and removed every artifact owned by this invocation (readiness-observation-failed)` |
+| `child-exited-before-ready` | 8 | `agentctl: child PID CHILD exited before harness tty readiness for role ROLE in session SESSION; cleanup observed absence and removed every artifact owned by this invocation (child-exited-before-ready)` |
+| `owned-rollback-complete` | 8 | `agentctl: OP failed for role ROLE in session SESSION: CAUSE; cleanup observed child absence and removed every artifact owned by this invocation (owned-rollback-complete)` |
+| `owned-rollback-incomplete` | 8 | `agentctl: OP failed for role ROLE in session SESSION: CAUSE; cleanup left REMAINING: CLEANUP_CAUSE (owned-rollback-incomplete)` |
+| `readiness-timeout-retained` | 9 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; child PID CHILD was not observed absent, so ownership and the durable record were retained (readiness-timeout)` |
+| `ownership-retained` | 9 | `agentctl: role ROLE in session SESSION failed after child PID CHILD started: CAUSE; cleanup observation was OBSERVATION, so ownership and the durable record were retained (ownership-retained)` |
+
+`protocol-skew-observed` substitutes `OBSERVED` with `duplicate`, the `%q` raw JSON token for a non-integer, or the
+decimal foreign integer according to §15.5. `RECORD_PATH` is always the lockfile body's recorded root joined with the
+fixed durable template, never a path recomputed from the reader's environment. `REMAINING` is a comma-separated list
+in the fixed order `child, socket, record, lock`; omitted artifacts are not named. `OBSERVATION` is exactly one of
+`present-match`, `present-token-disagreement`, `present-not-ours`, or `could-not-observe`; it is never `missing` unless
+`kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup row applies. Observed self-target and
+ancestry-undetermined deliberately remain different facts, codes, and literals.
+
+For `protocol-frame-invalid`, `CAUSE` is exactly one of `zero payload length`, `payload length N exceeds 4096`,
+`EOF after N of 4 header bytes`, `EOF after N of LENGTH payload bytes`, `frame read exceeded 2s after N of LENGTH
+bytes`, `frame write exceeded 2s after N of LENGTH bytes`, `payload is not valid UTF-8`,
+`payload has trailing bytes after its JSON value`, `payload top level is not an object`, or the `%q` JSON syntax error.
+For `protocol-schema-invalid`, `CAUSE` is exactly `duplicate field FIELD`, `unknown field FIELD`,
+`missing required field FIELD`, `field FIELD has JSON type TYPE; expected EXPECTED_TYPE`, `operation OPERATION is not
+registered`, or `response field FIELD is not valid for outcome OUTCOME`.
+For a post-start readiness failure, the final command always uses an exit-8 cleanup row or an exit-9 retained row,
+never exit 6. Its exit-8 `CAUSE` is exactly one of `harness tty was not ready after 5s; final flags
+ICANON=ICANON_BOOL ECHO=ECHO_BOOL`, `TIOCGETA failed while observing harness tty readiness: ERROR`,
+`TIOCGETA remained interrupted through the 5s readiness deadline`, or `child PID CHILD exited before harness tty
+readiness`. This makes cleanup outcome, rather than the initiating observation error, the final exit claim.
 
 ### 15.9 External calls and dependency boundary
 
@@ -1960,8 +2085,9 @@ dependency, module, license, or archive change before that importer. PR 3's PTY 
 ### 15.10 Evidence, tests, and numbered security trace
 
 The [SIGHUP evidence](../../security/2026-08-10-issue-182-shim-probe-evidence.md) records Claude Code 2.1.226 and
-codex-cli 0.147.0 as direct children of owned nested-PTY fixtures; both children terminated after SIGHUP targeted only
-their fixture parent. Orphan handling remains mandatory. The complete
+codex-cli 0.147.0 as direct children of owned nested-PTY fixtures; each direct child's observed `comm` exactly matched
+the selected harness executable path, and both children terminated after SIGHUP targeted only their fixture parent.
+An automated PTY-bearing intermediate-child near miss refuses. Orphan handling remains mandatory. The complete
 [incident replay](../../security/2026-08-10-issue-182-replay-evidence.md), SHA-256
 `d9c14f10df03ec7e7de36adcdd9225b26946c64b9d7f26ec50777b41182f7a01`, was verified byte-for-byte against build2's
 full report. Fake tests own exact syscall/argv ordering and failures; live tests own PTY/kernel/socket/layout/harness
@@ -1972,3 +2098,16 @@ disagreement; (3) §15.2 roots/caps; (4) §§15.1/15.7 operation names; (5) §15
 §§15.3–15.6 orphan/absence/manual remedy; (7) §§15.3/15.7 readiness; (8) §§15.3/15.8 ownership/exits; (9) §15.7
 factual delivery; (10) §§15.5/15.8 version-first refusal. Every implementation PR cites applicable rows; none may
 reopen semantics without an approved design delta.
+
+Gate S runs after PRs 2 and 3 and before PR 4. It records `PASS` only if the merged Darwin evidence satisfies the
+approved `flock`, `LOCAL_PEERPID`, raw `kinfo_proc` token, state-root disagreement, fully resolved socket-length,
+nested controlling-PTY, exact §15.3 readiness, and durable pre-fork reservation contracts without a new semantic or
+dependency surface. Any one unmet contract records `FAIL`, stops PR 4, and requires the planner to amend issue #182
+before selecting the named pane-scoped Option A in the options paper §3. No implementation may weaken the predicate,
+continue Option S after `FAIL`, or improvise a third design.
+
+Release verification owns the deterministic second-binary fixture at `hack/fixtures/shim-version/main.go`. It builds
+that source separately from the current binary and records both artifact versions and SHA-256 hashes. The mandatory
+matrix is current client → foreign shim, foreign client → current shim, absent-version peer → current counterpart,
+and current/matching controls in both directions. Every foreign or absent leg must fail at the version pre-pass before
+schema/operation interpretation; each matching control must pass framing and proceed to its next typed gate.

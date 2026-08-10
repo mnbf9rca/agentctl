@@ -125,16 +125,37 @@ The [approved design §15](docs/superpowers/specs/2026-08-01-agentctl-design.md#
 supersedes the options paper and makes these ratified invariants. They bind every implementation PR. They do not claim
 the production cutover has shipped; each behavior PR updates shipped wording with its importer/wiring.
 
+Existing shipped claims are amended only at the listed cutover PR; until then their current-path wording remains true:
+
+| Existing shipped claim | Approved Option S amendment | Shipped-wording owner |
+|---|---|---|
+| The tmux managed/version, exact role-window, one-live-pane, process-baseline, and `$TMUX_PANE` chain gates control. | Runtime name/version/answerer/readiness/ancestry gates replace it; tmux becomes presentation only. | PR 7 atomic cutover |
+| `@agentctl_role` and `@agentctl_process` are advisory role identity/baseline evidence. | They cease to establish identity; the held `flock`, durable child identity, and connected answerer observations govern. | PRs 2 and 5 implement; PR 7 cuts over |
+| No launch/control/status/kill lifecycle path writes persistent state. | Durable role/config records use the descriptor-verified state root and volatile claim/socket artifacts use the runtime root. | PRs 2 and 5 implement; PR 7 cuts over |
+| The lifecycle is unsynchronized and bounded by check-then-act races. | A lifetime `flock` serializes ownership; residual same-user edits and refusal outcomes remain. | PRs 2 and 5 implement; PR 7 cuts over |
+| Fixed control payloads reach tmux through `send-keys`. | The client sends only a closed operation name; the shim is the sole PTY writer. Non-transactional TUI-delivery residual 1 remains. | PRs 4 and 6 implement; PR 7 cuts over |
+| `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, `AGENTCTL_MANAGED`, and `TMUX_PANE` are informational and never prove a target. | Unchanged: none becomes a runtime identity, answerer, readiness, or ancestry input. | No wording transition required |
+
 1. **The role claim is a kernel-arbitrated lock, not a socket file.** An exclusive `flock` (or equivalent auto-released-on-death primitive) on a per-role lockfile, held for the shim's lifetime; the socket is bound only while the lock is held, and reclaim after any death is lock acquisition alone. Bare `bind()` claims and probe-connect → `unlink` → `bind` reclaim are inadmissible (demonstrated: the socket file survives SIGKILL and blocks rebind; unlink-based reclaim can silently orphan a live shim).
 2. **Socket-path forgery is a named residual with an honest detection contract.** Same-user unlink-and-rebind remains out of scope. The lockfile body is advisory; `LOCAL_PEERPID` is the kernel answerer fact. `status` reports advisory-record/kernel-answerer disagreement and never calls it kernel-vs-kernel proof.
 3. **Runtime directory discipline.** The production base is `/tmp/agentctl-<decimal-uid>/v1`; session/role names are each capped at 32 ASCII bytes, producing a 98-byte worst-case production socket path (99 with NUL). Overrides are independently checked against Darwin `sun_path[104]`. Volatile and durable roots are created `0700` exclusively and descriptor-verified. `$HOME`/`os.UserConfigDir()` and both root overrides are declared, capped, same-user-selectable residual surfaces. Predictable `/tmp` pre-creation refuses.
 4. **The wire protocol carries operation names only** — tokens from the closed, argument-free registry, nothing else; no text channel to the PTY writer; the shim is the sole writer to the harness PTY.
 5. **The shim is the enforcement point.** Design §15.5 retires tmux metadata/window/pane checks, moves role validation and version/answerer/readiness checks, and replaces `$TMUX_PANE` with one fail-closed ancestry snapshot seeded from `LOCAL_PEERPID`. Advisory environment never targets.
 6. **No role is absent while its recorded child may live.** A pre-fork durable `child-starting` reservation upgrades with PID/raw start token. `kill(pid,0)` `ESRCH` is the sole absence permission; nil, `EPERM`, other errors, token mismatch, and token-reader errors refuse distinctly. The live probe observed both pinned harness children terminate after shim SIGHUP, but explicit orphan/indeterminate states remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3.
-7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and corrupt early bytes (demonstrated); delivery gates on an observed settle condition (e.g. the harness tty leaving cooked/echo mode), in the spirit of the §8 baseline poll.
+7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and
+   corrupt early bytes (demonstrated). Design §15.3 fixes the observation: `TIOCGETA` on the retained PTY master at
+   `t=0`, every 50ms, and the inclusive 5s boundary; ready means one snapshot has both `ICANON` and `ECHO` clear while
+   the listener/relay/child remain live. Errors, child exit, and final cooked/echo flags have distinct bounded factual
+   outcomes; prompts and terminal contents never participate.
 8. **Ownership and exit codes are specified before code.** Successful `flock(LOCK_EX)` is the sole ownership instant. Design §§15.3/15.8 assign every pre/post-child failure and rollback, and give observed-self-target and ancestry-undetermined distinct typed messages/codes.
 9. **Delivery claims stay factual.** Keystroke delivery remains non-transactional (residual 1 applies unchanged); the shim reports what it wrote and observed, and execution is never asserted from delivery.
-10. **The wire protocol is version-gated, fail closed.** S makes agentctl a two-process system, so a CLI may meet a shim launched by a different agentctl version. The socket protocol carries a version, checked first, exactly as `@agentctl_version=1` gates sessions today: a mismatched or absent version is a refusal that renders the observed value, never a best-effort parse. No migration or dual-dialect support is owed across the tmux-metadata → shim transition (single-operator install; flag-day accepted by the maintainer, 2026-08-09) — the gate exists for version skew, not coexistence.
+10. **The wire protocol is version-gated, fail closed.** S makes agentctl a two-process system, so a CLI may meet a
+    shim launched by a different agentctl version. Design §15.5 pins `ShimProtocolVersion=1`, a four-byte big-endian
+    length header, a 4096-byte maximum JSON payload, a two-second per-frame I/O deadline,
+    server-hello/request/response order, and a version-only token pre-pass before schema or operation interpretation
+    in both directions. A mismatched, malformed, duplicate, or absent version refuses with the exact §15.8 fact. No
+    migration or dual-dialect support is owed across the tmux-metadata → shim transition; the gate exists for skew,
+    not coexistence.
 
 ## Reporting a vulnerability
 
