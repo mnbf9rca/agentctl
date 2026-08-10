@@ -325,6 +325,61 @@ func TestDecoderTreatsMalformedTrailingContentAsAnotherDocument(t *testing.T) {
 	)
 }
 
+func TestDecoderSelectsMixedSchemaFailuresInLegacyOrder(t *testing.T) {
+	t.Parallel()
+
+	const contents = `{"version":1,"dir":7,"roles":[{"role":"Planner","model":8}]}`
+	const want = `template /fleet.json: dir: must be a string`
+	for range 400 {
+		assertTemplateError(t, decodeTemplateContents(t, contents), want)
+	}
+}
+
+func TestDecoderPreservesStrictnessPrecedenceAroundSchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "root unknown before trailing document",
+			contents: `{"version":1,"efort":"low"} {}`,
+			want:     `template /fleet.json: unknown field "efort"`,
+		},
+		{
+			name:     "root unknown before session refusal",
+			contents: `{"version":1,"efort":"low","session":"fleet"}`,
+			want:     `template /fleet.json: unknown field "efort"`,
+		},
+		{
+			name:     "directory before role unknown",
+			contents: `{"version":1,"dir":7,"roles":[{"role":"planner","efort":"low"}]}`,
+			want:     `template /fleet.json: dir: must be a string`,
+		},
+		{
+			name:     "schema keyword before generic unknown",
+			contents: `{"version":1,"$schema":"ignored","efort":"low"}`,
+			want:     `template /fleet.json: "$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`,
+		},
+		{
+			name:     "duplicate role before later optional field",
+			contents: `{"version":1,"roles":[{"role":"planner"},{"role":"planner","model":8}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "planner"`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for range 100 {
+				assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+			}
+		})
+	}
+}
+
 func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testing.T) {
 	t.Parallel()
 
