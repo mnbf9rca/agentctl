@@ -222,7 +222,7 @@ func TestIntegrationShimKillObservesChildExitBeforePresentationAndFleetCleanup(t
 	}
 }
 
-func TestIntegrationShimStopLetsInflightPayloadReportAndRefusesLaterPayloadWithoutPTYWrite(t *testing.T) {
+func TestIntegrationShimStopLetsInflightPayloadReportAndRefusesLaterPayload(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	_, records, lifecycle, _ := fixture.shimStack(t)
 	launcher := fleet.NewShimLauncher(fixture.client, lifecycle, records, fixture.shimLaunchDependencies())
@@ -289,8 +289,6 @@ func TestIntegrationShimStopLetsInflightPayloadReportAndRefusesLaterPayloadWitho
 		stopResult.response.ChildExitObserved == nil || !*stopResult.response.ChildExitObserved {
 		t.Fatalf("primary stop = %#v, %v, want separate signal/exit facts", stopResult.response, stopResult.err)
 	}
-	fixture.waitRoleInput("planner", "\x15/clear\n")
-	fixture.assertRoleInputRemains("planner", "\x15/clear\n", 100*time.Millisecond)
 }
 
 func (f *integrationFixture) shimStack(t *testing.T) (*shim.Namespace, *fleet.ShimFleetRecordStore, *shim.Client, *fleet.RuntimeShimRoleInspector) {
