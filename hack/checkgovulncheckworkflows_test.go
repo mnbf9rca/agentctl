@@ -82,6 +82,13 @@ func TestCheckGovulncheckWorkflowsRejectsMissingOrUnpinnedCoverage(t *testing.T)
 			scheduled:     validScheduledGovulncheck("go test ./..."),
 			wantSubstring: "vulnerability.yml must contain exactly one pinned govulncheck invocation",
 		},
+		{
+			name: "PR invocation relocated outside required test job",
+			ci: "jobs:\n  test:\n    steps:\n      - run: go test ./...\n" +
+				"  integration:\n    steps:\n      - name: Govulncheck\n        run: " + pinnedGovulncheckRun + "\n",
+			scheduled:     validScheduledGovulncheck(pinnedGovulncheckRun),
+			wantSubstring: "ci.yml test job must contain exactly one pinned govulncheck invocation",
+		},
 	}
 
 	for _, tc := range tests {

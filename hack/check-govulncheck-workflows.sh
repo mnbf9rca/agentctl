@@ -30,11 +30,25 @@ if grep -Fq 'govulncheck@latest' "$ci_workflow" "$scheduled_workflow"; then
 fi
 
 count_pinned_invocations() {
-  awk -v expected="$pinned_command" '
+  local required_job="${2:-}"
+  awk -v expected="$pinned_command" -v required_job="$required_job" '
+    /^jobs:[[:space:]]*(#.*)?$/ {
+      in_jobs = 1
+      next
+    }
+    in_jobs && /^[^[:space:]#]/ {
+      in_jobs = 0
+      job_name = ""
+    }
+    in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*(#.*)?$/ {
+      job_name = substr($0, 3)
+      sub(/:.*/, "", job_name)
+      next
+    }
     {
       line = $0
       sub(/^[[:space:]]*run:[[:space:]]*/, "", line)
-      if (line == expected) count++
+      if (line == expected && (required_job == "" || job_name == required_job)) count++
     }
     END { print count + 0 }
   ' "$1"
@@ -42,6 +56,10 @@ count_pinned_invocations() {
 
 if [[ "$(count_pinned_invocations "$ci_workflow")" -ne 1 ]]; then
   echo "ci.yml must contain exactly one pinned govulncheck invocation" >&2
+  status=1
+fi
+if [[ "$(count_pinned_invocations "$ci_workflow" test)" -ne 1 ]]; then
+  echo "ci.yml test job must contain exactly one pinned govulncheck invocation" >&2
   status=1
 fi
 
