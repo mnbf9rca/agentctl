@@ -86,5 +86,7 @@ keys, owned child cleanup, and an unrelated sentinel answering a bounded `SIGUSR
 cleanup. A dedicated boundary fixture refuses an exited/zombie sentinel even where `kill(pid, 0)` still reports the
 PID present. A dedicated intermediate fixture puts a PTY-bearing bridge between the shim and selected harness and
 requires factual refusal plus cleanup of both owned processes. If that fixture omits its grandchild PID record, fake
-`ps` returns no row immediately so the probe's 100×50ms observation loop owns the deadline; the bounded refusal still
-cleans the owned bridge and grandchild. The fake PATH includes a `tmux` canary and fails if the probe invokes it.
+`ps` delays 100ms and then returns no row. This proves that the nominal five-second elapsed deadline, checked between
+returning samples with 50ms pauses, is not extended by a fixed observation count; it does not claim to preempt a hung
+`ps` invocation. The bounded refusal still cleans the owned bridge and grandchild. The fake PATH includes a `tmux`
+canary and fails if the probe invokes it.

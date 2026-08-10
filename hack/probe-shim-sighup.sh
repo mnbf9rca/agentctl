@@ -105,7 +105,8 @@ topology_line=""
 child_ppid=""
 child_tty=""
 child_command=""
-for _ in {1..100}; do
+topology_deadline=$((SECONDS + 5))
+while ((SECONDS < topology_deadline)); do
   if ! process_exists "$shim_pid"; then
     fail "owned shim fixture exited before topology was observed; log: $(tr '\n' ' ' <"$shim_log")"
   fi

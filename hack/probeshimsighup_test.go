@@ -234,6 +234,7 @@ func TestProbeShimSIGHUPMissingGrandchildPIDIsBoundedAndCleansOwnedFixture(t *te
 		"AGENTCTL_PROBE_GRANDCHILD_PID_FILE="+fixture.grandchildPIDFile,
 		"AGENTCTL_PROBE_ACTUAL_GRANDCHILD_PID_FILE="+actualGrandchildPIDFile,
 		"AGENTCTL_PROBE_FAKE_PS_PID_FILE="+fakePSPIDFile,
+		"AGENTCTL_PROBE_FAKE_PS_DELAY=0.10",
 		"AGENTCTL_PROBE_SUPPRESS_GRANDCHILD_PID_FILE=1",
 	)
 	combinedFile, err := os.CreateTemp(t.TempDir(), "combined-*.txt")
@@ -371,6 +372,9 @@ wait "$child"
 	writeExecutable(t, filepath.Join(binDir, "ps"), fmt.Sprintf(`#!/bin/sh
 if [ -n "${AGENTCTL_PROBE_FAKE_PS_PID_FILE-}" ]; then
   echo "$$" >"$AGENTCTL_PROBE_FAKE_PS_PID_FILE"
+fi
+if [ -n "${AGENTCTL_PROBE_FAKE_PS_DELAY-}" ]; then
+  sleep "$AGENTCTL_PROBE_FAKE_PS_DELAY"
 fi
 shim=$(cat "$AGENTCTL_PROBE_SHIM_PID_FILE")
 child=$(cat "$AGENTCTL_PROBE_CHILD_PID_FILE")
