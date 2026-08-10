@@ -241,7 +241,13 @@ gates belong to the command packages that act on the session, not to resolution.
 
 ## 5. Architecture
 
-Go module, stdlib only (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`). No CLI framework, no tmux client library. All tmux invocations are argv arrays via `os/exec` — agentctl never invokes a shell. The only shell-interpreted string in the system is the window command tmux itself runs via `sh`, assembled exclusively by `shellq` from charset-validated tokens.
+The Go module is standard-library-first (`flag`, `os/exec`, `encoding/json`, `regexp`, `testing`). A third-party
+dependency is admitted only when it clearly reduces complexity and its package, version, and rationale are recorded in
+the governing change. `github.com/santhosh-tekuri/jsonschema/v6` compiles the embedded launch-template schema rather
+than maintaining a bespoke structural validator; its indirect `golang.org/x/text` dependency is visible in `go.mod` and
+`go.sum`. There is no CLI framework or tmux client library. All tmux invocations are argv arrays via `os/exec` —
+agentctl never invokes a shell. The only shell-interpreted string in the system is the window command tmux itself runs
+via `sh`, assembled exclusively by `shellq` from charset-validated tokens.
 
 | Package | Responsibility |
 |---|---|
@@ -1106,9 +1112,11 @@ reporting the provenance of every field is what keeps an override from silently 
 
 ### 6.9 launch templates
 
-`agentctl launch --from-template FILE` supplies the **fleet shape** — roles with harness, model, effort, and an
-optional directory — from a JSON file. It is a source of values, never a second validator: `internal/config` continues
-to own all value semantics (§12.9).
+`agentctl launch --from-template FILE` supplies fleet values from a JSON file. The embedded
+`skills/agentctl/references/fleet-template.schema.json` is the single machine-readable artifact for the file's shape,
+and `internal/launchtemplate` executes that artifact. Schema validation is structural only: a schema-valid template can
+still be refused at launch because `internal/config` applies value semantics to the merged template-and-flag union
+(§12.9).
 
 **The template never carries the session name.** Session identity is per-invocation, so one template serves
 `release_0_4_0`, `release_0_5_0` and every successor unedited, and identity can never come from a stale file. There is
@@ -1119,21 +1127,10 @@ make, it is refused by name:
 agentctl: template FILE: "session" is not a template field; session identity is supplied per invocation with --session
 ```
 
-**Format is JSON**, because the standard library has no YAML or TOML decoder (CLAUDE.md's hard constraint) and
-`encoding/json` is the only stdlib decoder offering unknown-field rejection, a token stream for a duplicate-key pass,
-and trailing-document detection.
-
-```json
-{
-  "version": 1,
-  "dir": "/srv/work",
-  "roles": [
-    { "role": "planner",  "harness": "claude", "model": "opus-4-1", "effort": "high" },
-    { "role": "reviewer", "harness": "claude", "effort": "max" },
-    { "role": "worker",   "harness": "codex" }
-  ]
-}
-```
+**Format is JSON.** The schema document declares its own JSON Schema dialect; a template never carries `$schema`.
+agentctl already embeds the schema, so accepting a caller-supplied schema name would either silently ignore a declared
+contract or create a caller-chosen read/fetch path. `$schema` is therefore refused by name and points authors to the
+installed skill reference.
 
 #### The union, and where each requirement binds
 
@@ -1141,18 +1138,10 @@ Flags and the template compose: **the effective fleet is the union of the two.**
 template-declared role or field overrides it; a flag role the template does not declare is added. No flag removes a
 template-declared role — removal was considered and not granted, so a template is a floor, never a ceiling.
 
-Partial templates are legal by construction, because validation applies to the union rather than to the file. That
-splits the requirements in two, and the split is the whole point:
-
-| Requirement | Binds on | Why |
-|---|---|---|
-| `version` | the **file** | It describes the file's own format, so no flag could supply it. |
-| `roles[].role` | the **file**, per entry | It is the merge key. An entry with no role name has no identity and cannot participate in a union. Structural, not a value rule. |
-| a harness for every role | the **union** | `{"role": "planner"}` plus `--roles planner:claude` is a legal union. |
-| at least one role | the **union** | A file with `roles` absent or `[]` is a legal defaults-only template; the error is a *union* with no roles. |
-
-The last row reads oddly at a glance and is deliberate: rejecting an empty `roles` in the file would have the design
-second-guess a union that is legal by construction.
+Partial templates are legal by construction, because validation applies to the union rather than to the file. The
+schema owns file-local structure; requirements such as one harness per effective role and at least one effective role
+bind on the union. An empty or omitted roles list is therefore legal in a defaults-only template, though the effective
+union can still be refused for having no roles.
 
 It is also the only thing that relaxes `--roles`. Without `--from-template`, `--roles` is required (§4); with one, it
 becomes optional because the template can supply the roster instead. What is never optional is the union: whichever
@@ -1196,15 +1185,12 @@ order. An override never moves a role — it changes that role's fields and leav
    plant a symlink can plant the file itself.
 4. **Size cap, enforced by rejection.** Read through a limit of 1 MiB plus one byte, and refuse a file that exceeds it.
    Truncating instead would launch a fleet that differs from the file the caller wrote (§1.1).
-5. **Version before the strict decode.** A token pre-pass reads `version` and rejects any key repeated within any
-   object, anywhere in the document — `encoding/json` is silently last-wins where the CLI errors, and
-   `{"effort": "low", "effort": "max"}` inside one role object is the same ambiguity as a duplicate role.
-   `version` must be present and exactly `1`.
-6. **Strict decode**: unknown fields rejected, one document, nothing trailing.
-7. **Absent, `null` and empty are three different things.** An absent optional field is omitted; `null` and `""` are
-   both errors. The file is therefore *stricter* than the CLI here, and the divergence is one-directional and stated
-   rather than discovered.
-8. **Every surviving value goes through §7's validators, unchanged**, applied to the union.
+5. **Version before schema validation.** A token pre-pass reads `version` and rejects any key repeated within any
+   object, anywhere in the document — `encoding/json` is silently last-wins where the CLI errors. It preserves the
+   lexical-exact `1` check; the embedded schema carries the matching declarative `const` rule.
+6. **Embedded schema validation** rejects instances outside the published file shape, including unknown fields.
+   Trailing content remains a decoder-level refusal because a schema validates one JSON value, not a byte stream.
+7. **Every schema-approved value goes through §7's validators, unchanged**, applied to the union.
 
 `dir` existence and is-a-directory are not checked here; that stays at point of use (§12.9).
 

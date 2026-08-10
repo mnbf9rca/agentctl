@@ -22,6 +22,23 @@
 - **Filesystem namespace manipulation** (bind mounts, pre-existing device files, privileged tricks) — as in AMQ's policy, these require system-level hardening.
 - **The agents themselves.** What an agent does after receiving `/clear` or `/compact` — or what it does at all — is governed by the harness's own permission model, not by agentctl.
 
+## Third-party build dependencies
+
+agentctl is standard-library-first, but its build graph deliberately includes
+`github.com/santhosh-tekuri/jsonschema/v6` to compile and validate the embedded
+launch-template schema. Its indirect `golang.org/x/text` dependency is recorded
+in `go.mod`; `go.sum` records the module checksums. The compiler replaces a
+larger bespoke structural validator, so the dependency reduces security-
+critical complexity rather than adding a general extension mechanism.
+
+This changes the supply-chain boundary: a compromised dependency or checksum
+verification bypass could affect a built binary. Review every dependency change
+with its version, `go mod graph`, and `go.sum`; do not add dependencies merely
+for convenience. Dependencies are compiled into release artifacts and are not
+fetched or selected from template input at runtime. Template schemas remain an
+embedded, release-reviewed asset, so a template cannot choose code, a schema
+location, or a validator.
+
 ## Known risks and accepted residuals
 
 1. **Keystroke delivery is not transactional, and degrades under host saturation.** This absorbs what were previously two separate residuals: delivery reliability and popup selection are not independent, and mitigating either alone does not cover the case where they compose.

@@ -46,8 +46,15 @@ agentctl kill --session SESSION
 
 `launch`, `relaunch`, and `attach` are operator-only; do not issue them.
 `launch --from-template FILE` lets the operator supply fleet shape from a
-strict JSON file, but does not make launch or template authoring an
-agent-driven workflow.
+strict JSON file; launch remains operator-only.
+
+### 2.1 Author a launch template when the operator asks
+
+You may author or review a launch template for an operator. Before doing so,
+read [references/fleet-template.schema.json](references/fleet-template.schema.json):
+it is the complete template-shape contract. Schema-valid does not mean
+launch-valid; value rules apply to the merged template-and-flag union at launch.
+Do not issue the operator's `launch` command.
 
 ## 3. Read status as factual claims
 
