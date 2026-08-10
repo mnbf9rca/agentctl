@@ -380,6 +380,56 @@ func TestDecoderPreservesStrictnessPrecedenceAroundSchemaValidation(t *testing.T
 	}
 }
 
+func TestDecoderPreservesLegacyStagesForNestedSpecialsAndSchemaValueRules(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "nested session remains unknown",
+			contents: `{"version":1,"roles":[{"role":"planner","session":"fleet"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "session"`,
+		},
+		{
+			name:     "nested schema remains unknown",
+			contents: `{"version":1,"roles":[{"role":"planner","$schema":"ignored"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "$schema"`,
+		},
+		{
+			name:     "role unknown before missing required name",
+			contents: `{"version":1,"roles":[{"efort":"low"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "efort"`,
+		},
+		{
+			name:     "duplicate before nonempty relative directory pattern",
+			contents: `{"version":1,"dir":"relative","roles":[{"role":"planner"},{"role":"planner"}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "planner"`,
+		},
+		{
+			name:     "duplicate before nonempty role pattern",
+			contents: `{"version":1,"roles":[{"role":"Planner"},{"role":"Planner"}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "Planner"`,
+		},
+		{
+			name:     "optional structural failure before nonempty role pattern",
+			contents: `{"version":1,"roles":[{"role":"Planner","model":8}]}`,
+			want:     `template /fleet.json: roles[0].model: must be a string`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for range 100 {
+				assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+			}
+		})
+	}
+}
+
 func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testing.T) {
 	t.Parallel()
 
