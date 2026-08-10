@@ -314,6 +314,57 @@ func (c *Claim) Close() error {
 	return err
 }
 
+// CloseAndRemove is the clean-absence release path. It removes the socket and
+// the verified lock pathname while the flock is still held, then closes the
+// held open file description. Callers may use it only after ESRCH proved the
+// owned child absent.
+func (c *Claim) CloseAndRemove() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return nil
+	}
+	path := c.path
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	var cleanupErrors []error
+	if path.runtimeSession == nil {
+		cleanupErrors = append(cleanupErrors, errors.New("role path is closed"))
+	} else if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	} else {
+		for _, artifact := range []struct {
+			name string
+			kind os.FileMode
+		}{
+			{name: path.Role + ".sock", kind: os.ModeSocket},
+			{name: path.Role + ".lock"},
+		} {
+			info, err := path.runtimeSession.Lstat(artifact.name)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				cleanupErrors = append(cleanupErrors, err)
+				continue
+			}
+			if artifact.kind != 0 && info.Mode()&artifact.kind == 0 {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("refusing non-socket artifact at %q", path.Socket))
+				continue
+			}
+			if err := path.runtimeSession.Remove(artifact.name); err != nil {
+				cleanupErrors = append(cleanupErrors, err)
+			}
+		}
+		if err := syncDirectoryRoot(path.runtimeSession); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	cleanupErrors = append(cleanupErrors, c.file.Close())
+	c.file = nil
+	return errors.Join(cleanupErrors...)
+}
+
 // LocalPeerPID returns Darwin's kernel-observed answerer identity for a
 // connected Unix socket.
 func LocalPeerPID(connection *net.UnixConn) (int, error) {

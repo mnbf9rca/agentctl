@@ -306,6 +306,34 @@ func ensurePrivateChild(kind, fullPath string, parent *os.Root, name string) (*o
 	return ensurePrivateChildWithSync(kind, fullPath, parent, name, syncDirectoryRoot)
 }
 
+func openPrivateChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, error) {
+	pathInfo, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: "must not be a symbolic link"}
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyPrivateDirectory(kind, fullPath, root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	descriptorInfo, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, &FilesystemObservationError{Kind: kind, Path: fullPath, Operation: "stat retained directory", Err: err}
+	}
+	if !os.SameFile(pathInfo, descriptorInfo) {
+		_ = root.Close()
+		return nil, &RootSubstitutedError{Kind: kind, Path: fullPath}
+	}
+	return root, nil
+}
+
 func ensurePrivateChildWithSync(
 	kind string,
 	fullPath string,
@@ -463,6 +491,16 @@ func verifyRetainedRoot(kind, path string, root *os.Root) error {
 // RolePath validates all inputs and the complete Darwin socket path before it
 // creates any per-session directory.
 func (n *Namespace) RolePath(session, role string) (*RolePath, error) {
+	return n.rolePath(session, role, true)
+}
+
+// ExistingRolePath opens one already-created role namespace without creating
+// directories. Clients use it so observation remains read-only.
+func (n *Namespace) ExistingRolePath(session, role string) (*RolePath, error) {
+	return n.rolePath(session, role, false)
+}
+
+func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, error) {
 	if err := config.ValidateSessionName(session); err != nil {
 		return nil, err
 	}
@@ -487,22 +525,26 @@ func (n *Namespace) RolePath(session, role string) (*RolePath, error) {
 	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
 		return nil, err
 	}
-	runtimeSession, err := ensurePrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+	openChild := openPrivateChild
+	if create {
+		openChild = ensurePrivateChild
+	}
+	runtimeSession, err := openChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
 	if err != nil {
 		return nil, err
 	}
-	stateSessions, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
+	stateSessions, err := openChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
 	if err != nil {
 		_ = runtimeSession.Close()
 		return nil, err
 	}
-	stateSession, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
+	stateSession, err := openChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
 	_ = stateSessions.Close()
 	if err != nil {
 		_ = runtimeSession.Close()
 		return nil, err
 	}
-	stateRoles, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
+	stateRoles, err := openChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
 	_ = stateSession.Close()
 	if err != nil {
 		_ = runtimeSession.Close()

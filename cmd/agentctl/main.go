@@ -118,6 +118,16 @@ type roleRelauncher interface {
 	Relaunch(context.Context, tmuxx.Session, fleet.RelaunchRequest) (fleet.RelaunchResult, error)
 }
 
+type hiddenShimCommand interface {
+	Run(context.Context, []string, io.Writer, io.Writer) int
+}
+
+type hiddenShimCommandFunc func(context.Context, []string, io.Writer, io.Writer) int
+
+func (f hiddenShimCommandFunc) Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
+	return f(ctx, arguments, stdout, stderr)
+}
+
 // dependencies collects the seams every subcommand is wired through, so tests
 // can supply exactly the ones the command under test uses.
 type dependencies struct {
@@ -128,6 +138,7 @@ type dependencies struct {
 	controller controlExecutor
 	attacher   sessionAttacher
 	relauncher roleRelauncher
+	hiddenShim hiddenShimCommand
 }
 
 func runWithRunner(
@@ -157,6 +168,7 @@ func runWithRunner(
 		controller: control.New(targetResolver, client),
 		attacher:   attacher,
 		relauncher: fleet.New(runner, fleet.Dependencies{}),
+		hiddenShim: newProductionHiddenShimCommand(),
 	})
 }
 
@@ -196,6 +208,13 @@ func runWithDependencies(
 	if arguments[0] == "-h" || arguments[0] == "--help" {
 		fmt.Fprint(stdout, globalUsage)
 		return exitOK
+	}
+	if arguments[0] == "__shim" {
+		if deps.hiddenShim == nil {
+			fmt.Fprintln(stderr, "agentctl: hidden shim handler is unavailable")
+			return exitUnclassified
+		}
+		return deps.hiddenShim.Run(ctx, arguments[1:], stdout, stderr)
 	}
 
 	command := arguments[0]

@@ -194,6 +194,23 @@ func TestRecordSurvivesRuntimeTreeDeletionAndSimulatedRebootResidue(t *testing.T
 	}
 }
 
+func TestRemoveRecordObservesDurableRoleRecordAbsence(t *testing.T) {
+	path := newTestRolePath(t)
+	record := NewChildStartingRecord(path.Session, path.Role, os.Getpid(), "remove-record")
+	if err := WriteRecord(path, record); err != nil {
+		t.Fatalf("WriteRecord() error = %v", err)
+	}
+	if err := RemoveRecord(path); err != nil {
+		t.Fatalf("RemoveRecord() error = %v", err)
+	}
+	if _, err := ReadRecord(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadRecord() after removal error = %v, want os.ErrNotExist", err)
+	}
+	if err := RemoveRecord(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second RemoveRecord() error = %v, want os.ErrNotExist", err)
+	}
+}
+
 func TestRecordRejectsMalformedAndInconsistentDurableData(t *testing.T) {
 	rolePath := newTestRolePath(t)
 	if err := os.WriteFile(rolePath.Record, []byte(`{"version":1,"state":"child-recorded","session":"session"}`), 0o600); err != nil {

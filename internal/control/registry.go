@@ -8,8 +8,18 @@ import "fmt"
 // or append caller-supplied text are not admissible.
 type Command struct {
 	Operation string
+	Kind      OperationKind
 	Payload   string
 }
+
+// OperationKind separates payload-bearing terminal operations from lifecycle
+// control operations that are structurally incapable of producing PTY input.
+type OperationKind string
+
+const (
+	OperationPayload OperationKind = "payload"
+	OperationControl OperationKind = "control"
+)
 
 const (
 	clearPayload   = "/clear"
@@ -17,8 +27,10 @@ const (
 )
 
 var commands = [...]Command{
-	{Operation: "clear", Payload: clearPayload},
-	{Operation: "compact", Payload: compactPayload},
+	{Operation: "clear", Kind: OperationPayload, Payload: clearPayload},
+	{Operation: "compact", Kind: OperationPayload, Payload: compactPayload},
+	{Operation: "observe", Kind: OperationControl},
+	{Operation: "stop", Kind: OperationControl},
 }
 
 // UnknownOperationError reports an operation outside the closed registry.

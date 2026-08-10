@@ -57,18 +57,17 @@ upstream license and patent grant for `golang.org/x/text`, under paths that name
 each module unambiguously. CI inspects every snapshot archive and refuses one
 missing any of those materials.
 
-The internal shim identity primitives pin `golang.org/x/sys` v0.47.0 and import
+The shim identity primitives pin `golang.org/x/sys` v0.47.0 and import
 `golang.org/x/sys/unix` only for Darwin `flock`, `LOCAL_PEERPID`, `kill(pid,0)`,
 and raw `kinfo_proc` process observation. Under the reviewer-recommended,
 planner-approved staged admission, PR 2 is source admission: the module is
 required and tidy-stable, `internal/shim` tests exercise its source, govulncheck
 and Dependabot cover it, and its upstream license ships in release archives.
-No production path imports `internal/shim` at this stage, so the release binary
-does not yet link `x/sys`; `go version -m` evidence records that non-linkage.
-The first PR whose production path imports `internal/shim` is the mandatory
-Stage 2 rider: it must provide `go version -m` evidence showing `x/sys` linked
-in the release binary. That obligation cannot be deferred or dropped. The
-separate stdlib PTY lane does not import `x/sys`.
+PR 4 is the Stage 2 production-linkage rider: the hidden resident-shim route in
+`cmd/agentctl` imports `internal/shim`, and `go version -m` on its built Darwin
+binary records `golang.org/x/sys v0.47.0` as a linked dependency. The public
+lifecycle remains on its pre-cutover path until PR 7. The separate stdlib PTY
+lane does not import `x/sys`.
 
 ## Known risks and accepted residuals
 
@@ -121,11 +120,12 @@ volatile mode-`0600` socket/lock artifacts live below descriptor-verified mode-`
 Declared overrides receive identical validation and never confer trust. No lifecycle path writes inside application
 repositories.
 
-The internal, not-yet-wired shim package now implements these private roots,
-held role claims, advisory lockfile records, atomic durable role records,
-version-first framing, `LOCAL_PEERPID`, and ESRCH-only process absence facts.
-This implementation status does not change the preceding shipped-path claim:
-the CLI cutover and lifecycle wiring remain owned by later issue-182 PRs.
+The hidden resident-shim route now composes these private roots, held role
+claims, advisory lockfile records, atomic durable role records, version-first
+framing, `LOCAL_PEERPID`, ESRCH-only process absence facts, the nested PTY
+lifecycle, and the closed operation server. No public lifecycle command invokes
+that route yet, so this implementation status does not change the preceding
+shipped-path claim; the public CLI cutover remains owned by later issue-182 PRs.
 
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 
@@ -157,12 +157,20 @@ Existing shipped claims are amended only at the listed cutover PR; until then th
 1. **The role claim is a kernel-arbitrated lock, not a socket file.** Successful exclusive `flock(LOCK_EX)` on a per-role lockfile is the sole ownership instant, and the lock is held for the shim's lifetime; the socket is bound only while the lock is held, and reclaim after any death is lock acquisition alone. Bare `bind()` claims and probe-connect → `unlink` → `bind` reclaim are inadmissible (demonstrated: the socket file survives SIGKILL and blocks rebind; unlink-based reclaim can silently orphan a live shim).
 2. **Socket-path forgery is a named residual with an honest detection contract.** Same-user unlink-and-rebind remains out of scope. The lockfile body is advisory; `LOCAL_PEERPID` is the kernel answerer fact. `status` reports advisory-record/kernel-answerer disagreement and never calls it kernel-vs-kernel proof.
 3. **Runtime directory discipline.** The production base is `/tmp/agentctl-<decimal-uid>/v1`; session/role names are each capped at 32 ASCII bytes, producing a 98-byte worst-case production socket path (99 with NUL). Overrides are independently checked against Darwin `sun_path[104]`. Volatile and durable roots are created `0700` exclusively and descriptor-verified. `$HOME`/`os.UserConfigDir()` and both root overrides are declared, capped, same-user-selectable residual surfaces. Predictable `/tmp` pre-creation refuses.
-4. **The only delivery instruction is a closed operation name.** The request otherwise carries only framing/version
-   and validated session/role identity, and the response carries only framing/version and typed objective facts, exactly
-   as design §15.5 specifies. No field can carry caller-supplied PTY text, raw keys, arguments, model values, or
-   environment values; the shim is the sole writer to the harness PTY.
+4. **The operation registry is closed and separates payload from lifecycle control.** The request otherwise carries
+   only framing/version, validated session/role identity, and one argument-free operation name. `clear` and `compact`
+   are the only payload operations and resolve their fixed bytes server-side; `observe` and `stop` are control
+   operations and never call the PTY writer. The response carries only framing/version and typed objective facts,
+   exactly as design §15.5 specifies. No field can carry caller-supplied PTY text, raw keys, arguments, model values,
+   or environment values; the shim is the sole writer to the harness PTY.
 5. **The shim is the enforcement point.** Design §15.5 retires tmux metadata/window/pane checks, moves role validation and version/answerer/readiness checks, and replaces `$TMUX_PANE` with one fail-closed ancestry snapshot seeded from `LOCAL_PEERPID`. Advisory environment never targets.
-6. **No role is absent while its recorded child may live.** A pre-fork durable `child-starting` reservation upgrades with PID/raw start token. `kill(pid,0)` `ESRCH` is the sole absence permission; nil, `EPERM`, other errors, token mismatch, and token-reader errors refuse distinctly. The live probe observed both pinned harness children terminate after shim SIGHUP, but explicit orphan/indeterminate states remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3.
+6. **No role is absent while its recorded child may live or a record commit is uncertain.** A pre-fork durable
+   `child-starting` reservation upgrades with PID/raw start token. `kill(pid,0)` `ESRCH` is the sole process-absence
+   permission; nil, `EPERM`, other errors, token mismatch, and token-reader errors refuse distinctly. A post-rename
+   directory-sync failure is `RecordCommitUncertainError`: its visible record and role artifacts are retained, no
+   later cleanup describes the role absent, and the exact `record-commit-uncertain` row reports the phase. The live
+   probe observed both pinned harness children terminate after shim SIGHUP, but explicit orphan/indeterminate states
+   remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3.
 7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and
    corrupt early bytes (demonstrated). Design §15.3 fixes the observation: `TIOCGETA` on the retained PTY master at
    `t=0`, every 50ms, and the inclusive 5s boundary; ready means one snapshot has both `ICANON` and `ECHO` clear while

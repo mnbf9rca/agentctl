@@ -16,6 +16,10 @@ import (
 // state that did not come from a successful terminal observation.
 var ErrTerminalStateUnobserved = errors.New("terminal state was not observed")
 
+// ErrTerminalWindowSizeUnobserved refuses treating the zero WindowSize in a
+// readiness-only terminal observation as kernel-observed size evidence.
+var ErrTerminalWindowSizeUnobserved = errors.New("terminal window size was not observed")
+
 // ErrReadinessInterruptedDeadline reports that no final flag snapshot was
 // observed because TIOCGETA remained interrupted through the inclusive bound.
 var ErrReadinessInterruptedDeadline = errors.New("TIOCGETA remained interrupted through the 5s readiness deadline")
@@ -58,9 +62,10 @@ func (e *ReadinessObservationError) Unwrap() error { return e.Cause }
 
 // TerminalState is one ioctl-only observation of terminal flags and size.
 type TerminalState struct {
-	observed bool
-	termios  syscall.Termios
-	size     WindowSize
+	termiosObserved bool
+	sizeObserved    bool
+	termios         syscall.Termios
+	size            WindowSize
 }
 
 // Canonical reports whether ICANON was observed.
@@ -76,12 +81,15 @@ func (s TerminalState) Echo() bool {
 // Settled reports the approved clean-channel observation: both canonical mode
 // and echo have been disabled by the child.
 func (s TerminalState) Settled() bool {
-	return s.observed && !s.Canonical() && !s.Echo()
+	return s.termiosObserved && !s.Canonical() && !s.Echo()
 }
 
 // WindowSize returns the size from the same terminal observation.
-func (s TerminalState) WindowSize() WindowSize {
-	return s.size
+func (s TerminalState) WindowSize() (WindowSize, error) {
+	if !s.sizeObserved {
+		return WindowSize{}, ErrTerminalWindowSizeUnobserved
+	}
+	return s.size, nil
 }
 
 type terminalSystem interface {
@@ -139,7 +147,8 @@ func (t darwinTerminal) Observe(file *os.File) (TerminalState, error) {
 	if err := t.ioctl(file, syscall.TIOCGWINSZ, unsafe.Pointer(&state.size)); err != nil {
 		return TerminalState{}, fmt.Errorf("observe terminal window size: %w", err)
 	}
-	state.observed = true
+	state.termiosObserved = true
+	state.sizeObserved = true
 	return state, nil
 }
 
@@ -184,7 +193,7 @@ func (t darwinTerminal) observeReadiness(ctx context.Context, file *os.File, clo
 		var termios syscall.Termios
 		err := t.ioctl(file, syscall.TIOCGETA, unsafe.Pointer(&termios))
 		if err == nil {
-			return TerminalState{observed: true, termios: termios}, nil
+			return TerminalState{termiosObserved: true, termios: termios}, nil
 		}
 		if !errors.Is(err, syscall.EINTR) {
 			return TerminalState{}, &ReadinessObservationError{
@@ -222,7 +231,7 @@ func (t darwinTerminal) ForwardTermios(source, destination *os.File) error {
 	if err := t.ioctl(source, syscall.TIOCGETA, unsafe.Pointer(&termios)); err != nil {
 		return fmt.Errorf("read source terminal mode: %w", err)
 	}
-	return t.SetTermios(destination, TerminalState{observed: true, termios: termios})
+	return t.SetTermios(destination, TerminalState{termiosObserved: true, termios: termios})
 }
 
 // SetTermios applies a previously observed terminal mode. This supports exact
@@ -231,7 +240,7 @@ func (t darwinTerminal) SetTermios(file *os.File, state TerminalState) error {
 	if file == nil {
 		return errors.New("set terminal mode: nil file")
 	}
-	if !state.observed {
+	if !state.termiosObserved {
 		return ErrTerminalStateUnobserved
 	}
 	termios := state.termios

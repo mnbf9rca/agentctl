@@ -273,6 +273,24 @@ func syncRecordDirectory(directory *os.Root) error {
 	return errors.Join(syncErr, closeErr)
 }
 
+// RemoveRecord removes one descriptor-anchored durable role record and
+// synchronizes the containing directory. A missing record remains an observed
+// error so callers cannot claim cleanup they did not perform.
+func RemoveRecord(path *RolePath) error {
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.stateRoles == nil {
+		return errors.New("role path is closed")
+	}
+	if err := verifyRetainedRoot("state-roles", filepath.Dir(path.Record), path.stateRoles); err != nil {
+		return err
+	}
+	if err := path.stateRoles.Remove(path.Role + ".json"); err != nil {
+		return err
+	}
+	return syncRecordDirectory(path.stateRoles)
+}
+
 // ReadRecord reads and validates one descriptor-anchored durable role record.
 func ReadRecord(path *RolePath) (Record, error) {
 	path.mu.Lock()
