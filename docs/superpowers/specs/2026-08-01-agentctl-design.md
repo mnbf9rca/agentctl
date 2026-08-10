@@ -2094,9 +2094,15 @@ tmux presentation/create/attach/kill argv through `internal/tmuxx.Runner`; one a
 `ps -eo pid=,ppid=` through that Runner; PTY child start through a narrow interface receiving only harness/AMQ argv;
 and Darwin syscalls for `flock`, `LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` tokens.
 
-`golang.org/x/sys/unix` is approved only for PR 2's lock/socket/process syscalls. It is compiled into the binary,
-reviewed/pinned, scanned by existing gates, and licensed in archives when the first importer lands. PR 1 adds no
-dependency, module, license, or archive change before that importer. PR 3's PTY lane is standard-library-only.
+`golang.org/x/sys/unix` is approved only for PR 2's lock/socket/process syscalls. Dependency admission is staged
+(reviewer-recommended and planner-approved during PR 2 review). **Stage 1, PR 2:** the module is required and
+tidy-stable, its source is exercised by `internal/shim` tests, govulncheck and Dependabot cover it, and its upstream
+license ships in every release archive. Because no production path imports `internal/shim` yet, the release binary
+does not link `x/sys`; PR 2 records that fact with `go version -m` and must not claim binary linkage. **Stage 2:** the
+first PR whose production path imports `internal/shim` begins binary linkage and must provide `go version -m`
+evidence showing `golang.org/x/sys` in the release binary. That evidence is a mandatory rider on the first production
+importer and cannot be deferred or dropped. PR 1 adds no dependency, module, license, or archive change. PR 3's PTY
+lane is standard-library-only.
 
 ### 15.10 Evidence, tests, and numbered security trace
 
