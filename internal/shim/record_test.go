@@ -199,6 +199,23 @@ func TestRecordRejectsMalformedAndInconsistentDurableData(t *testing.T) {
 	}
 }
 
+func TestRecordRejectsDuplicateIdentityFields(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	tests := []string{
+		`{"version":1,"state":"child-starting","state":"child-starting","session":"session","role":"role","shim_pid":100,"nonce":"nonce"}`,
+		`{"version":1,"state":"child-starting","session":"session","role":"role","shim_pid":100,"shim_pid":101,"nonce":"nonce","nonce":"other"}`,
+		`{"version":1,"state":"child-recorded","session":"session","role":"role","shim_pid":100,"nonce":"nonce","child_pid":101,"child_pid":102,"child_start_token":{"sec":1,"sec":2,"usec":3}}`,
+	}
+	for _, payload := range tests {
+		if err := os.WriteFile(rolePath.Record, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadRecord(rolePath); err == nil {
+			t.Fatalf("ReadRecord accepted duplicate identity fields: %s", payload)
+		}
+	}
+}
+
 func TestStartTokenUsesRawTimevalEquality(t *testing.T) {
 	first := StartToken{Sec: 1, Usec: 999999}
 	if !first.Equal(StartToken{Sec: 1, Usec: 999999}) {

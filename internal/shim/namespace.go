@@ -105,10 +105,15 @@ func OpenNamespace() (*Namespace, error) {
 
 	configRoot := ""
 	if !stateSet {
-		if err := validateRootInput("home", os.Getenv("HOME")); err != nil {
+		home := os.Getenv("HOME")
+		if err := validateRootInput("home", home); err != nil {
 			return nil, err
 		}
-		var err error
+		homeRoot, err := openVerifiedPrivateRoot("home", home)
+		if err != nil {
+			return nil, err
+		}
+		_ = homeRoot.Close()
 		configRoot, err = os.UserConfigDir()
 		if err != nil {
 			return nil, &InvalidRootError{Kind: "user-config", Reason: err.Error()}
@@ -160,6 +165,17 @@ func validateRootInput(kind, path string) error {
 }
 
 func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride bool, userConfigRoot string) (*Namespace, error) {
+	if !stateOverride {
+		if err := validateRootInput("user-config", userConfigRoot); err != nil {
+			return nil, err
+		}
+		configRoot, err := openVerifiedPrivateRoot("user-config", userConfigRoot)
+		if err != nil {
+			return nil, err
+		}
+		_ = configRoot.Close()
+	}
+
 	var runtime *os.Root
 	var err error
 	if runtimeOverride {
@@ -175,17 +191,19 @@ func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride 
 	if stateOverride {
 		state, err = ensureExactPrivateRoot("state", roots.State)
 	} else {
-		if err := validateRootInput("user-config", userConfigRoot); err != nil {
-			_ = runtime.Close()
-			return nil, err
-		}
 		state, err = ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
 	}
 	if err != nil {
 		_ = runtime.Close()
 		return nil, err
 	}
-	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
+	resolvedStateRoot, err := resolvedRetainedRoot("state", roots.State, state)
+	if err != nil {
+		_ = state.Close()
+		_ = runtime.Close()
+		return nil, err
+	}
+	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: resolvedStateRoot, runtime: runtime, state: state}, nil
 }
 
 func openNamespaceRoots(roots namespaceRoots) (*Namespace, error) {
@@ -212,6 +230,11 @@ func openProductionNamespaceAt(runtimeBase string, uid int, userConfigRoot strin
 	if err := validateRootInput("state", roots.State); err != nil {
 		return nil, err
 	}
+	configRoot, err := openVerifiedPrivateRoot("user-config", userConfigRoot)
+	if err != nil {
+		return nil, err
+	}
+	_ = configRoot.Close()
 	runtime, err := ensurePrivateTree("runtime", runtimeBase, "agentctl-"+strconv.Itoa(uid), "v1")
 	if err != nil {
 		return nil, err
@@ -221,7 +244,13 @@ func openProductionNamespaceAt(runtimeBase string, uid int, userConfigRoot strin
 		_ = runtime.Close()
 		return nil, err
 	}
-	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
+	resolvedStateRoot, err := resolvedRetainedRoot("state", roots.State, state)
+	if err != nil {
+		_ = state.Close()
+		_ = runtime.Close()
+		return nil, err
+	}
+	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: resolvedStateRoot, runtime: runtime, state: state}, nil
 }
 
 func ensureExactPrivateRoot(kind, path string) (*os.Root, error) {
@@ -252,6 +281,16 @@ func ensurePrivateTree(kind, base string, components ...string) (*os.Root, error
 }
 
 func ensurePrivateChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, error) {
+	return ensurePrivateChildWithSync(kind, fullPath, parent, name, syncDirectoryRoot)
+}
+
+func ensurePrivateChildWithSync(
+	kind string,
+	fullPath string,
+	parent *os.Root,
+	name string,
+	syncParent func(*os.Root) error,
+) (*os.Root, error) {
 	if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
 	}
@@ -275,6 +314,10 @@ func ensurePrivateChild(kind, fullPath string, parent *os.Root, name string) (*o
 		_ = root.Close()
 		return nil, &RootSubstitutedError{Kind: kind, Path: fullPath}
 	}
+	if err := syncParent(parent); err != nil {
+		_ = root.Close()
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: fmt.Sprintf("sync parent directory: %v", err)}
+	}
 	return root, nil
 }
 
@@ -283,6 +326,54 @@ func openNoSymlinkDirectory(path string) (*os.Root, error) {
 		return nil, fmt.Errorf("path is not absolute")
 	}
 	return os.OpenRoot(path)
+}
+
+func openVerifiedPrivateRoot(kind, path string) (*os.Root, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: "must not be a symbolic link"}
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	if err := verifyPrivateDirectory(kind, path, root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	descriptorInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(pathInfo, descriptorInfo) {
+		_ = root.Close()
+		return nil, &RootSubstitutedError{Kind: kind, Path: path}
+	}
+	return root, nil
+}
+
+func resolvedRetainedRoot(kind, path string, root *os.Root) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	if err := validateRootInput(kind, resolved); err != nil {
+		return "", err
+	}
+	if err := verifyRetainedRoot(kind, resolved, root); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func syncDirectoryRoot(root *os.Root) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func verifyPrivateDirectory(kind, path string, root *os.Root) error {

@@ -103,7 +103,7 @@ func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T
 	}
 	t.Cleanup(func() { _ = claim.Close() })
 
-	got, err := ReadAdvisory(rolePath.Lock)
+	got, err := ReadAdvisory(rolePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +127,44 @@ func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T
 	}
 	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
 		t.Fatalf("lock mode = %04o, want %04o", got, want)
+	}
+}
+
+func TestClaimReadAdvisoryRefusesRuntimeDescriptorSubstitution(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = claim.Close() }()
+
+	runtimeSession := filepath.Dir(rolePath.Lock)
+	original := runtimeSession + "-original"
+	if err := os.Rename(runtimeSession, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeSession, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := `{"version":1,"shim_pid":999,"nonce":"replacement","state_root":"` + rolePath.StateRoot + `"}`
+	if err := os.WriteFile(rolePath.Lock, []byte(fake), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ReadAdvisory(rolePath)
+	var substituted *RootSubstitutedError
+	if !errors.As(err, &substituted) {
+		t.Fatalf("ReadAdvisory error = %T %v, want *RootSubstitutedError", err, err)
+	}
+}
+
+func TestClaimReadAdvisoryRejectsDuplicateIdentityFields(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	payload := `{"version":1,"shim_pid":101,"shim_pid":102,"nonce":"first","nonce":"second","state_root":"` + rolePath.StateRoot + `","state_root":"` + rolePath.StateRoot + `"}`
+	if err := os.WriteFile(rolePath.Lock, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAdvisory(rolePath); err == nil {
+		t.Fatal("ReadAdvisory accepted duplicate identity fields")
 	}
 }
 

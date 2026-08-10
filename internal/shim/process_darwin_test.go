@@ -63,6 +63,28 @@ func TestProcessObservationUsesESRCHAsTheSoleAbsencePermission(t *testing.T) {
 	}
 }
 
+func TestProcessObservationRejectsNonPositivePIDBeforeKill(t *testing.T) {
+	for _, pid := range []int{0, -1} {
+		killCalls := 0
+		result := observeProcess(pid, StartToken{Sec: 1}, func(int, syscall.Signal) error {
+			killCalls++
+			return unix.ESRCH
+		}, func(int) (StartToken, error) {
+			t.Fatal("token reader called for invalid PID")
+			return StartToken{}, nil
+		})
+		if result.Observation != ProcessCouldNotObserve || result.Err == nil {
+			t.Fatalf("observeProcess(%d) = %#v, want could-not-observe with cause", pid, result)
+		}
+		if result.MayReportAbsent() || result.MayAuthorizeRelaunch() {
+			t.Fatalf("observeProcess(%d) authorized absence: %#v", pid, result)
+		}
+		if killCalls != 0 {
+			t.Fatalf("observeProcess(%d) called kill %d times", pid, killCalls)
+		}
+	}
+}
+
 // TestReadStartTokenObservesRawDarwinKinfoProc is a live kernel probe for
 // sysctl(KERN_PROC_PID)'s unformatted p_starttime timeval.
 func TestReadStartTokenObservesRawDarwinKinfoProc(t *testing.T) {

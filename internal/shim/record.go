@@ -281,6 +281,28 @@ func ReadRecord(path *RolePath) (Record, error) {
 	if len(payload) > recordMaxBytes {
 		return Record{}, fmt.Errorf("durable record exceeds %d bytes", recordMaxBytes)
 	}
+	fields, err := decodeJSONObject(payload)
+	if err != nil {
+		return Record{}, err
+	}
+	allowed := map[string]bool{
+		"version": true, "state": true, "session": true, "role": true,
+		"shim_pid": true, "nonce": true, "child_pid": true, "child_start_token": true,
+	}
+	if err := requireFields(fields, allowed, []string{"version", "state", "session", "role", "shim_pid", "nonce"}); err != nil {
+		return Record{}, err
+	}
+	if err := requireJSONTypes(fields, map[string]string{
+		"version": "integer", "state": "string", "session": "string", "role": "string",
+		"shim_pid": "integer", "nonce": "string", "child_pid": "integer", "child_start_token": "object",
+	}); err != nil {
+		return Record{}, err
+	}
+	if len(fields["child_start_token"]) == 1 {
+		if err := validateStartTokenJSON(fields["child_start_token"][0]); err != nil {
+			return Record{}, err
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var record Record

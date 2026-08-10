@@ -68,7 +68,11 @@ func TestNamespaceAcceptsExactRootCapAndUsesHOMEThroughUserConfigDir(t *testing.
 		t.Fatal(err)
 	}
 	defer func() { _ = namespace.Close() }()
-	if got, want := namespace.StateRoot, filepath.Join(configRoot, "agentctl", "state-v1"); got != want {
+	wantStateRoot, err := filepath.EvalSymlinks(filepath.Join(configRoot, "agentctl", "state-v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := namespace.StateRoot, wantStateRoot; got != want {
 		t.Fatalf("HOME-derived StateRoot = %q, want %q", got, want)
 	}
 }
@@ -92,6 +96,156 @@ func TestNamespaceValidatesHOMEAsItsOwnDeclaredSurface(t *testing.T) {
 	var invalid *InvalidRootError
 	if !errors.As(err, &invalid) || invalid.Kind != "home" {
 		t.Fatalf("error = %T %#v, want home *InvalidRootError", err, err)
+	}
+}
+
+func TestNamespaceDescriptorVerifiesHOMEAndUserConfigRoots(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		prepare  func(*testing.T, string) string
+		wantKind string
+	}{
+		{
+			name: "symlink HOME",
+			prepare: func(t *testing.T, parent string) string {
+				target := filepath.Join(parent, "home-target")
+				if err := os.MkdirAll(filepath.Join(target, "Library", "Application Support"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(parent, "home")
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+				return link
+			},
+			wantKind: "home",
+		},
+		{
+			name: "wrong-mode HOME",
+			prepare: func(t *testing.T, parent string) string {
+				home := filepath.Join(parent, "home")
+				if err := os.MkdirAll(filepath.Join(home, "Library", "Application Support"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(home, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return home
+			},
+			wantKind: "home",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := shortTempDir(t)
+			home := tt.prepare(t, parent)
+			t.Setenv("HOME", home)
+			t.Setenv(runtimeRootEnvironment, filepath.Join(parent, "runtime"))
+			stateValue, stateWasSet := os.LookupEnv(stateRootEnvironment)
+			if err := os.Unsetenv(stateRootEnvironment); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if stateWasSet {
+					_ = os.Setenv(stateRootEnvironment, stateValue)
+				} else {
+					_ = os.Unsetenv(stateRootEnvironment)
+				}
+			})
+			_, err := OpenNamespace()
+			var invalid *InvalidRootError
+			if !errors.As(err, &invalid) || invalid.Kind != tt.wantKind {
+				t.Fatalf("OpenNamespace error = %T %v, want %s *InvalidRootError", err, err, tt.wantKind)
+			}
+		})
+	}
+
+	t.Run("wrong-mode user config", func(t *testing.T) {
+		parent := shortTempDir(t)
+		configRoot := filepath.Join(parent, "config")
+		if err := os.Mkdir(configRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openProductionNamespaceAt(parent, 501, configRoot)
+		var invalid *InvalidRootError
+		if !errors.As(err, &invalid) || invalid.Kind != "user-config" {
+			t.Fatalf("openProductionNamespaceAt error = %T %v, want user-config *InvalidRootError", err, err)
+		}
+	})
+
+	t.Run("symlink user config", func(t *testing.T) {
+		parent := shortTempDir(t)
+		target := filepath.Join(parent, "config-target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		configRoot := filepath.Join(parent, "config")
+		if err := os.Symlink(target, configRoot); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openProductionNamespaceAt(parent, 501, configRoot)
+		var invalid *InvalidRootError
+		if !errors.As(err, &invalid) || invalid.Kind != "user-config" {
+			t.Fatalf("openProductionNamespaceAt error = %T %v, want user-config *InvalidRootError", err, err)
+		}
+	})
+}
+
+func TestNamespacePublishesFullyResolvedStateRoot(t *testing.T) {
+	parent := shortTempDir(t)
+	realParent := filepath.Join(parent, "real")
+	configRoot := filepath.Join(realParent, "config")
+	if err := os.MkdirAll(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(realParent, alias); err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := openProductionNamespaceAt(parent, 501, filepath.Join(alias, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = namespace.Close() }()
+	want, err := filepath.EvalSymlinks(filepath.Join(configRoot, "agentctl", "state-v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if namespace.StateRoot != want {
+		t.Fatalf("StateRoot = %q, want fully resolved %q", namespace.StateRoot, want)
+	}
+}
+
+func TestNamespaceSyncsEachNewDirectoryEntryToItsParent(t *testing.T) {
+	parentPath := shortTempDir(t)
+	parent, err := os.OpenRoot(parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parent.Close() }()
+	syncCalls := 0
+	syncParent := func(got *os.Root) error {
+		syncCalls++
+		if got != parent {
+			t.Fatalf("synced root = %p, want parent %p", got, parent)
+		}
+		return nil
+	}
+	childPath := filepath.Join(parentPath, "child")
+	child, err := ensurePrivateChildWithSync("state", childPath, parent, "child", syncParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Close()
+	if syncCalls != 1 {
+		t.Fatalf("sync calls after creation = %d, want 1", syncCalls)
+	}
+	child, err = ensurePrivateChildWithSync("state", childPath, parent, "child", syncParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Close()
+	if syncCalls != 2 {
+		t.Fatalf("sync calls after reopening existing child = %d, want 2", syncCalls)
 	}
 }
 
@@ -189,11 +343,15 @@ func TestNamespaceRefusesSymlinkAndWrongModeRoots(t *testing.T) {
 
 func TestNamespaceRefusesPredictableRuntimePrecreation(t *testing.T) {
 	parent := t.TempDir()
+	configRoot := filepath.Join(parent, "config")
+	if err := os.Mkdir(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	uidRoot := filepath.Join(parent, "agentctl-501")
 	if err := os.Mkdir(uidRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := openProductionNamespaceAt(parent, 501, filepath.Join(parent, "config"))
+	_, err := openProductionNamespaceAt(parent, 501, configRoot)
 	var invalid *InvalidRootError
 	if !errors.As(err, &invalid) {
 		t.Fatalf("error = %T %v, want *InvalidRootError", err, err)

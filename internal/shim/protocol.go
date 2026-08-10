@@ -305,6 +305,43 @@ func validateResponse(response Response) error {
 			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q must be a raw timeval", name)}
 		}
 	}
+	switch response.Outcome {
+	case OutcomeDeliverySubmitted:
+		if *response.BytesWritten == 0 {
+			return &ProtocolSchemaError{Reason: `field "bytes_written" must be positive for outcome "delivery-submitted"`}
+		}
+		if !*response.SubmitObserved {
+			return &ProtocolSchemaError{Reason: `field "submit_observed" must be true for outcome "delivery-submitted"`}
+		}
+	case OutcomeDeliveryCancelledWithResidue:
+		if *response.BytesWritten == 0 {
+			return &ProtocolSchemaError{Reason: `field "bytes_written" must be positive for outcome "delivery-cancelled-with-residue"`}
+		}
+	case OutcomeStarting:
+		if *response.State != string(RecordStateChildStarting) && *response.State != string(RecordStateChildRecorded) {
+			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+		}
+	case OutcomeIndeterminateChildStarting:
+		if *response.State != string(RecordStateChildStarting) {
+			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+		}
+	case OutcomeRunning:
+		if *response.State != string(OutcomeRunning) {
+			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+		}
+	case OutcomeStateRootDisagreement:
+		if *response.LocalRoot == *response.RecordedRoot {
+			return &ProtocolSchemaError{Reason: "state-root-disagreement requires different local_root and recorded_root values"}
+		}
+	case OutcomeOrphan:
+		if !response.RecordedToken.Equal(*response.ObservedToken) {
+			return &ProtocolSchemaError{Reason: "orphan requires equal recorded_token and observed_token values"}
+		}
+	case OutcomePresentTokenDisagreement:
+		if response.RecordedToken.Equal(*response.ObservedToken) {
+			return &ProtocolSchemaError{Reason: "present-token-disagreement requires different recorded_token and observed_token values"}
+		}
+	}
 	return nil
 }
 

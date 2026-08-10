@@ -187,21 +187,31 @@ func removeStaleSocket(path *RolePath) error {
 	return nil
 }
 
-// ReadAdvisory reads one bounded, strict advisory lockfile body. The result is
-// metadata only and never establishes ownership.
-func ReadAdvisory(path string) (Advisory, error) {
-	file, err := os.Open(path)
+// ReadAdvisory reads one bounded, strict advisory lockfile body through the
+// retained runtime-session descriptor. The result is metadata only and never
+// establishes ownership.
+func ReadAdvisory(path *RolePath) (Advisory, error) {
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.runtimeSession == nil {
+		return Advisory{}, errors.New("role path is closed")
+	}
+	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
+		return Advisory{}, err
+	}
+	name := path.Role + ".lock"
+	file, err := path.runtimeSession.Open(name)
 	if err != nil {
 		return Advisory{}, err
 	}
 	defer func() { _ = file.Close() }()
-	if err := verifyPrivateArtifact(file, path, "lockfile"); err != nil {
+	if err := verifyPrivateArtifact(file, path.Lock, "lockfile"); err != nil {
 		return Advisory{}, err
 	}
-	pathInfo, err := os.Lstat(path)
+	pathInfo, err := path.runtimeSession.Lstat(name)
 	fileInfo, statErr := file.Stat()
 	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
-		return Advisory{}, fmt.Errorf("lockfile %q was substituted", path)
+		return Advisory{}, fmt.Errorf("lockfile %q was substituted", path.Lock)
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, advisoryMaxBytes+1))
 	if err != nil {
@@ -209,6 +219,19 @@ func ReadAdvisory(path string) (Advisory, error) {
 	}
 	if len(payload) > advisoryMaxBytes {
 		return Advisory{}, errors.New("advisory lockfile exceeds 4096 bytes")
+	}
+	fields, err := decodeJSONObject(payload)
+	if err != nil {
+		return Advisory{}, err
+	}
+	allowed := map[string]bool{"version": true, "shim_pid": true, "nonce": true, "state_root": true}
+	if err := requireFields(fields, allowed, []string{"version", "shim_pid", "nonce", "state_root"}); err != nil {
+		return Advisory{}, err
+	}
+	if err := requireJSONTypes(fields, map[string]string{
+		"version": "integer", "shim_pid": "integer", "nonce": "string", "state_root": "string",
+	}); err != nil {
+		return Advisory{}, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()

@@ -14,6 +14,9 @@ import (
 // complete Darwin kinfo_proc structure.
 var ErrShortKinfoProc = errors.New("sysctl returned a short kinfo_proc")
 
+// ErrInvalidProcessPID refuses process-group and special kill semantics.
+var ErrInvalidProcessPID = errors.New("process PID must be positive")
+
 // ProcessObservation is the closed factual result of the presence/token gate.
 type ProcessObservation string
 
@@ -51,6 +54,9 @@ func observeProcess(
 	killZero func(int, syscall.Signal) error,
 	readToken func(int) (StartToken, error),
 ) ProcessResult {
+	if pid <= 0 {
+		return ProcessResult{Observation: ProcessCouldNotObserve, Err: ErrInvalidProcessPID}
+	}
 	err := killZero(pid, 0)
 	switch {
 	case errors.Is(err, unix.ESRCH):

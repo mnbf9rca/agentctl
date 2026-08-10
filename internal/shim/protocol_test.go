@@ -187,6 +187,40 @@ func TestProtocolResponseRejectsMalformedObjectiveNumbers(t *testing.T) {
 	}
 }
 
+func TestProtocolResponseRejectsFactuallyImpossibleValues(t *testing.T) {
+	token := StartToken{Sec: 1, Usec: 2}
+	otherToken := StartToken{Sec: 1, Usec: 3}
+	tests := []Response{
+		{Version: 1, Outcome: OutcomeDeliverySubmitted, BytesWritten: uint64Pointer(1), SubmitObserved: boolPointer(false)},
+		{Version: 1, Outcome: OutcomeDeliverySubmitted, BytesWritten: uint64Pointer(0), SubmitObserved: boolPointer(true)},
+		{Version: 1, Outcome: OutcomeDeliveryCancelledWithResidue, BytesWritten: uint64Pointer(0)},
+		{Version: 1, Outcome: OutcomeRunning, State: stringPointer("child-starting"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeStarting, State: stringPointer("arbitrary"), ShimPID: intPointer(10)},
+		{Version: 1, Outcome: OutcomeIndeterminateChildStarting, State: stringPointer("child-recorded"), ShimPID: intPointer(10), RecordPath: stringPointer("/record")},
+		{Version: 1, Outcome: OutcomeStateRootDisagreement, LocalRoot: stringPointer("/same"), RecordedRoot: stringPointer("/same")},
+		{Version: 1, Outcome: OutcomeOrphan, ShimPID: intPointer(10), ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &otherToken},
+		{Version: 1, Outcome: OutcomePresentTokenDisagreement, ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &token},
+	}
+	for _, response := range tests {
+		if _, err := EncodeResponse(response); err == nil {
+			t.Fatalf("EncodeResponse accepted impossible %#v", response)
+		}
+	}
+}
+
+func TestProtocolResponseAcceptsClosedStateValues(t *testing.T) {
+	for _, response := range []Response{
+		{Version: 1, Outcome: OutcomeStarting, State: stringPointer("child-starting"), ShimPID: intPointer(10)},
+		{Version: 1, Outcome: OutcomeStarting, State: stringPointer("child-recorded"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeIndeterminateChildStarting, State: stringPointer("child-starting"), ShimPID: intPointer(10), RecordPath: stringPointer("/record")},
+		{Version: 1, Outcome: OutcomeRunning, State: stringPointer("running"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+	} {
+		if _, err := EncodeResponse(response); err != nil {
+			t.Fatalf("EncodeResponse rejected valid state response %#v: %v", response, err)
+		}
+	}
+}
+
 func TestProtocolResponseRequiresEveryOutcomeFact(t *testing.T) {
 	tests := []string{
 		`{"version":1,"outcome":"delivery-cancelled-with-residue"}`,
@@ -320,3 +354,5 @@ func (c *deadlineFailureConn) SetWriteDeadline(time.Time) error { return c.write
 
 func uint64Pointer(value uint64) *uint64 { return &value }
 func boolPointer(value bool) *bool       { return &value }
+func intPointer(value int) *int          { return &value }
+func stringPointer(value string) *string { return &value }
