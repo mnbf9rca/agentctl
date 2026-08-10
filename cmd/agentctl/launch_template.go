@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
@@ -55,18 +54,9 @@ func decodeLaunchTemplate(path *string) (*launchtemplate.Document, error) {
 }
 
 func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions) (launchConfiguration, error) {
-	if document.Directory != nil {
-		if err := config.ValidateTemplateDirectory(*document.Directory); err != nil {
-			return launchConfiguration{}, wrapTemplateDirectoryError(document.Path, *document.Directory, err)
-		}
-	}
-
 	roles := make([]mergedTemplateRole, 0, len(document.Roles))
 	roleIndexes := make(map[string]int, len(document.Roles))
 	for index, role := range document.Roles {
-		if err := config.ValidateRoleName(role.Name); err != nil {
-			return launchConfiguration{}, wrapTemplateValidation(document.Path, fmt.Sprintf("roles[%d].role", index), err)
-		}
 		roles = append(roles, mergedTemplateRole{
 			name:          role.Name,
 			harness:       role.Harness,
@@ -190,17 +180,6 @@ func wrapTemplateValidation(path, location string, err error) error {
 		return &launchtemplate.Error{Path: path, Location: location, Reason: err.Error(), Cause: err}
 	}
 	return &launchtemplate.Error{Path: path, Location: location, Reason: validation.FormatReason(validation.TemplateSubject), Cause: err}
-}
-
-func wrapTemplateDirectoryError(path, value string, err error) error {
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) {
-		return &launchtemplate.Error{Path: path, Location: "dir", Reason: err.Error(), Cause: err}
-	}
-	reason := strings.TrimPrefix(validation.Reason, "template path ")
-	return &launchtemplate.Error{
-		Path: path, Location: "dir", Reason: fmt.Sprintf("path %q %s", value, reason), Cause: err,
-	}
 }
 
 func writeLaunchTemplateProvenance(stdout io.Writer, session string, configuration launchConfiguration, directory string) {

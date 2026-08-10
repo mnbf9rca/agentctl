@@ -7,10 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
 
 type stubFile struct {
@@ -335,6 +339,35 @@ func TestDecoderSelectsMixedSchemaFailuresInLegacyOrder(t *testing.T) {
 	}
 }
 
+func TestSchemaFailureIndexIndexesEachLeafOnceByInstanceLocation(t *testing.T) {
+	t.Parallel()
+
+	const failureCount = 20_000
+	leaves := make([]*jsonschema.ValidationError, failureCount)
+	for index := range leaves {
+		leaves[index] = &jsonschema.ValidationError{
+			InstanceLocation: []string{"roles", strconv.Itoa(index), "role"},
+			ErrorKind:        &kind.Pattern{Got: "Planner", Want: `^[a-z0-9][a-z0-9_-]*$`},
+		}
+	}
+	indexed := indexSchemaFailures(&jsonschema.ValidationError{Causes: leaves})
+
+	if got := len(indexed); got != failureCount {
+		t.Fatalf("indexed locations = %d, want %d", got, failureCount)
+	}
+	indexedFailures := 0
+	for _, failures := range indexed {
+		indexedFailures += len(failures)
+	}
+	if indexedFailures != failureCount {
+		t.Fatalf("indexed failures = %d, want each of %d leaves exactly once", indexedFailures, failureCount)
+	}
+	last := indexed.at([]string{"roles", strconv.Itoa(failureCount - 1), "role"})
+	if len(last) != 1 || last[0] != leaves[failureCount-1] {
+		t.Fatalf("last location bucket = %#v, want only leaf %p", last, leaves[failureCount-1])
+	}
+}
+
 func TestDecoderPreservesStrictnessPrecedenceAroundSchemaValidation(t *testing.T) {
 	t.Parallel()
 
@@ -359,9 +392,9 @@ func TestDecoderPreservesStrictnessPrecedenceAroundSchemaValidation(t *testing.T
 			want:     `template /fleet.json: dir: must be a string`,
 		},
 		{
-			name:     "schema keyword before generic unknown",
+			name:     "root unknown before schema refusal",
 			contents: `{"version":1,"$schema":"ignored","efort":"low"}`,
-			want:     `template /fleet.json: "$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`,
+			want:     `template /fleet.json: unknown field "efort"`,
 		},
 		{
 			name:     "duplicate role before later optional field",

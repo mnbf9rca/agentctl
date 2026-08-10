@@ -3,7 +3,6 @@ package config
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -147,21 +146,6 @@ func ParseHarness(name string) (Harness, error) {
 		EntryIndex:      -1,
 		Reason:          "must be claude or codex",
 		TemplateSubject: "value",
-	}
-}
-
-// ValidateTemplateDirectory requires a template-sourced directory to carry
-// its own absolute meaning. Directory existence remains a point-of-use check
-// in internal/fleet.
-func ValidateTemplateDirectory(path string) error {
-	if filepath.IsAbs(path) {
-		return nil
-	}
-	return &ValidationError{
-		Option:     "dir",
-		Value:      path,
-		EntryIndex: -1,
-		Reason:     "template path must be absolute; omit dir and supply --dir at invocation",
 	}
 }
 

@@ -39,6 +39,12 @@ fetched or selected from template input at runtime. Template schemas remain an
 embedded, release-reviewed asset, so a template cannot choose code, a schema
 location, or a validator.
 
+Release archives reproduce the upstream license for
+`github.com/santhosh-tekuri/jsonschema/v6` and the upstream license and patent
+grant for `golang.org/x/text`, under paths that name each module unambiguously.
+CI inspects every snapshot archive and refuses one missing any of those
+materials.
+
 ## Known risks and accepted residuals
 
 1. **Keystroke delivery is not transactional, and degrades under host saturation.** This absorbs what were previously two separate residuals: delivery reliability and popup selection are not independent, and mitigating either alone does not cover the case where they compose.

@@ -111,6 +111,8 @@ jobs:
         run: goreleaser check
       - name: Snapshot release build
         run: goreleaser release --snapshot --clean --skip=notarize
+      - name: Verify snapshot license materials
+        run: ./hack/verify-release-archives.sh dist/*.tar.gz
       - name: Smoke-test snapshot binary
         run: |
           out="$(./dist/agentctl_darwin_arm64*/agentctl version)"

@@ -1,6 +1,6 @@
-// Package launchtemplate reads the structural values in a launch template.
-// It deliberately does not validate fleet values; internal/config owns those
-// rules after template and flag values have been merged.
+// Package launchtemplate validates a launch template's file-local structure.
+// Effective fleet value rules are applied after template and flag values have
+// been merged.
 package launchtemplate
 
 import (
@@ -387,18 +387,15 @@ func decodeFirstJSONValue(contents []byte) (any, error) {
 
 func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 	err := fleetTemplateSchema.Validate(instance)
-	var leaves []*jsonschema.ValidationError
+	var failures schemaFailureIndex
 	if err != nil {
 		var validation *jsonschema.ValidationError
 		if !errors.As(err, &validation) {
 			return templateError(path, "", "does not match the embedded template schema", err)
 		}
-		leaves = schemaFailures(validation)
+		failures = indexSchemaFailures(validation)
 	}
-	rootUnknown := firstAdditionalProperty(leaves, tokens.objectFields[""], nil)
-	if tokens.schema && rootUnknown != "" {
-		return schemaKeywordError(path)
-	}
+	rootUnknown := firstAdditionalProperty(failures, tokens.objectFields[""], nil)
 	if rootUnknown != "" {
 		return templateError(path, "", fmt.Sprintf("unknown field %q", rootUnknown), err)
 	}
@@ -412,7 +409,7 @@ func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 		return sessionFieldError(path)
 	}
 
-	if failure := decoderSchemaFailureAt(leaves, []string{"dir"}); failure != nil {
+	if failure := decoderSchemaFailureAt(failures, []string{"dir"}); failure != nil {
 		return translateSchemaFailure(path, failure, err)
 	}
 
@@ -422,7 +419,7 @@ func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 		var array bool
 		roles, array = rawRoles.([]any)
 		if !array {
-			if failure := decoderSchemaFailureAt(leaves, []string{"roles"}); failure != nil {
+			if failure := decoderSchemaFailureAt(failures, []string{"roles"}); failure != nil {
 				return translateSchemaFailure(path, failure, err)
 			}
 			return templateError(path, "", "does not match the embedded template schema", err)
@@ -432,18 +429,18 @@ func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 	seen := make(map[string]struct{}, len(roles))
 	for index, role := range roles {
 		parts := []string{"roles", strconv.Itoa(index)}
-		if failure := roleItemTypeSchemaFailureAt(leaves, parts); failure != nil {
+		if failure := roleItemTypeSchemaFailureAt(failures, parts); failure != nil {
 			return translateSchemaFailure(path, failure, err)
 		}
 
 		location := schemaLocation(parts)
-		if name := firstAdditionalProperty(leaves, tokens.objectFields[location], parts); name != "" {
+		if name := firstAdditionalProperty(failures, tokens.objectFields[location], parts); name != "" {
 			return templateError(path, location, fmt.Sprintf("unknown field %q", name), err)
 		}
-		if failure := requiredSchemaFailureAt(leaves, parts); failure != nil {
+		if failure := requiredSchemaFailureAt(failures, parts); failure != nil {
 			return translateSchemaFailure(path, failure, err)
 		}
-		if failure := decoderSchemaFailureAt(leaves, append(parts, roleWireFields[0])); failure != nil {
+		if failure := decoderSchemaFailureAt(failures, append(parts, roleWireFields[0])); failure != nil {
 			return translateSchemaFailure(path, failure, err)
 		}
 
@@ -453,16 +450,16 @@ func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 		}
 		seen[name] = struct{}{}
 		for _, field := range roleWireFields[1:] {
-			if failure := decoderSchemaFailureAt(leaves, append(parts, field)); failure != nil {
+			if failure := decoderSchemaFailureAt(failures, append(parts, field)); failure != nil {
 				return translateSchemaFailure(path, failure, err)
 			}
 		}
 	}
-	if failure := nonEmptyPatternSchemaFailureAt(leaves, []string{"dir"}); failure != nil {
+	if failure := nonEmptyPatternSchemaFailureAt(failures, []string{"dir"}); failure != nil {
 		return translateSchemaFailure(path, failure, err)
 	}
 	for index := range roles {
-		if failure := nonEmptyPatternSchemaFailureAt(leaves, []string{"roles", strconv.Itoa(index), roleWireFields[0]}); failure != nil {
+		if failure := nonEmptyPatternSchemaFailureAt(failures, []string{"roles", strconv.Itoa(index), roleWireFields[0]}); failure != nil {
 			return translateSchemaFailure(path, failure, err)
 		}
 	}
@@ -480,41 +477,43 @@ func sessionFieldError(path string) *Error {
 	return templateError(path, "", `"session" is not a template field; session identity is supplied per invocation with --session`, nil)
 }
 
-func schemaFailures(validation *jsonschema.ValidationError) []*jsonschema.ValidationError {
-	var failures []*jsonschema.ValidationError
-	collectSchemaFailures(validation, &failures)
-	return failures
+type schemaFailureIndex map[string][]*jsonschema.ValidationError
+
+func indexSchemaFailures(validation *jsonschema.ValidationError) schemaFailureIndex {
+	index := make(schemaFailureIndex)
+	collectSchemaFailures(validation, index)
+	return index
 }
 
-func collectSchemaFailures(validation *jsonschema.ValidationError, failures *[]*jsonschema.ValidationError) {
+func collectSchemaFailures(validation *jsonschema.ValidationError, index schemaFailureIndex) {
 	for _, cause := range validation.Causes {
-		collectSchemaFailures(cause, failures)
+		collectSchemaFailures(cause, index)
 	}
 	if len(validation.Causes) != 0 {
 		return
 	}
 	if _, root := validation.ErrorKind.(*kind.Schema); !root {
-		*failures = append(*failures, validation)
+		location := schemaLocation(validation.InstanceLocation)
+		index[location] = append(index[location], validation)
 	}
 }
 
-func requiredSchemaFailureAt(failures []*jsonschema.ValidationError, parts []string) *jsonschema.ValidationError {
-	for _, failure := range failures {
-		if sameSchemaLocation(failure.InstanceLocation, parts) {
-			if _, required := failure.ErrorKind.(*kind.Required); required {
-				return failure
-			}
+func (index schemaFailureIndex) at(parts []string) []*jsonschema.ValidationError {
+	return index[schemaLocation(parts)]
+}
+
+func requiredSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if _, required := failure.ErrorKind.(*kind.Required); required {
+			return failure
 		}
 	}
 	return nil
 }
 
-func firstAdditionalProperty(failures []*jsonschema.ValidationError, fields []string, parts []string) string {
+func firstAdditionalProperty(failures schemaFailureIndex, fields []string, parts []string) string {
 	additional := make(map[string]struct{})
-	for _, failure := range failures {
-		if !sameSchemaLocation(failure.InstanceLocation, parts) {
-			continue
-		}
+	for _, failure := range failures.at(parts) {
 		if issue, ok := failure.ErrorKind.(*kind.AdditionalProperties); ok {
 			for _, field := range issue.Properties {
 				if len(parts) == 0 && (field == "$schema" || field == "session") {
@@ -532,11 +531,8 @@ func firstAdditionalProperty(failures []*jsonschema.ValidationError, fields []st
 	return ""
 }
 
-func decoderSchemaFailureAt(failures []*jsonschema.ValidationError, parts []string) *jsonschema.ValidationError {
-	for _, failure := range failures {
-		if !sameSchemaLocation(failure.InstanceLocation, parts) {
-			continue
-		}
+func decoderSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
 		if _, additional := failure.ErrorKind.(*kind.AdditionalProperties); additional {
 			continue
 		}
@@ -548,38 +544,22 @@ func decoderSchemaFailureAt(failures []*jsonschema.ValidationError, parts []stri
 	return nil
 }
 
-func roleItemTypeSchemaFailureAt(failures []*jsonschema.ValidationError, parts []string) *jsonschema.ValidationError {
-	for _, failure := range failures {
-		if sameSchemaLocation(failure.InstanceLocation, parts) {
-			if _, typeFailure := failure.ErrorKind.(*kind.Type); typeFailure {
-				return failure
-			}
+func roleItemTypeSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if _, typeFailure := failure.ErrorKind.(*kind.Type); typeFailure {
+			return failure
 		}
 	}
 	return nil
 }
 
-func nonEmptyPatternSchemaFailureAt(failures []*jsonschema.ValidationError, parts []string) *jsonschema.ValidationError {
-	for _, failure := range failures {
-		if sameSchemaLocation(failure.InstanceLocation, parts) {
-			if pattern, ok := failure.ErrorKind.(*kind.Pattern); ok && pattern.Got != "" {
-				return failure
-			}
+func nonEmptyPatternSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if pattern, ok := failure.ErrorKind.(*kind.Pattern); ok && pattern.Got != "" {
+			return failure
 		}
 	}
 	return nil
-}
-
-func sameSchemaLocation(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for index := range got {
-		if got[index] != want[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func translateSchemaFailure(path string, failure *jsonschema.ValidationError, cause error) error {

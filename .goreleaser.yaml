@@ -19,6 +19,10 @@ archives:
     files:
       - LICENSE
       - README.md
+      - LICENSES/README.md
+      - LICENSES/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
+      - LICENSES/golang.org/x/text/LICENSE
+      - LICENSES/golang.org/x/text/PATENTS
 
 checksum:
   name_template: "checksums.txt"
