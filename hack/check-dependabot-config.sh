@@ -23,7 +23,7 @@ fi
 ruby -ryaml -e '
   begin
     filename = ARGV.fetch(0)
-    config = YAML.safe_load_file(filename, aliases: false)
+    config = YAML.safe_load(File.read(filename), aliases: false)
   rescue Psych::SyntaxError => error
     warn "#{filename}: invalid YAML: #{error.problem}"
     exit 1
