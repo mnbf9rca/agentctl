@@ -97,14 +97,28 @@ from agentctl's production file-writing surface. For its isolated live harness
 check on macOS, it may copy only the existing fixed path
 `~/.codex/auth.json` from the operator's captured real HOME. A 2026-08-06 probe
 proved that file sufficient for codex-cli 0.146.1. A 2026-08-08 probe proved
-Claude Code 2.1.226 authenticated from a fresh HOME containing only the exact
-symlink from `$REAL_HOME/Library/Keychains` to
+Claude Code 2.1.226 could read the existing authentication from a fresh HOME
+containing the exact symlink from `$REAL_HOME/Library/Keychains` to
 `$TEMP_HOME/Library/Keychains`. The verifier offers that fixed link separately
 and states before consent that the probe fleet's harnesses can reach the
 operator's login keychain through it; per-item ACLs continue to apply. It
 copies no Claude secret or Keychain data, but token refresh writes through the
 link reach the real login keychain as they would from the operator's daily
 harnesses.
+
+**Synthesized Claude onboarding configuration.** A 2026-08-10 probe on Claude
+Code 2.1.226 showed that the Keychains link alone still led an interactive
+first start to request re-authentication, while the same link plus a
+mode-`0600` `.claude.json` containing only
+`{"hasCompletedOnboarding":true}` reached the authenticated ready state
+without re-login. On the consented-link path, Part C synthesizes exactly that
+non-secret onboarding configuration inside the temporary HOME. It is not an
+authentication mechanism: the Keychains link supplies credential access, and
+the verifier never reads or copies the operator's real `.claude.json`, account
+identifiers, project history, or MCP configuration. The isolated-keychain path
+receives no synthesized `.claude.json`; interactive sign-in remains its
+designed behavior. The synthesized file is removed with the temporary HOME on
+every cleanup path.
 
 The Codex filename and Claude symlink are printed without credential contents
 and each requires its own explicit `y`. Declining the Claude link offers guided
@@ -116,9 +130,10 @@ silently delete the real Keychain credential on exit
 (anthropics/claude-code#37512); `claude setup-token` is documented only as a
 manual fallback for Keychain-locked contexts such as SSH or launchd.
 
-The temporary HOME and credential-parent directories are `0700`, the copied
-Codex file is `0600`, and no credential contents are written to output or
-evidence. On success, failure, refusal, interrupt, and abort, teardown first
+The temporary HOME and credential-parent directories are `0700`; the copied
+Codex file and synthesized Claude onboarding file are `0600`; and no credential
+contents are written to output or evidence. On success, failure, refusal,
+interrupt, and abort, teardown first
 ends the owned fleet and named tmux server so no harness can still use the
 link, then removes and observes absence of only the exact owned symlink, and
 only then removes the credential-bearing HOME. The target directory is never
@@ -128,8 +143,8 @@ server is created, tmux's exact single-line connect-ENOENT response for that
 wrapper-owned socket is accepted as factual socket absence so teardown can
 continue to the credential-bearing HOME;
 fixture tests retain a sentinel in the fake target on every exit path,
-including abort, while unseeded Claude lookalike files never cross the launch
-boundary.
+including abort, while unseeded Claude credential lookalikes never cross the
+launch boundary.
 
 ## Reporting a vulnerability
 

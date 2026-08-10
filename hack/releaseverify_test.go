@@ -194,6 +194,7 @@ type liveFixture struct {
 	agentctlLog            string
 	agentctlEnvironmentLog string
 	authObservationLog     string
+	claudeConfigLog        string
 	securityLog            string
 	tmuxLog                string
 	amqLog                 string
@@ -235,6 +236,7 @@ func newLiveFixture(t *testing.T) liveFixture {
 	agentctlLog := filepath.Join(t.TempDir(), "agentctl.log")
 	agentctlEnvironmentLog := filepath.Join(t.TempDir(), "agentctl-environment.log")
 	authObservationLog := filepath.Join(t.TempDir(), "auth-observation.log")
+	claudeConfigLog := filepath.Join(t.TempDir(), "claude-config.log")
 	securityLog := filepath.Join(t.TempDir(), "security.log")
 	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
 	amqLog := filepath.Join(t.TempDir(), "amq.log")
@@ -316,8 +318,11 @@ case "$1" in
     ;;
   launch)
     if [ "$3" = skillverify ]; then
-	  : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	  printf 'dir .|%s\n' "$(/usr/bin/stat -f '%Lp' "$HOME")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
+      : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
+      if [ -f "$HOME/.claude.json" ]; then
+        /bin/cp "$HOME/.claude.json" "$AGENTCTL_TEST_CLAUDE_CONFIG_LOG"
+      fi
+      printf 'dir .|%s\n' "$(/usr/bin/stat -f '%Lp' "$HOME")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
 	  for auth_path in "$HOME/.claude.json" "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json"; do
 	    if [ -f "$auth_path" ]; then
 	      relative_path=${auth_path#"$HOME"/}
@@ -593,6 +598,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_LOG", agentctlLog)
 	t.Setenv("AGENTCTL_TEST_AGENTCTL_ENVIRONMENT_LOG", agentctlEnvironmentLog)
 	t.Setenv("AGENTCTL_TEST_AUTH_OBSERVATION_LOG", authObservationLog)
+	t.Setenv("AGENTCTL_TEST_CLAUDE_CONFIG_LOG", claudeConfigLog)
 	t.Setenv("AGENTCTL_TEST_SECURITY_LOG", securityLog)
 	t.Setenv("AGENTCTL_TEST_TMUX_LOG", tmuxLog)
 	t.Setenv("AGENTCTL_TEST_AMQ_LOG", amqLog)
@@ -619,6 +625,7 @@ esac
 		agentctlLog:            agentctlLog,
 		agentctlEnvironmentLog: agentctlEnvironmentLog,
 		authObservationLog:     authObservationLog,
+		claudeConfigLog:        claudeConfigLog,
 		securityLog:            securityLog,
 		tmuxLog:                tmuxLog,
 		amqLog:                 amqLog,
@@ -964,6 +971,7 @@ func TestLiveVerificationPartCConsentSeedsCodexAndLinksExactClaudeKeychains(t *t
 	}
 	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
 	wantDestination := filepath.Join(partCRoot, "home", "Library", "Keychains")
+	wantClaudeConfig := filepath.Join(partCRoot, "home", ".claude.json")
 	wantGuidance := []string{
 		"Part C can seed codex authentication from this empirically proven file:",
 		"  ~/.codex/auth.json",
@@ -971,9 +979,13 @@ func TestLiveVerificationPartCConsentSeedsCodexAndLinksExactClaudeKeychains(t *t
 		"Claude Code 2.1.226 can authenticate through this exact symlink:",
 		fixture.keychainTarget + " -> " + wantDestination,
 		"Both probe harnesses can reach the operator's login keychain through this link; per-item ACLs still apply.",
-		"Create exactly this Claude Keychains symlink: " + fixture.keychainTarget + " -> " + wantDestination + "?",
-		"The proven Codex auth.json and the Claude Keychains symlink were created with",
-		"Did both harnesses start authenticated from the consented seeds without manual pane interaction?",
+		"Part C will synthesize this minimal Claude onboarding configuration:",
+		wantClaudeConfig,
+		"It contains onboarding state only, not credentials, and does not copy the operator's Claude configuration.",
+		"Create exactly this Claude Keychains symlink and synthesized onboarding configuration: " + fixture.keychainTarget + " -> " + wantDestination + "?",
+		"The proven Codex auth.json, Claude Keychains symlink, and synthesized onboarding",
+		"configuration were created with your consent.",
+		"Did both harnesses start without requiring re-authentication?",
 	}
 	previousIndex := -1
 	for _, want := range wantGuidance {
@@ -983,8 +995,21 @@ func TestLiveVerificationPartCConsentSeedsCodexAndLinksExactClaudeKeychains(t *t
 		}
 		previousIndex = index
 	}
-	if strings.Contains(output, "~/.claude.json") || strings.Contains(output, "~/.claude/.credentials.json") || strings.Contains(output, "CLAUDE_CODE_OAUTH_TOKEN") {
-		t.Fatalf("auth consent offered an unproven Claude HOME file:\n%s", output)
+	for _, forbidden := range []string{
+		"Part C can seed Claude authentication from",
+		"Copy only this Claude file",
+		filepath.Join(fixture.operatorHome, ".claude.json"),
+		"~/.claude/.credentials.json",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("auth consent offered .claude.json as an authentication mechanism via %q:\n%s", forbidden, output)
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, ".claude.json") && line != "  "+wantClaudeConfig {
+			t.Fatalf("auth transcript mentioned .claude.json outside the exact synthesized-config destination: %q", line)
+		}
 	}
 	for _, forbidden := range []string{fakeClaudeAuthBody, fakeClaudeCredentialsBody, fakeCodexAuthBody} {
 		if strings.Contains(output, forbidden) {
@@ -993,12 +1018,16 @@ func TestLiveVerificationPartCConsentSeedsCodexAndLinksExactClaudeKeychains(t *t
 	}
 	wantObservation := strings.Join([]string{
 		"dir .|700",
+		"file .claude.json|600",
 		"dir .codex|700",
 		"file .codex/auth.json|600",
 		"link Library/Keychains|" + fixture.keychainTarget,
 	}, "\n") + "\n"
 	if got := readTestFile(t, fixture.authObservationLog); got != wantObservation {
 		t.Fatalf("auth files observed at skillverify launch:\n%s\nwant:\n%s", got, wantObservation)
+	}
+	if got, want := readTestFile(t, fixture.claudeConfigLog), "{\"hasCompletedOnboarding\":true}\n"; got != want {
+		t.Fatalf("synthesized Claude onboarding config = %q, want %q", got, want)
 	}
 	if _, statErr := os.Stat(fixture.securityLog); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("consented-link path unexpectedly created an isolated keychain: %v", statErr)
@@ -1085,6 +1114,9 @@ func TestLiveVerificationPartCConsentDeclineGuidesManualSignIn(t *testing.T) {
 	}, "\n") + "\n"
 	if got := readTestFile(t, fixture.authObservationLog); got != wantObservation {
 		t.Fatalf("manual-auth launch inherited copied files:\n%s", got)
+	}
+	if _, statErr := os.Stat(fixture.claudeConfigLog); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("isolated-keychain path received a Claude onboarding config: %v", statErr)
 	}
 	securityFields := strings.Split(strings.TrimSpace(readTestFile(t, fixture.securityLog)), "\t")
 	if len(securityFields) != 5 || securityFields[0] != filepath.Join(strings.TrimSpace(readTestFile(t, fixture.partCRootLog)), "home") || securityFields[1] != "4" || securityFields[2] != "create-keychain" || securityFields[3] != "-p" || securityFields[4] != filepath.Join(strings.TrimSpace(readTestFile(t, fixture.partCRootLog)), "home", "Library", "Keychains", "login.keychain-db") {

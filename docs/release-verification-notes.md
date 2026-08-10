@@ -69,6 +69,14 @@ server; the #177 standing rule is satisfied by those executions rather
 than by this run. This note is authored by the planner, outside the
 machine-written block above.
 
+The C.C1 `y` in the same machine-written block predates #188's narrower
+evidence question. Its `(keychain-linked, codex-seeded)` label correctly
+records the selected authentication mechanisms, but Claude's first temporary-
+HOME start still required manual re-login. Issue #188 changes future C.C1
+evidence to ask whether startup required re-authentication; the recorded `y`
+above is intentionally unchanged. This annotation is authored by the planner,
+outside the machine-written block.
+
 ### 2026-08-08
 
 - agentctl: `agentctl e81f83a`
