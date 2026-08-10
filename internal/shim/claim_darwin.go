@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +26,21 @@ type Advisory struct {
 	ShimPID   int    `json:"shim_pid"`
 	Nonce     string `json:"nonce"`
 	StateRoot string `json:"state_root"`
+}
+
+// AdvisoryParseError identifies malformed lockfile identity at the advisory
+// boundary without exposing it as a wire-protocol schema fact.
+type AdvisoryParseError struct {
+	Cause string
+}
+
+func (e *AdvisoryParseError) Error() string { return "could not parse advisory lockfile: " + e.Cause }
+
+func advisoryParseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &AdvisoryParseError{Cause: err.Error()}
 }
 
 // StateRootDisagreementError preserves both independently resolved roots.
@@ -84,7 +100,8 @@ type Claim struct {
 // AcquireClaim acquires the sole ownership primitive, writes the advisory
 // body, then removes a stale socket. No socket mutation occurs before flock.
 func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
-	if err := validateAdvisory(advisory, path.StateRoot); err != nil {
+	payload, err := marshalAdvisory(advisory, path.StateRoot)
+	if err != nil {
 		return nil, err
 	}
 	path.mu.Lock()
@@ -93,6 +110,12 @@ func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
 		return nil, errors.New("role path is closed")
 	}
 	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
+		return nil, err
+	}
+	if path.stateRoles == nil {
+		return nil, errors.New("role path is closed")
+	}
+	if err := verifyRetainedRoot("state-roles", filepath.Dir(path.Record), path.stateRoles); err != nil {
 		return nil, err
 	}
 	lockName := path.Role + ".lock"
@@ -106,7 +129,15 @@ func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
 	}
 	pathInfo, err := path.runtimeSession.Lstat(lockName)
 	fileInfo, statErr := file.Stat()
-	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+	if err != nil {
+		_ = file.Close()
+		return nil, &FilesystemObservationError{Kind: "lockfile", Path: path.Lock, Operation: "lstat declared path", Err: err}
+	}
+	if statErr != nil {
+		_ = file.Close()
+		return nil, &FilesystemObservationError{Kind: "lockfile", Path: path.Lock, Operation: "stat retained file", Err: statErr}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
 		_ = file.Close()
 		return nil, fmt.Errorf("lockfile %q was substituted", path.Lock)
 	}
@@ -118,7 +149,7 @@ func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
 		return nil, fmt.Errorf("flock role lock: %w", err)
 	}
 	claim := &Claim{path: path, file: file}
-	if err := writeAdvisory(file, advisory); err != nil {
+	if err := writeAdvisory(file, payload); err != nil {
 		_ = claim.Close()
 		return nil, err
 	}
@@ -133,8 +164,8 @@ func validateAdvisory(advisory Advisory, stateRoot string) error {
 	if advisory.Version != ShimProtocolVersion {
 		return fmt.Errorf("advisory protocol version is %d; expected %d", advisory.Version, ShimProtocolVersion)
 	}
-	if advisory.ShimPID <= 0 {
-		return errors.New("advisory shim PID must be positive")
+	if !validDarwinPID(advisory.ShimPID) {
+		return errors.New("advisory shim PID must be a positive signed Darwin pid_t")
 	}
 	if advisory.Nonce == "" {
 		return errors.New("advisory nonce must not be empty")
@@ -148,12 +179,22 @@ func validateAdvisory(advisory Advisory, stateRoot string) error {
 	return nil
 }
 
-func writeAdvisory(file *os.File, advisory Advisory) error {
+func marshalAdvisory(advisory Advisory, stateRoot string) ([]byte, error) {
+	if err := validateAdvisory(advisory, stateRoot); err != nil {
+		return nil, err
+	}
 	payload, err := json.Marshal(advisory)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	payload = append(payload, '\n')
+	if len(payload) > advisoryMaxBytes {
+		return nil, fmt.Errorf("advisory lockfile exceeds %d bytes", advisoryMaxBytes)
+	}
+	return payload, nil
+}
+
+func writeAdvisory(file *os.File, payload []byte) error {
 	if err := file.Truncate(0); err != nil {
 		return fmt.Errorf("truncate advisory lockfile: %w", err)
 	}
@@ -210,7 +251,13 @@ func ReadAdvisory(path *RolePath) (Advisory, error) {
 	}
 	pathInfo, err := path.runtimeSession.Lstat(name)
 	fileInfo, statErr := file.Stat()
-	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+	if err != nil {
+		return Advisory{}, &FilesystemObservationError{Kind: "lockfile", Path: path.Lock, Operation: "lstat declared path", Err: err}
+	}
+	if statErr != nil {
+		return Advisory{}, &FilesystemObservationError{Kind: "lockfile", Path: path.Lock, Operation: "stat retained file", Err: statErr}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
 		return Advisory{}, fmt.Errorf("lockfile %q was substituted", path.Lock)
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, advisoryMaxBytes+1))
@@ -222,25 +269,31 @@ func ReadAdvisory(path *RolePath) (Advisory, error) {
 	}
 	fields, err := decodeJSONObject(payload)
 	if err != nil {
-		return Advisory{}, err
+		return Advisory{}, advisoryParseError(err)
 	}
 	allowed := map[string]bool{"version": true, "shim_pid": true, "nonce": true, "state_root": true}
 	if err := requireFields(fields, allowed, []string{"version", "shim_pid", "nonce", "state_root"}); err != nil {
-		return Advisory{}, err
+		return Advisory{}, advisoryParseError(err)
 	}
 	if err := requireJSONTypes(fields, map[string]string{
 		"version": "integer", "shim_pid": "integer", "nonce": "string", "state_root": "string",
 	}); err != nil {
-		return Advisory{}, err
+		return Advisory{}, advisoryParseError(err)
+	}
+	if err := requireJSONIntegerRange(fields, "version", big.NewInt(ShimProtocolVersion), big.NewInt(ShimProtocolVersion)); err != nil {
+		return Advisory{}, advisoryParseError(err)
+	}
+	if err := requireJSONIntegerRange(fields, "shim_pid", big.NewInt(1), big.NewInt(darwinPIDMax)); err != nil {
+		return Advisory{}, advisoryParseError(err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var advisory Advisory
 	if err := decoder.Decode(&advisory); err != nil {
-		return Advisory{}, err
+		return Advisory{}, advisoryParseError(err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Advisory{}, errors.New("advisory lockfile has trailing JSON")
+		return Advisory{}, advisoryParseError(errors.New("advisory lockfile has trailing JSON"))
 	}
 	if err := validateAdvisory(advisory, advisory.StateRoot); err != nil {
 		return Advisory{}, err
@@ -277,6 +330,9 @@ func LocalPeerPID(connection *net.UnixConn) (int, error) {
 	}
 	if socketErr != nil {
 		return 0, socketErr
+	}
+	if !validDarwinPID(pid) {
+		return 0, ErrInvalidProcessPID
 	}
 	return pid, nil
 }

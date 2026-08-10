@@ -45,10 +45,11 @@ and daily on `main`, covering dependencies introduced by a change and advisories
 published after merge. Dependabot opens grouped monthly version-update pull
 requests for Go modules and GitHub Actions, plus advisory-triggered security-
 update pull requests; both pass the required CI and govulncheck checks.
-Dependencies are compiled into release artifacts and are not fetched or selected
-from template input at runtime. Template schemas remain an embedded, release-
-reviewed asset, so a template cannot choose code, a schema location, or a
-validator.
+Production-imported dependencies are compiled into release artifacts and are not
+fetched or selected from template input at runtime. A source-admitted dependency
+may precede production linkage only under the staged evidence rule below.
+Template schemas remain an embedded, release-reviewed asset, so a template cannot
+choose code, a schema location, or a validator.
 
 Release archives reproduce the upstream licenses for
 `github.com/santhosh-tekuri/jsonschema/v6` and `golang.org/x/sys`, plus the
@@ -58,9 +59,16 @@ missing any of those materials.
 
 The internal shim identity primitives pin `golang.org/x/sys` v0.47.0 and import
 `golang.org/x/sys/unix` only for Darwin `flock`, `LOCAL_PEERPID`, `kill(pid,0)`,
-and raw `kinfo_proc` process observation. The module checksum and upstream
-license are tracked and the existing dependency/vulnerability gates cover the
-importer. The separate stdlib PTY lane does not import `x/sys`.
+and raw `kinfo_proc` process observation. Under the reviewer-recommended,
+planner-approved staged admission, PR 2 is source admission: the module is
+required and tidy-stable, `internal/shim` tests exercise its source, govulncheck
+and Dependabot cover it, and its upstream license ships in release archives.
+No production path imports `internal/shim` at this stage, so the release binary
+does not yet link `x/sys`; `go version -m` evidence records that non-linkage.
+The first PR whose production path imports `internal/shim` is the mandatory
+Stage 2 rider: it must provide `go version -m` evidence showing `x/sys` linked
+in the release binary. That obligation cannot be deferred or dropped. The
+separate stdlib PTY lane does not import `x/sys`.
 
 ## Known risks and accepted residuals
 

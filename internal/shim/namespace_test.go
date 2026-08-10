@@ -215,6 +215,39 @@ func TestNamespacePublishesFullyResolvedStateRoot(t *testing.T) {
 	}
 }
 
+func TestNamespaceRetainsUserConfigDescriptorAcrossVerificationAndUse(t *testing.T) {
+	parent := shortTempDir(t)
+	configRoot := filepath.Join(parent, "config")
+	if err := os.Mkdir(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(parent, "runtime")
+	stateRoot := filepath.Join(configRoot, "agentctl", "state-v1")
+	roots := namespaceRoots{Runtime: runtimeRoot, State: stateRoot}
+	original := configRoot + "-original"
+	_, err := openResolvedNamespaceWithHook(roots, true, false, configRoot, func() {
+		if renameErr := os.Rename(configRoot, original); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if mkdirErr := os.Mkdir(configRoot, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	})
+	var substituted *RootSubstitutedError
+	if !errors.As(err, &substituted) {
+		t.Fatalf("openResolvedNamespace error = %T %v, want *RootSubstitutedError", err, err)
+	}
+	for _, path := range []string{
+		runtimeRoot,
+		filepath.Join(original, "agentctl"),
+		filepath.Join(configRoot, "agentctl"),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("mutation at %q before substitution refusal: %v", path, statErr)
+		}
+	}
+}
+
 func TestNamespaceSyncsEachNewDirectoryEntryToItsParent(t *testing.T) {
 	parentPath := shortTempDir(t)
 	parent, err := os.OpenRoot(parentPath)
@@ -435,6 +468,33 @@ func TestNamespaceRefusesDescriptorSubstitutionBeforeRoleMutation(t *testing.T) 
 		if _, statErr := os.Stat(filepath.Join(root, "s")); !os.IsNotExist(statErr) {
 			t.Fatalf("role mutation under %q after substitution: stat error = %v", root, statErr)
 		}
+	}
+}
+
+func TestNamespaceObservationFailureIsNotReportedAsSubstitution(t *testing.T) {
+	parent := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{
+		Runtime: filepath.Join(parent, "runtime"),
+		State:   filepath.Join(parent, "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = namespace.Close() }()
+	if err := namespace.runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = namespace.RolePath("session", "role")
+	if err == nil {
+		t.Fatal("RolePath succeeded after retained descriptor observation failed")
+	}
+	var substituted *RootSubstitutedError
+	if errors.As(err, &substituted) {
+		t.Fatalf("descriptor observation error was reported as substitution: %v", err)
+	}
+	var observation *FilesystemObservationError
+	if !errors.As(err, &observation) {
+		t.Fatalf("error = %T %v, want *FilesystemObservationError", err, err)
 	}
 }
 

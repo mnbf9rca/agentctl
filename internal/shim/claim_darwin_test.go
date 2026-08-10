@@ -4,12 +4,15 @@ package shim
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
+	"math"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +97,115 @@ func TestClaimRefusesUnsafeSocketAndLockArtifactsWithoutRepair(t *testing.T) {
 	})
 }
 
+func TestClaimVerifiesDurableRoleRootBeforeClaimMutation(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stateRoles := filepath.Dir(rolePath.Record)
+	if err := os.Rename(stateRoles, stateRoles+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stateRoles, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if claim != nil {
+		_ = claim.Close()
+	}
+	var substituted *RootSubstitutedError
+	if !errors.As(err, &substituted) {
+		t.Fatalf("AcquireClaim error = %T %v, want durable *RootSubstitutedError", err, err)
+	}
+	if _, statErr := os.Lstat(rolePath.Lock); !os.IsNotExist(statErr) {
+		t.Fatalf("claim lock mutated before durable-root refusal: %v", statErr)
+	}
+	if _, statErr := os.Lstat(rolePath.Socket); statErr != nil {
+		t.Fatalf("stale socket mutated before durable-root refusal: %v", statErr)
+	}
+}
+
+func TestClaimObservationFailureIsNotReportedAsSubstitution(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	if err := rolePath.stateRoles.Close(); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if claim != nil {
+		_ = claim.Close()
+	}
+	if err == nil {
+		t.Fatal("AcquireClaim succeeded after durable descriptor observation failed")
+	}
+	var substituted *RootSubstitutedError
+	if errors.As(err, &substituted) {
+		t.Fatalf("descriptor observation error was reported as substitution: %v", err)
+	}
+	var observation *FilesystemObservationError
+	if !errors.As(err, &observation) {
+		t.Fatalf("error = %T %v, want *FilesystemObservationError", err, err)
+	}
+	if _, statErr := os.Lstat(rolePath.Lock); !os.IsNotExist(statErr) {
+		t.Fatalf("claim mutation preceded observation refusal: %v", statErr)
+	}
+}
+
+func TestClaimRejectsPIDOutsideDarwinPIDTBeforeMutation(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	advisory := testAdvisory(rolePath, int(math.MaxInt32)+1)
+	if claim, err := AcquireClaim(rolePath, advisory); err == nil {
+		_ = claim.Close()
+		t.Fatal("AcquireClaim accepted shim PID above signed Darwin pid_t")
+	}
+	if _, err := os.Lstat(rolePath.Lock); !os.IsNotExist(err) {
+		t.Fatalf("oversized PID mutated lock path: %v", err)
+	}
+	if payload, err := json.Marshal(advisory); err != nil {
+		t.Fatal(err)
+	} else if err := os.WriteFile(rolePath.Lock, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadAdvisory(rolePath); err == nil {
+		t.Fatal("ReadAdvisory accepted shim PID above signed Darwin pid_t")
+	}
+}
+
+func TestClaimWriterEnforcesAdvisoryLimitBeforeClaimMutation(t *testing.T) {
+	for _, size := range []int{advisoryMaxBytes, advisoryMaxBytes + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			rolePath := newTestRolePath(t)
+			advisory := advisoryWithEncodedSize(t, rolePath, size)
+			claim, err := AcquireClaim(rolePath, advisory)
+			if size == advisoryMaxBytes {
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = claim.Close() }()
+				info, statErr := os.Stat(rolePath.Lock)
+				if statErr != nil {
+					t.Fatal(statErr)
+				}
+				if info.Size() != int64(size) {
+					t.Fatalf("advisory size = %d, want %d", info.Size(), size)
+				}
+				return
+			}
+			if err == nil {
+				_ = claim.Close()
+				t.Fatal("AcquireClaim accepted oversized escaped advisory")
+			}
+			if _, statErr := os.Lstat(rolePath.Lock); !os.IsNotExist(statErr) {
+				t.Fatalf("oversized advisory mutated lock path: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T) {
 	rolePath := newTestRolePath(t)
 	want := testAdvisory(rolePath, os.Getpid())
@@ -165,6 +277,15 @@ func TestClaimReadAdvisoryRejectsDuplicateIdentityFields(t *testing.T) {
 	}
 	if _, err := ReadAdvisory(rolePath); err == nil {
 		t.Fatal("ReadAdvisory accepted duplicate identity fields")
+	} else {
+		var parse *AdvisoryParseError
+		if !errors.As(err, &parse) {
+			t.Fatalf("error = %T %v, want *AdvisoryParseError", err, err)
+		}
+		var schema *ProtocolSchemaError
+		if errors.As(err, &schema) {
+			t.Fatalf("advisory parse leaked ProtocolSchemaError: %v", err)
+		}
 	}
 }
 
@@ -344,4 +465,24 @@ func testAdvisory(rolePath *RolePath, pid int) Advisory {
 		Nonce:     "nonce-" + strconv.Itoa(pid),
 		StateRoot: rolePath.StateRoot,
 	}
+}
+
+func advisoryWithEncodedSize(t *testing.T, rolePath *RolePath, size int) Advisory {
+	t.Helper()
+	advisory := testAdvisory(rolePath, os.Getpid())
+	advisory.Nonce = `"\`
+	payload, err := json.Marshal(advisory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := size - (len(payload) + 1)
+	if filler < 0 {
+		t.Fatalf("advisory base exceeds requested %d-byte size", size)
+	}
+	advisory.Nonce += strings.Repeat("n", filler)
+	payload, err = json.Marshal(advisory)
+	if err != nil || len(payload)+1 != size {
+		t.Fatalf("constructed advisory size = %d, error = %v, want %d", len(payload)+1, err, size)
+	}
+	return advisory
 }

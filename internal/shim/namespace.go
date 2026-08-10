@@ -52,6 +52,22 @@ func (e *RootSubstitutedError) Error() string {
 	return fmt.Sprintf("%s root %q was substituted after descriptor verification", e.Kind, e.Path)
 }
 
+// FilesystemObservationError reports that an inode/type comparison could not
+// be completed. It is distinct from a successful observation proving that a
+// pathname was substituted.
+type FilesystemObservationError struct {
+	Kind      string
+	Path      string
+	Operation string
+	Err       error
+}
+
+func (e *FilesystemObservationError) Error() string {
+	return fmt.Sprintf("could not %s for %s %q: %v", e.Operation, e.Kind, e.Path, e.Err)
+}
+
+func (e *FilesystemObservationError) Unwrap() error { return e.Err }
+
 // SocketPathTooLongError reports a resolved socket path that Darwin cannot
 // represent, including its terminating NUL.
 type SocketPathTooLongError struct {
@@ -165,6 +181,17 @@ func validateRootInput(kind, path string) error {
 }
 
 func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride bool, userConfigRoot string) (*Namespace, error) {
+	return openResolvedNamespaceWithHook(roots, runtimeOverride, stateOverride, userConfigRoot, func() {})
+}
+
+func openResolvedNamespaceWithHook(
+	roots namespaceRoots,
+	runtimeOverride bool,
+	stateOverride bool,
+	userConfigRoot string,
+	afterUserConfigVerified func(),
+) (*Namespace, error) {
+	var retainedConfig *os.Root
 	if !stateOverride {
 		if err := validateRootInput("user-config", userConfigRoot); err != nil {
 			return nil, err
@@ -173,7 +200,12 @@ func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride 
 		if err != nil {
 			return nil, err
 		}
-		_ = configRoot.Close()
+		retainedConfig = configRoot
+		afterUserConfigVerified()
+		if err := verifyRetainedRoot("user-config", userConfigRoot, retainedConfig); err != nil {
+			_ = retainedConfig.Close()
+			return nil, err
+		}
 	}
 
 	var runtime *os.Root
@@ -184,6 +216,9 @@ func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride 
 		runtime, err = ensurePrivateTree("runtime", filepath.Dir(filepath.Dir(roots.Runtime)), filepath.Base(filepath.Dir(roots.Runtime)), filepath.Base(roots.Runtime))
 	}
 	if err != nil {
+		if retainedConfig != nil {
+			_ = retainedConfig.Close()
+		}
 		return nil, err
 	}
 
@@ -191,7 +226,8 @@ func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride 
 	if stateOverride {
 		state, err = ensureExactPrivateRoot("state", roots.State)
 	} else {
-		state, err = ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
+		state, err = ensurePrivateTreeFromRoot("state", userConfigRoot, retainedConfig, "agentctl", "state-v1")
+		retainedConfig = nil
 	}
 	if err != nil {
 		_ = runtime.Close()
@@ -230,27 +266,7 @@ func openProductionNamespaceAt(runtimeBase string, uid int, userConfigRoot strin
 	if err := validateRootInput("state", roots.State); err != nil {
 		return nil, err
 	}
-	configRoot, err := openVerifiedPrivateRoot("user-config", userConfigRoot)
-	if err != nil {
-		return nil, err
-	}
-	_ = configRoot.Close()
-	runtime, err := ensurePrivateTree("runtime", runtimeBase, "agentctl-"+strconv.Itoa(uid), "v1")
-	if err != nil {
-		return nil, err
-	}
-	state, err := ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
-	if err != nil {
-		_ = runtime.Close()
-		return nil, err
-	}
-	resolvedStateRoot, err := resolvedRetainedRoot("state", roots.State, state)
-	if err != nil {
-		_ = state.Close()
-		_ = runtime.Close()
-		return nil, err
-	}
-	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: resolvedStateRoot, runtime: runtime, state: state}, nil
+	return openResolvedNamespace(roots, false, false, userConfigRoot)
 }
 
 func ensureExactPrivateRoot(kind, path string) (*os.Root, error) {
@@ -267,6 +283,12 @@ func ensurePrivateTree(kind, base string, components ...string) (*os.Root, error
 	if err != nil {
 		return nil, &InvalidRootError{Kind: kind, Path: base, Reason: err.Error()}
 	}
+	return ensurePrivateTreeFromRoot(kind, base, current, components...)
+}
+
+// ensurePrivateTreeFromRoot consumes current and returns the final retained
+// child root. Every lookup and mutation is descriptor-relative.
+func ensurePrivateTreeFromRoot(kind, base string, current *os.Root, components ...string) (*os.Root, error) {
 	currentPath := base
 	for _, component := range components {
 		currentPath = filepath.Join(currentPath, component)
@@ -310,7 +332,11 @@ func ensurePrivateChildWithSync(
 		return nil, err
 	}
 	descriptorInfo, err := root.Stat(".")
-	if err != nil || !os.SameFile(pathInfo, descriptorInfo) {
+	if err != nil {
+		_ = root.Close()
+		return nil, &FilesystemObservationError{Kind: kind, Path: fullPath, Operation: "stat retained directory", Err: err}
+	}
+	if !os.SameFile(pathInfo, descriptorInfo) {
 		_ = root.Close()
 		return nil, &RootSubstitutedError{Kind: kind, Path: fullPath}
 	}
@@ -345,7 +371,11 @@ func openVerifiedPrivateRoot(kind, path string) (*os.Root, error) {
 		return nil, err
 	}
 	descriptorInfo, err := root.Stat(".")
-	if err != nil || !os.SameFile(pathInfo, descriptorInfo) {
+	if err != nil {
+		_ = root.Close()
+		return nil, &FilesystemObservationError{Kind: kind, Path: path, Operation: "stat retained directory", Err: err}
+	}
+	if !os.SameFile(pathInfo, descriptorInfo) {
 		_ = root.Close()
 		return nil, &RootSubstitutedError{Kind: kind, Path: path}
 	}
@@ -418,10 +448,13 @@ func verifyPrivateArtifact(file *os.File, path, kind string) error {
 func verifyRetainedRoot(kind, path string, root *os.Root) error {
 	descriptorInfo, err := root.Stat(".")
 	if err != nil {
-		return &RootSubstitutedError{Kind: kind, Path: path}
+		return &FilesystemObservationError{Kind: kind, Path: path, Operation: "stat retained directory", Err: err}
 	}
 	pathInfo, err := os.Lstat(path)
-	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(descriptorInfo, pathInfo) {
+	if err != nil {
+		return &FilesystemObservationError{Kind: kind, Path: path, Operation: "lstat declared path", Err: err}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(descriptorInfo, pathInfo) {
 		return &RootSubstitutedError{Kind: kind, Path: path}
 	}
 	return nil

@@ -3,8 +3,11 @@ package shim
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -131,6 +134,25 @@ func TestRecordDirectorySyncFailureReportsCommitUncertain(t *testing.T) {
 	}
 }
 
+func TestRecordObservationFailureIsNotReportedAsSubstitution(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	if err := rolePath.stateRoles.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadRecord(rolePath)
+	if err == nil {
+		t.Fatal("ReadRecord succeeded after retained descriptor observation failed")
+	}
+	var substituted *RootSubstitutedError
+	if errors.As(err, &substituted) {
+		t.Fatalf("descriptor observation error was reported as substitution: %v", err)
+	}
+	var observation *FilesystemObservationError
+	if !errors.As(err, &observation) {
+		t.Fatalf("error = %T %v, want *FilesystemObservationError", err, err)
+	}
+}
+
 func TestRecordSurvivesRuntimeTreeDeletionAndSimulatedRebootResidue(t *testing.T) {
 	parent := shortTempDir(t)
 	runtimeRoot := filepath.Join(parent, "runtime")
@@ -212,8 +234,86 @@ func TestRecordRejectsDuplicateIdentityFields(t *testing.T) {
 		}
 		if _, err := ReadRecord(rolePath); err == nil {
 			t.Fatalf("ReadRecord accepted duplicate identity fields: %s", payload)
+		} else {
+			var parse *RecordParseError
+			if !errors.As(err, &parse) {
+				t.Fatalf("error = %T %v, want *RecordParseError", err, err)
+			}
+			var schema *ProtocolSchemaError
+			if errors.As(err, &schema) {
+				t.Fatalf("record parse leaked ProtocolSchemaError: %v", err)
+			}
 		}
 	}
+}
+
+func TestRecordRejectsPIDOutsideDarwinPIDT(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	tooLarge := int(math.MaxInt32) + 1
+	record := NewChildStartingRecord("session", "role", tooLarge, "nonce")
+	if err := WriteRecord(rolePath, record); err == nil {
+		t.Fatal("WriteRecord accepted shim PID above signed Darwin pid_t")
+	}
+	record = NewChildStartingRecord("session", "role", 100, "nonce")
+	if _, err := record.WithChild(tooLarge, StartToken{Sec: 1}); err == nil {
+		t.Fatal("WithChild accepted child PID above signed Darwin pid_t")
+	}
+	payload := `{"version":1,"state":"child-recorded","session":"session","role":"role","shim_pid":100,"nonce":"nonce","child_pid":` + fmt.Sprint(tooLarge) + `,"child_start_token":{"sec":1,"usec":0}}`
+	if err := os.WriteFile(rolePath.Record, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRecord(rolePath); err == nil {
+		t.Fatal("ReadRecord accepted child PID above signed Darwin pid_t")
+	}
+}
+
+func TestRecordWriterEnforcesLimitBeforeFilesystemMutation(t *testing.T) {
+	for _, size := range []int{recordMaxBytes, recordMaxBytes + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			rolePath := newTestRolePath(t)
+			record := recordWithEncodedSize(t, size)
+			err := WriteRecord(rolePath, record)
+			if size == recordMaxBytes {
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, statErr := os.Stat(rolePath.Record)
+				if statErr != nil {
+					t.Fatal(statErr)
+				}
+				if info.Size() != int64(size) {
+					t.Fatalf("record size = %d, want %d", info.Size(), size)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("WriteRecord accepted oversized escaped record")
+			}
+			if _, statErr := os.Lstat(rolePath.Record); !os.IsNotExist(statErr) {
+				t.Fatalf("oversized record mutated record path: %v", statErr)
+			}
+		})
+	}
+}
+
+func recordWithEncodedSize(t *testing.T, size int) Record {
+	t.Helper()
+	record := NewChildStartingRecord("session", "role", 100, "nonce")
+	record.Nonce = `"\`
+	payload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler := size - (len(payload) + 1)
+	if filler < 0 {
+		t.Fatalf("record base exceeds requested %d-byte size", size)
+	}
+	record.Nonce += strings.Repeat("n", filler)
+	payload, err = json.Marshal(record)
+	if err != nil || len(payload)+1 != size {
+		t.Fatalf("constructed record size = %d, error = %v, want %d", len(payload)+1, err, size)
+	}
+	return record
 }
 
 func TestStartTokenUsesRawTimevalEquality(t *testing.T) {

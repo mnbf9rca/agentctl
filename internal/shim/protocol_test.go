@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"math"
 	"net"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +42,7 @@ func TestProtocolRequestVersionPrepassWinsBeforeSchemaAndOperation(t *testing.T)
 		{name: "absent", payload: `{"payload":"arbitrary"}`, observed: "absent"},
 		{name: "duplicate", payload: `{"version":1,"version":2,"operation":"rename"}`, observed: "duplicate"},
 		{name: "foreign", payload: `{"version":2,"payload":"arbitrary","operation":"rename"}`, observed: "2"},
-		{name: "non-integer", payload: `{"version":"one","payload":"arbitrary"}`, observed: `"one"`},
+		{name: "non-integer", payload: `{"version":"one","payload":"arbitrary"}`, observed: strconv.Quote(`"one"`)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,8 +51,43 @@ func TestProtocolRequestVersionPrepassWinsBeforeSchemaAndOperation(t *testing.T)
 			if !errors.As(err, &skew) {
 				t.Fatalf("error = %T %v, want *ProtocolSkewError", err, err)
 			}
-			if skew.Observed != tt.observed {
-				t.Fatalf("Observed = %q, want %q", skew.Observed, tt.observed)
+			if skew.CanonicalObserved() != tt.observed {
+				t.Fatalf("CanonicalObserved = %q, want %q", skew.CanonicalObserved(), tt.observed)
+			}
+		})
+	}
+}
+
+func TestProtocolSkewUsesClosedStructuredKindsAndCanonicalObservedValues(t *testing.T) {
+	hugeVersion := "99999999999999999999999999999999999999999999999999"
+	tests := []struct {
+		name    string
+		payload string
+		kind    ProtocolSkewKind
+		want    string
+	}{
+		{name: "absent", payload: `{}`, kind: ProtocolSkewAbsent, want: "absent"},
+		{name: "duplicate", payload: `{"version":1,"version":2}`, kind: ProtocolSkewDuplicate, want: "duplicate"},
+		{name: "string", payload: `{"version":"one"}`, kind: ProtocolSkewNonInteger, want: strconv.Quote(`"one"`)},
+		{name: "object multiline", payload: "{\"version\":{\n\"x\":1}}", kind: ProtocolSkewNonInteger, want: strconv.Quote("{\n\"x\":1}")},
+		{name: "array", payload: `{"version":[1,2]}`, kind: ProtocolSkewNonInteger, want: strconv.Quote(`[1,2]`)},
+		{name: "oversized integer", payload: `{"version":` + hugeVersion + `}`, kind: ProtocolSkewForeign, want: hugeVersion},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := DecodeRequest([]byte(tt.payload))
+			var skew *ProtocolSkewError
+			if !errors.As(err, &skew) {
+				t.Fatalf("error = %T %v, want *ProtocolSkewError", err, err)
+			}
+			if skew.Kind != tt.kind {
+				t.Fatalf("Kind = %q, want %q", skew.Kind, tt.kind)
+			}
+			if got := skew.CanonicalObserved(); got != tt.want {
+				t.Fatalf("CanonicalObserved = %q, want %q", got, tt.want)
+			}
+			if strings.ContainsRune(skew.CanonicalObserved(), '\n') {
+				t.Fatalf("canonical skew contains literal newline: %q", skew.CanonicalObserved())
 			}
 		})
 	}
@@ -103,7 +140,7 @@ func TestProtocolStrictSchemaReportsWrongFieldTypes(t *testing.T) {
 	if !errors.As(err, &schema) {
 		t.Fatalf("request error = %T %v, want *ProtocolSchemaError", err, err)
 	}
-	if got, want := schema.Reason, `field "session" has JSON type number; expected string`; got != want {
+	if got, want := schema.CanonicalCause(), `field "session" has JSON type number; expected string`; got != want {
 		t.Fatalf("request reason = %q, want %q", got, want)
 	}
 
@@ -111,15 +148,132 @@ func TestProtocolStrictSchemaReportsWrongFieldTypes(t *testing.T) {
 	if !errors.As(err, &schema) {
 		t.Fatalf("response error = %T %v, want *ProtocolSchemaError", err, err)
 	}
-	if got, want := schema.Reason, `field "bytes_written" has JSON type string; expected integer`; got != want {
+	if got, want := schema.CanonicalCause(), `field "bytes_written" has JSON type string; expected integer`; got != want {
 		t.Fatalf("response reason = %q, want %q", got, want)
+	}
+}
+
+func TestProtocolSchemaCanonicalRendererCoversEveryClosedCause(t *testing.T) {
+	tests := []struct {
+		name   string
+		decode func() error
+		kind   ProtocolSchemaKind
+		want   string
+	}{
+		{
+			name: "duplicate field",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":"s","role":"r","role":"x","operation":"clear"}`))
+				return err
+			},
+			kind: ProtocolSchemaDuplicateField,
+			want: `duplicate field "role"`,
+		},
+		{
+			name: "unknown field",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":"s","role":"r","operation":"clear","extra":true}`))
+				return err
+			},
+			kind: ProtocolSchemaUnknownField,
+			want: `unknown field "extra"`,
+		},
+		{
+			name: "missing required field",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":"s","role":"r"}`))
+				return err
+			},
+			kind: ProtocolSchemaMissingRequiredField,
+			want: `missing required field "operation"`,
+		},
+		{
+			name: "wrong object type",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":{},"role":"r","operation":"clear"}`))
+				return err
+			},
+			kind: ProtocolSchemaWrongJSONType,
+			want: `field "session" has JSON type object; expected string`,
+		},
+		{
+			name: "wrong array type",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":"s","role":"r","operation":[]}`))
+				return err
+			},
+			kind: ProtocolSchemaWrongJSONType,
+			want: `field "operation" has JSON type array; expected string`,
+		},
+		{
+			name: "unknown operation",
+			decode: func() error {
+				_, err := DecodeRequest([]byte(`{"version":1,"session":"s","role":"r","operation":"rename"}`))
+				return err
+			},
+			kind: ProtocolSchemaOperationNotRegistered,
+			want: `operation "rename" is not registered`,
+		},
+		{
+			name: "irrelevant response field",
+			decode: func() error {
+				_, err := DecodeResponse([]byte(`{"version":1,"outcome":"delivery-submitted","bytes_written":1,"submit_observed":true,"cause":"bad"}`))
+				return err
+			},
+			kind: ProtocolSchemaResponseFieldInvalid,
+			want: `response field "cause" is not valid for outcome "delivery-submitted"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.decode()
+			var schema *ProtocolSchemaError
+			if !errors.As(err, &schema) {
+				t.Fatalf("error = %T %v, want *ProtocolSchemaError", err, err)
+			}
+			if schema.Kind != tt.kind {
+				t.Fatalf("Kind = %q, want %q", schema.Kind, tt.kind)
+			}
+			if got := schema.CanonicalCause(); got != tt.want {
+				t.Fatalf("CanonicalCause = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProtocolJSONErrorsUseClosedCanonicalCauses(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		kind    JSONErrorKind
+		want    string
+	}{
+		{name: "invalid UTF-8", payload: []byte{0xff}, kind: JSONInvalidUTF8, want: "payload is not valid UTF-8"},
+		{name: "trailing", payload: []byte(`{} trailing`), kind: JSONTrailingBytes, want: "payload has trailing bytes after its JSON value"},
+		{name: "non-object", payload: []byte(`[]`), kind: JSONTopLevelNotObject, want: "payload top level is not an object"},
+		{name: "syntax", payload: []byte(`{"version":`), kind: JSONSyntax, want: strconv.Quote("unexpected EOF")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeJSONObject(tt.payload)
+			var jsonError *JSONError
+			if !errors.As(err, &jsonError) {
+				t.Fatalf("error = %T %v, want *JSONError", err, err)
+			}
+			if jsonError.Kind != tt.kind || jsonError.CanonicalCause() != tt.want {
+				t.Fatalf("JSON error = %#v cause %q, want kind %q cause %q", jsonError, jsonError.CanonicalCause(), tt.kind, tt.want)
+			}
+			if strings.ContainsRune(jsonError.CanonicalCause(), '\n') {
+				t.Fatalf("canonical JSON cause contains newline: %q", jsonError.CanonicalCause())
+			}
+		})
 	}
 }
 
 func TestProtocolResponseVersionPrepassWinsBeforeUnknownFields(t *testing.T) {
 	_, err := DecodeResponse([]byte(`{"version":2,"payload":"text"}`))
 	var skew *ProtocolSkewError
-	if !errors.As(err, &skew) || skew.Observed != "2" {
+	if !errors.As(err, &skew) || skew.CanonicalObserved() != "2" {
 		t.Fatalf("error = %T %v, want foreign-version skew", err, err)
 	}
 }
@@ -187,6 +341,18 @@ func TestProtocolResponseRejectsMalformedObjectiveNumbers(t *testing.T) {
 	}
 }
 
+func TestProtocolResponseRejectsPIDOutsideDarwinPIDT(t *testing.T) {
+	tooLarge := int(math.MaxInt32) + 1
+	response := Response{Version: 1, Outcome: OutcomeRunning, State: stringPointer("running"), ShimPID: intPointer(10), ChildPID: &tooLarge}
+	if _, err := EncodeResponse(response); err == nil {
+		t.Fatal("EncodeResponse accepted PID above signed Darwin pid_t")
+	}
+	payload := `{"version":1,"outcome":"running","state":"running","shim_pid":10,"child_pid":` + strconv.Itoa(tooLarge) + `}`
+	if _, err := DecodeResponse([]byte(payload)); err == nil {
+		t.Fatal("DecodeResponse accepted PID above signed Darwin pid_t")
+	}
+}
+
 func TestProtocolResponseRejectsFactuallyImpossibleValues(t *testing.T) {
 	token := StartToken{Sec: 1, Usec: 2}
 	otherToken := StartToken{Sec: 1, Usec: 3}
@@ -230,6 +396,37 @@ func TestProtocolResponseRequiresEveryOutcomeFact(t *testing.T) {
 	for _, payload := range tests {
 		if _, err := DecodeResponse([]byte(payload)); err == nil || !strings.Contains(err.Error(), "missing required field") {
 			t.Fatalf("DecodeResponse(%s) error = %v, want missing required field", payload, err)
+		}
+	}
+}
+
+func TestProtocolResponseSchemaSingleSourceCoversEveryOutcome(t *testing.T) {
+	outcomes := []Outcome{
+		OutcomeDeliverySubmitted, OutcomeDeliveryCancelledClean, OutcomeDeliveryCancelledWithResidue,
+		OutcomeInvalidRecord, OutcomeStateRootDisagreement, OutcomeProtocolSkew, OutcomeAnswererDisagreement,
+		OutcomeStarting, OutcomeIndeterminateChildStarting, OutcomeRunning, OutcomeOrphan,
+		OutcomePresentTokenDisagreement, OutcomePresentNotOurs, OutcomeCouldNotObserve, OutcomeStaleRecord,
+		OutcomeMissing, OutcomeCleanupFailed, OutcomeConcurrentContender, OutcomeObservedSelfTarget,
+		OutcomeAncestryUndetermined, OutcomeReadinessTimeout, OutcomeReadinessObservationFailed,
+		OutcomeChildExitedBeforeReady,
+	}
+	if len(responseSchemas) != len(outcomes) {
+		t.Fatalf("responseSchemas has %d outcomes, want %d", len(responseSchemas), len(outcomes))
+	}
+	seen := make(map[Outcome]bool, len(outcomes))
+	for _, outcome := range outcomes {
+		if seen[outcome] {
+			t.Fatalf("duplicate outcome %q in closed test inventory", outcome)
+		}
+		seen[outcome] = true
+		schema, ok := responseSchemas[outcome]
+		if !ok {
+			t.Fatalf("responseSchemas is missing %q", outcome)
+		}
+		for _, required := range schema.required {
+			if !schema.allowed[required] {
+				t.Fatalf("outcome %q requires field %q but does not allow it", outcome, required)
+			}
 		}
 	}
 }
@@ -292,6 +489,83 @@ func TestProtocolFrameUsesBigEndianLengthAndRejectsInvalidBounds(t *testing.T) {
 	_ = client.Close()
 }
 
+func TestProtocolFrameAcceptsExact4096ByteObject(t *testing.T) {
+	payload := []byte(`{"x":"` + strings.Repeat("a", ShimFrameMaxPayloadBytes-len(`{"x":""}`)) + `"}`)
+	if len(payload) != ShimFrameMaxPayloadBytes {
+		t.Fatalf("fixture length = %d", len(payload))
+	}
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := WriteFrame(client, payload)
+		done <- err
+	}()
+	got, err := ReadFrame(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("4096-byte payload changed across frame")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProtocolFrameReportsPartialEOFCounts(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(net.Conn)
+		want  string
+	}{
+		{
+			name: "header",
+			write: func(connection net.Conn) {
+				_, _ = connection.Write([]byte{0, 0})
+			},
+			want: "EOF after 2 of 4 header bytes",
+		},
+		{
+			name: "payload",
+			write: func(connection net.Conn) {
+				var header [4]byte
+				binary.BigEndian.PutUint32(header[:], 10)
+				_, _ = connection.Write(header[:])
+				_, _ = connection.Write([]byte("abc"))
+			},
+			want: "EOF after 3 of 10 payload bytes",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			go func() {
+				tt.write(client)
+				_ = client.Close()
+			}()
+			_, err := ReadFrame(server)
+			_ = server.Close()
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("ReadFrame error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestProtocolFrameReportsPartialWriteTimeoutCount(t *testing.T) {
+	payload := []byte(`{"version":1}`)
+	connection := &partialWriteTimeoutConn{}
+	written, err := WriteFrame(connection, payload)
+	if written != 3 {
+		t.Fatalf("written = %d, want 3", written)
+	}
+	if got, want := err.Error(), "frame write exceeded 2s after 3 of 17 bytes"; got != want {
+		t.Fatalf("WriteFrame error = %q, want %q", got, want)
+	}
+}
+
 func TestProtocolFrameRejectsMalformedPayloads(t *testing.T) {
 	for _, payload := range [][]byte{
 		{0xff},
@@ -324,6 +598,27 @@ func TestProtocolFrameDeadlineCoversWholeFrame(t *testing.T) {
 	}
 }
 
+func TestProtocolFrameHeaderTimeReducesPayloadDeadline(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+	go func() {
+		time.Sleep(1200 * time.Millisecond)
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], 10)
+		_, _ = client.Write(header[:])
+	}()
+	started := time.Now()
+	_, err := ReadFrame(server)
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "exceeded 2s during payload") {
+		t.Fatalf("ReadFrame error = %v, want payload deadline", err)
+	}
+	if elapsed < ShimProtocolIOTimeout || elapsed > ShimProtocolIOTimeout+700*time.Millisecond {
+		t.Fatalf("elapsed = %s, want one absolute %s deadline", elapsed, ShimProtocolIOTimeout)
+	}
+}
+
 func TestProtocolDeadlineSetupFailuresUseClosedFrameCauses(t *testing.T) {
 	wantErr := errors.New("injected deadline failure")
 	server, client := net.Pipe()
@@ -351,6 +646,27 @@ type deadlineFailureConn struct {
 
 func (c *deadlineFailureConn) SetReadDeadline(time.Time) error  { return c.readErr }
 func (c *deadlineFailureConn) SetWriteDeadline(time.Time) error { return c.writeErr }
+
+type partialWriteTimeoutConn struct {
+	net.Conn
+	writes int
+}
+
+func (c *partialWriteTimeoutConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *partialWriteTimeoutConn) Write([]byte) (int, error) {
+	c.writes++
+	if c.writes == 1 {
+		return 3, nil
+	}
+	return 0, timeoutError{}
+}
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
 
 func uint64Pointer(value uint64) *uint64 { return &value }
 func boolPointer(value bool) *bool       { return &value }

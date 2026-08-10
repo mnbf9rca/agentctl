@@ -15,7 +15,7 @@ import (
 var ErrShortKinfoProc = errors.New("sysctl returned a short kinfo_proc")
 
 // ErrInvalidProcessPID refuses process-group and special kill semantics.
-var ErrInvalidProcessPID = errors.New("process PID must be positive")
+var ErrInvalidProcessPID = errors.New("process PID must be a positive signed Darwin pid_t")
 
 // ProcessObservation is the closed factual result of the presence/token gate.
 type ProcessObservation string
@@ -54,7 +54,7 @@ func observeProcess(
 	killZero func(int, syscall.Signal) error,
 	readToken func(int) (StartToken, error),
 ) ProcessResult {
-	if pid <= 0 {
+	if !validDarwinPID(pid) {
 		return ProcessResult{Observation: ProcessCouldNotObserve, Err: ErrInvalidProcessPID}
 	}
 	err := killZero(pid, 0)
@@ -81,8 +81,8 @@ func observeProcess(
 // ReadStartToken reads raw kinfo_proc.p_starttime through
 // sysctl(KERN_PROC_PID). It performs no formatting or time conversion.
 func ReadStartToken(pid int) (StartToken, error) {
-	if pid <= 0 {
-		return StartToken{}, fmt.Errorf("PID must be positive")
+	if !validDarwinPID(pid) {
+		return StartToken{}, fmt.Errorf("PID must be a positive signed Darwin pid_t")
 	}
 	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {

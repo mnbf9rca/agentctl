@@ -4,6 +4,7 @@ package shim
 
 import (
 	"errors"
+	"math"
 	"os"
 	"os/exec"
 	"syscall"
@@ -82,6 +83,27 @@ func TestProcessObservationRejectsNonPositivePIDBeforeKill(t *testing.T) {
 		if killCalls != 0 {
 			t.Fatalf("observeProcess(%d) called kill %d times", pid, killCalls)
 		}
+	}
+}
+
+func TestProcessObservationRejectsPIDOutsideDarwinPIDTBeforeSyscalls(t *testing.T) {
+	pid := int(math.MaxInt32) + 1
+	killCalls := 0
+	result := observeProcess(pid, StartToken{Sec: 1}, func(int, syscall.Signal) error {
+		killCalls++
+		return unix.ESRCH
+	}, func(int) (StartToken, error) {
+		t.Fatal("token reader called for oversized PID")
+		return StartToken{}, nil
+	})
+	if result.Observation != ProcessCouldNotObserve || result.Err == nil || result.MayAuthorizeRelaunch() {
+		t.Fatalf("observeProcess(%d) = %#v, want refusing could-not-observe", pid, result)
+	}
+	if killCalls != 0 {
+		t.Fatalf("oversized PID reached kill %d times", killCalls)
+	}
+	if _, err := ReadStartToken(pid); err == nil {
+		t.Fatal("ReadStartToken accepted PID above signed Darwin pid_t")
 	}
 }
 

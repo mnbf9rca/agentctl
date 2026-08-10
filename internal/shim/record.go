@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 
@@ -15,6 +16,10 @@ import (
 )
 
 const recordMaxBytes = 64 * 1024
+
+const darwinPIDMax = int64(1<<31 - 1)
+
+func validDarwinPID(pid int) bool { return pid > 0 && int64(pid) <= darwinPIDMax }
 
 // StartToken is the raw Darwin kinfo_proc p_starttime timeval. It is not a
 // formatted timestamp and must be compared component-for-component.
@@ -53,6 +58,21 @@ type Record struct {
 	ChildStartToken *StartToken `json:"child_start_token,omitempty"`
 }
 
+// RecordParseError identifies malformed durable identity at the record
+// boundary without exposing it as a wire-protocol schema fact.
+type RecordParseError struct {
+	Cause string
+}
+
+func (e *RecordParseError) Error() string { return "could not parse durable record: " + e.Cause }
+
+func recordParseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &RecordParseError{Cause: err.Error()}
+}
+
 // NewChildStartingRecord constructs the reservation persisted before child
 // start. Validation remains mandatory at WriteRecord.
 func NewChildStartingRecord(session, role string, shimPID int, nonce string) Record {
@@ -75,8 +95,8 @@ func (r Record) WithChild(pid int, token StartToken) (Record, error) {
 	if r.State != RecordStateChildStarting {
 		return Record{}, errors.New("only child-starting may be upgraded")
 	}
-	if pid <= 0 {
-		return Record{}, errors.New("child PID must be positive")
+	if !validDarwinPID(pid) {
+		return Record{}, errors.New("child PID must be a positive signed Darwin pid_t")
 	}
 	if err := token.validate(); err != nil {
 		return Record{}, err
@@ -97,8 +117,8 @@ func validateRecord(record Record) error {
 	if err := config.ValidateRoleName(record.Role); err != nil {
 		return err
 	}
-	if record.ShimPID <= 0 {
-		return errors.New("record shim PID must be positive")
+	if !validDarwinPID(record.ShimPID) {
+		return errors.New("record shim PID must be a positive signed Darwin pid_t")
 	}
 	if record.Nonce == "" {
 		return errors.New("record nonce must not be empty")
@@ -109,7 +129,7 @@ func validateRecord(record Record) error {
 			return errors.New("child-starting record must not carry child identity")
 		}
 	case RecordStateChildRecorded:
-		if record.ChildPID <= 0 || record.ChildStartToken == nil {
+		if !validDarwinPID(record.ChildPID) || record.ChildStartToken == nil {
 			return errors.New("child-recorded record requires child PID and start token")
 		}
 		if err := record.ChildStartToken.validate(); err != nil {
@@ -150,6 +170,9 @@ func WriteRecord(path *RolePath, record Record) error {
 		return err
 	}
 	payload = append(payload, '\n')
+	if len(payload) > recordMaxBytes {
+		return fmt.Errorf("durable record exceeds %d bytes", recordMaxBytes)
+	}
 
 	path.mu.Lock()
 	defer path.mu.Unlock()
@@ -271,7 +294,13 @@ func ReadRecord(path *RolePath) (Record, error) {
 	}
 	pathInfo, err := path.stateRoles.Lstat(name)
 	fileInfo, statErr := file.Stat()
-	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+	if err != nil {
+		return Record{}, &FilesystemObservationError{Kind: "durable record", Path: path.Record, Operation: "lstat declared path", Err: err}
+	}
+	if statErr != nil {
+		return Record{}, &FilesystemObservationError{Kind: "durable record", Path: path.Record, Operation: "stat retained file", Err: statErr}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
 		return Record{}, fmt.Errorf("durable record %q was substituted", path.Record)
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, recordMaxBytes+1))
@@ -283,34 +312,43 @@ func ReadRecord(path *RolePath) (Record, error) {
 	}
 	fields, err := decodeJSONObject(payload)
 	if err != nil {
-		return Record{}, err
+		return Record{}, recordParseError(err)
 	}
 	allowed := map[string]bool{
 		"version": true, "state": true, "session": true, "role": true,
 		"shim_pid": true, "nonce": true, "child_pid": true, "child_start_token": true,
 	}
 	if err := requireFields(fields, allowed, []string{"version", "state", "session", "role", "shim_pid", "nonce"}); err != nil {
-		return Record{}, err
+		return Record{}, recordParseError(err)
 	}
 	if err := requireJSONTypes(fields, map[string]string{
 		"version": "integer", "state": "string", "session": "string", "role": "string",
 		"shim_pid": "integer", "nonce": "string", "child_pid": "integer", "child_start_token": "object",
 	}); err != nil {
-		return Record{}, err
+		return Record{}, recordParseError(err)
+	}
+	if err := requireJSONIntegerRange(fields, "version", big.NewInt(ShimProtocolVersion), big.NewInt(ShimProtocolVersion)); err != nil {
+		return Record{}, recordParseError(err)
+	}
+	if err := requireJSONIntegerRange(fields, "shim_pid", big.NewInt(1), big.NewInt(darwinPIDMax)); err != nil {
+		return Record{}, recordParseError(err)
+	}
+	if err := requireJSONIntegerRange(fields, "child_pid", big.NewInt(1), big.NewInt(darwinPIDMax)); err != nil {
+		return Record{}, recordParseError(err)
 	}
 	if len(fields["child_start_token"]) == 1 {
 		if err := validateStartTokenJSON(fields["child_start_token"][0]); err != nil {
-			return Record{}, err
+			return Record{}, recordParseError(err)
 		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var record Record
 	if err := decoder.Decode(&record); err != nil {
-		return Record{}, err
+		return Record{}, recordParseError(err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Record{}, errors.New("durable record has trailing JSON")
+		return Record{}, recordParseError(errors.New("durable record has trailing JSON"))
 	}
 	if err := validateRecord(record); err != nil {
 		return Record{}, err

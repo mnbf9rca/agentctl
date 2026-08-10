@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"strconv"
 	"strings"
@@ -87,22 +88,169 @@ type hello struct {
 	Version int `json:"version"`
 }
 
+// ProtocolSkewKind is the closed version pre-pass result.
+type ProtocolSkewKind string
+
+const (
+	ProtocolSkewAbsent     ProtocolSkewKind = "absent"
+	ProtocolSkewDuplicate  ProtocolSkewKind = "duplicate"
+	ProtocolSkewNonInteger ProtocolSkewKind = "non-integer"
+	ProtocolSkewForeign    ProtocolSkewKind = "foreign"
+)
+
 // ProtocolSkewError is selected by the version-only pre-pass before any
-// schema or operation field is interpreted.
+// schema or operation field is interpreted. Token is retained only for the
+// closed non-integer/foreign renderers.
 type ProtocolSkewError struct {
-	Observed string
+	Kind  ProtocolSkewKind
+	Token string
 }
 
 func (e *ProtocolSkewError) Error() string {
-	return fmt.Sprintf("protocol version was %s; expected %d", e.Observed, ShimProtocolVersion)
+	return fmt.Sprintf("protocol version was %s; expected %d", e.CanonicalObserved(), ShimProtocolVersion)
 }
 
-// ProtocolSchemaError reports a strict version-1 schema refusal.
+// CanonicalObserved returns only a §15.8 permitted version substitution.
+func (e *ProtocolSkewError) CanonicalObserved() string {
+	switch e.Kind {
+	case ProtocolSkewAbsent:
+		return "absent"
+	case ProtocolSkewDuplicate:
+		return "duplicate"
+	case ProtocolSkewNonInteger:
+		return strconv.Quote(e.Token)
+	case ProtocolSkewForeign:
+		return e.Token
+	default:
+		return "absent"
+	}
+}
+
+// ProtocolSchemaKind is the closed §15.8 version-1 schema cause set.
+type ProtocolSchemaKind string
+
+const (
+	ProtocolSchemaDuplicateField         ProtocolSchemaKind = "duplicate-field"
+	ProtocolSchemaUnknownField           ProtocolSchemaKind = "unknown-field"
+	ProtocolSchemaMissingRequiredField   ProtocolSchemaKind = "missing-required-field"
+	ProtocolSchemaWrongJSONType          ProtocolSchemaKind = "wrong-json-type"
+	ProtocolSchemaOperationNotRegistered ProtocolSchemaKind = "operation-not-registered"
+	ProtocolSchemaResponseFieldInvalid   ProtocolSchemaKind = "response-field-invalid"
+)
+
+// ProtocolSchemaError reports one structured strict version-1 schema refusal.
 type ProtocolSchemaError struct {
+	Kind         ProtocolSchemaKind
+	Field        string
+	ObservedType string
+	ExpectedType string
+	Operation    string
+	Outcome      Outcome
+}
+
+func (e *ProtocolSchemaError) Error() string { return e.CanonicalCause() }
+
+// CanonicalCause renders only one exact §15.8 schema cause.
+func (e *ProtocolSchemaError) CanonicalCause() string {
+	switch e.Kind {
+	case ProtocolSchemaDuplicateField:
+		return fmt.Sprintf("duplicate field %q", e.Field)
+	case ProtocolSchemaUnknownField:
+		return fmt.Sprintf("unknown field %q", e.Field)
+	case ProtocolSchemaMissingRequiredField:
+		return fmt.Sprintf("missing required field %q", e.Field)
+	case ProtocolSchemaWrongJSONType:
+		return fmt.Sprintf("field %q has JSON type %s; expected %s", e.Field, e.ObservedType, e.ExpectedType)
+	case ProtocolSchemaOperationNotRegistered:
+		return fmt.Sprintf("operation %q is not registered", e.Operation)
+	case ProtocolSchemaResponseFieldInvalid:
+		return fmt.Sprintf("response field %q is not valid for outcome %q", e.Field, e.Outcome)
+	default:
+		return "missing required field \"version\""
+	}
+}
+
+// ProtocolValueError is a typed version-1 value refusal that is deliberately
+// not rendered as one of the closed schema causes.
+type ProtocolValueError struct {
+	Field  string
 	Reason string
 }
 
-func (e *ProtocolSchemaError) Error() string { return e.Reason }
+func (e *ProtocolValueError) Error() string { return fmt.Sprintf("field %q %s", e.Field, e.Reason) }
+
+// JSONErrorKind is the closed lexical/object error set accepted by §15.8.
+type JSONErrorKind string
+
+const (
+	JSONInvalidUTF8       JSONErrorKind = "invalid-utf8"
+	JSONTrailingBytes     JSONErrorKind = "trailing-bytes"
+	JSONTopLevelNotObject JSONErrorKind = "top-level-not-object"
+	JSONSyntax            JSONErrorKind = "syntax"
+)
+
+// JSONError keeps syntax failures single-line and separate from schema facts.
+type JSONError struct {
+	Kind   JSONErrorKind
+	Detail string
+}
+
+func (e *JSONError) Error() string { return e.CanonicalCause() }
+
+func (e *JSONError) CanonicalCause() string {
+	switch e.Kind {
+	case JSONInvalidUTF8:
+		return "payload is not valid UTF-8"
+	case JSONTrailingBytes:
+		return "payload has trailing bytes after its JSON value"
+	case JSONTopLevelNotObject:
+		return "payload top level is not an object"
+	case JSONSyntax:
+		if e.Detail == "" {
+			return strconv.Quote("unexpected EOF")
+		}
+		return strconv.Quote(e.Detail)
+	default:
+		return strconv.Quote("unexpected EOF")
+	}
+}
+
+type objectSchemaError struct {
+	Kind         ProtocolSchemaKind
+	Field        string
+	ObservedType string
+	ExpectedType string
+}
+
+func (e *objectSchemaError) Error() string {
+	return (&ProtocolSchemaError{
+		Kind: e.Kind, Field: e.Field, ObservedType: e.ObservedType, ExpectedType: e.ExpectedType,
+	}).CanonicalCause()
+}
+
+type integerRangeError struct {
+	Field string
+	Value string
+}
+
+func (e *integerRangeError) Error() string {
+	return fmt.Sprintf("field %q integer %s is outside its permitted range", e.Field, e.Value)
+}
+
+func asProtocolError(err error) error {
+	var schema *objectSchemaError
+	if errors.As(err, &schema) {
+		return &ProtocolSchemaError{
+			Kind: schema.Kind, Field: schema.Field,
+			ObservedType: schema.ObservedType, ExpectedType: schema.ExpectedType,
+		}
+	}
+	var integerRange *integerRangeError
+	if errors.As(err, &integerRange) {
+		return &ProtocolValueError{Field: integerRange.Field, Reason: "is outside its permitted integer range"}
+	}
+	return err
+}
 
 func EncodeHello() ([]byte, error) {
 	return json.Marshal(hello{Version: ShimProtocolVersion})
@@ -116,7 +264,7 @@ func DecodeHello(payload []byte) error {
 	if err := requireCurrentVersion(fields); err != nil {
 		return err
 	}
-	return requireFields(fields, map[string]bool{"version": true}, []string{"version"})
+	return asProtocolError(requireFields(fields, map[string]bool{"version": true}, []string{"version"}))
 }
 
 func EncodeRequest(request Request) ([]byte, error) {
@@ -136,12 +284,12 @@ func DecodeRequest(payload []byte) (Request, error) {
 	}
 	allowed := map[string]bool{"version": true, "session": true, "role": true, "operation": true}
 	if err := requireFields(fields, allowed, []string{"version", "session", "role", "operation"}); err != nil {
-		return Request{}, err
+		return Request{}, asProtocolError(err)
 	}
 	if err := requireJSONTypes(fields, map[string]string{
 		"version": "integer", "session": "string", "role": "string", "operation": "string",
 	}); err != nil {
-		return Request{}, err
+		return Request{}, asProtocolError(err)
 	}
 	var request Request
 	if err := unmarshalStrictFields(payload, &request); err != nil {
@@ -155,7 +303,7 @@ func DecodeRequest(payload []byte) (Request, error) {
 
 func validateRequest(request Request) error {
 	if request.Version != ShimProtocolVersion {
-		return &ProtocolSkewError{Observed: strconv.Itoa(request.Version)}
+		return &ProtocolSkewError{Kind: ProtocolSkewForeign, Token: strconv.Itoa(request.Version)}
 	}
 	if err := config.ValidateSessionName(request.Session); err != nil {
 		return err
@@ -164,14 +312,14 @@ func validateRequest(request Request) error {
 		return err
 	}
 	if _, err := control.Lookup(request.Operation); err != nil {
-		return &ProtocolSchemaError{Reason: fmt.Sprintf("operation %q is not registered", request.Operation)}
+		return &ProtocolSchemaError{Kind: ProtocolSchemaOperationNotRegistered, Operation: request.Operation}
 	}
 	return nil
 }
 
 func EncodeResponse(response Response) ([]byte, error) {
 	if response.Version != ShimProtocolVersion {
-		return nil, &ProtocolSkewError{Observed: strconv.Itoa(response.Version)}
+		return nil, &ProtocolSkewError{Kind: ProtocolSkewForeign, Token: strconv.Itoa(response.Version)}
 	}
 	if err := validateResponse(response); err != nil {
 		return nil, err
@@ -194,7 +342,7 @@ func DecodeResponse(payload []byte) (Response, error) {
 		"observed_token": true, "caller_pid": true, "target_pid": true, "final_icanon": true, "final_echo": true,
 	}
 	if err := requireFields(fields, allowed, []string{"version", "outcome"}); err != nil {
-		return Response{}, err
+		return Response{}, asProtocolError(err)
 	}
 	if err := requireJSONTypes(fields, map[string]string{
 		"version": "integer", "outcome": "string", "state": "string", "shim_pid": "integer",
@@ -203,12 +351,21 @@ func DecodeResponse(payload []byte) (Response, error) {
 		"recorded_root": "string", "recorded_token": "object", "observed_token": "object",
 		"caller_pid": "integer", "target_pid": "integer", "final_icanon": "boolean", "final_echo": "boolean",
 	}); err != nil {
-		return Response{}, err
+		return Response{}, asProtocolError(err)
+	}
+	for _, name := range []string{"shim_pid", "child_pid", "caller_pid", "target_pid"} {
+		if err := requireJSONIntegerRange(fields, name, big.NewInt(1), big.NewInt(darwinPIDMax)); err != nil {
+			return Response{}, asProtocolError(err)
+		}
+	}
+	maxUint64 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
+	if err := requireJSONIntegerRange(fields, "bytes_written", big.NewInt(0), maxUint64); err != nil {
+		return Response{}, asProtocolError(err)
 	}
 	for _, name := range []string{"recorded_token", "observed_token"} {
 		if len(fields[name]) == 1 {
 			if err := validateStartTokenJSON(fields[name][0]); err != nil {
-				return Response{}, err
+				return Response{}, asProtocolError(err)
 			}
 		}
 	}
@@ -222,124 +379,111 @@ func DecodeResponse(payload []byte) (Response, error) {
 	return response, nil
 }
 
-var responseFieldSets = map[Outcome]map[string]bool{
-	OutcomeDeliverySubmitted:            {"bytes_written": true, "submit_observed": true},
-	OutcomeDeliveryCancelledClean:       {},
-	OutcomeDeliveryCancelledWithResidue: {"bytes_written": true},
-	OutcomeInvalidRecord:                {"cause": true, "record_path": true},
-	OutcomeStateRootDisagreement:        {"local_root": true, "recorded_root": true},
-	OutcomeProtocolSkew:                 {"cause": true},
-	OutcomeAnswererDisagreement:         {"shim_pid": true, "target_pid": true, "cause": true},
-	OutcomeStarting:                     {"state": true, "shim_pid": true, "child_pid": true},
-	OutcomeIndeterminateChildStarting:   {"state": true, "shim_pid": true, "record_path": true},
-	OutcomeRunning:                      {"state": true, "shim_pid": true, "child_pid": true},
-	OutcomeOrphan:                       {"shim_pid": true, "child_pid": true, "recorded_token": true, "observed_token": true},
-	OutcomePresentTokenDisagreement:     {"child_pid": true, "recorded_token": true, "observed_token": true},
-	OutcomePresentNotOurs:               {"child_pid": true},
-	OutcomeCouldNotObserve:              {"child_pid": true, "cause": true},
-	OutcomeStaleRecord:                  {"child_pid": true},
-	OutcomeMissing:                      {},
-	OutcomeCleanupFailed:                {"cause": true, "cleanup": true, "child_pid": true},
-	OutcomeConcurrentContender:          {"shim_pid": true, "cause": true},
-	OutcomeObservedSelfTarget:           {"caller_pid": true, "target_pid": true},
-	OutcomeAncestryUndetermined:         {"caller_pid": true, "target_pid": true, "cause": true},
-	OutcomeReadinessTimeout:             {"child_pid": true, "final_icanon": true, "final_echo": true, "cleanup": true},
-	OutcomeReadinessObservationFailed:   {"child_pid": true, "cause": true, "cleanup": true},
-	OutcomeChildExitedBeforeReady:       {"child_pid": true, "cleanup": true},
+type responseSchema struct {
+	allowed  map[string]bool
+	required []string
 }
 
-var responseRequiredFields = map[Outcome][]string{
-	OutcomeDeliverySubmitted:            {"bytes_written", "submit_observed"},
-	OutcomeDeliveryCancelledClean:       {},
-	OutcomeDeliveryCancelledWithResidue: {"bytes_written"},
-	OutcomeInvalidRecord:                {"cause", "record_path"},
-	OutcomeStateRootDisagreement:        {"local_root", "recorded_root"},
-	OutcomeProtocolSkew:                 {"cause"},
-	OutcomeAnswererDisagreement:         {"shim_pid", "target_pid", "cause"},
-	OutcomeStarting:                     {"state", "shim_pid"},
-	OutcomeIndeterminateChildStarting:   {"state", "shim_pid", "record_path"},
-	OutcomeRunning:                      {"state", "shim_pid", "child_pid"},
-	OutcomeOrphan:                       {"shim_pid", "child_pid", "recorded_token", "observed_token"},
-	OutcomePresentTokenDisagreement:     {"child_pid", "recorded_token", "observed_token"},
-	OutcomePresentNotOurs:               {"child_pid"},
-	OutcomeCouldNotObserve:              {"child_pid", "cause"},
-	OutcomeStaleRecord:                  {"child_pid"},
-	OutcomeMissing:                      {},
-	OutcomeCleanupFailed:                {"cause", "cleanup", "child_pid"},
-	OutcomeConcurrentContender:          {"shim_pid", "cause"},
-	OutcomeObservedSelfTarget:           {"caller_pid", "target_pid"},
-	OutcomeAncestryUndetermined:         {"caller_pid", "target_pid", "cause"},
-	OutcomeReadinessTimeout:             {"child_pid", "final_icanon", "final_echo", "cleanup"},
-	OutcomeReadinessObservationFailed:   {"child_pid", "cause", "cleanup"},
-	OutcomeChildExitedBeforeReady:       {"child_pid", "cleanup"},
+func newResponseSchema(required []string, optional ...string) responseSchema {
+	allowed := make(map[string]bool, len(required)+len(optional))
+	for _, field := range append(append([]string(nil), required...), optional...) {
+		allowed[field] = true
+	}
+	return responseSchema{allowed: allowed, required: required}
+}
+
+var responseSchemas = map[Outcome]responseSchema{
+	OutcomeDeliverySubmitted:            newResponseSchema([]string{"bytes_written", "submit_observed"}),
+	OutcomeDeliveryCancelledClean:       newResponseSchema(nil),
+	OutcomeDeliveryCancelledWithResidue: newResponseSchema([]string{"bytes_written"}),
+	OutcomeInvalidRecord:                newResponseSchema([]string{"cause", "record_path"}),
+	OutcomeStateRootDisagreement:        newResponseSchema([]string{"local_root", "recorded_root"}),
+	OutcomeProtocolSkew:                 newResponseSchema([]string{"cause"}),
+	OutcomeAnswererDisagreement:         newResponseSchema([]string{"shim_pid", "target_pid", "cause"}),
+	OutcomeStarting:                     newResponseSchema([]string{"state", "shim_pid"}, "child_pid"),
+	OutcomeIndeterminateChildStarting:   newResponseSchema([]string{"state", "shim_pid", "record_path"}),
+	OutcomeRunning:                      newResponseSchema([]string{"state", "shim_pid", "child_pid"}),
+	OutcomeOrphan:                       newResponseSchema([]string{"shim_pid", "child_pid", "recorded_token", "observed_token"}),
+	OutcomePresentTokenDisagreement:     newResponseSchema([]string{"child_pid", "recorded_token", "observed_token"}),
+	OutcomePresentNotOurs:               newResponseSchema([]string{"child_pid"}),
+	OutcomeCouldNotObserve:              newResponseSchema([]string{"child_pid", "cause"}),
+	OutcomeStaleRecord:                  newResponseSchema([]string{"child_pid"}),
+	OutcomeMissing:                      newResponseSchema(nil),
+	OutcomeCleanupFailed:                newResponseSchema([]string{"cause", "cleanup", "child_pid"}),
+	OutcomeConcurrentContender:          newResponseSchema([]string{"shim_pid", "cause"}),
+	OutcomeObservedSelfTarget:           newResponseSchema([]string{"caller_pid", "target_pid"}),
+	OutcomeAncestryUndetermined:         newResponseSchema([]string{"caller_pid", "target_pid", "cause"}),
+	OutcomeReadinessTimeout:             newResponseSchema([]string{"child_pid", "final_icanon", "final_echo", "cleanup"}),
+	OutcomeReadinessObservationFailed:   newResponseSchema([]string{"child_pid", "cause", "cleanup"}),
+	OutcomeChildExitedBeforeReady:       newResponseSchema([]string{"child_pid", "cleanup"}),
 }
 
 func validateResponse(response Response) error {
-	allowed, ok := responseFieldSets[response.Outcome]
+	schema, ok := responseSchemas[response.Outcome]
 	if !ok {
-		return &ProtocolSchemaError{Reason: fmt.Sprintf("unknown outcome %q", response.Outcome)}
+		return &ProtocolValueError{Field: "outcome", Reason: fmt.Sprintf("has unknown value %q", response.Outcome)}
 	}
 	present := responsePresentFields(response)
 	for field := range present {
-		if !allowed[field] {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("response field %q is not valid for outcome %q", field, response.Outcome)}
+		if !schema.allowed[field] {
+			return &ProtocolSchemaError{Kind: ProtocolSchemaResponseFieldInvalid, Field: field, Outcome: response.Outcome}
 		}
 	}
-	for _, required := range responseRequiredFields[response.Outcome] {
+	for _, required := range schema.required {
 		if !present[required] {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("missing required field %q", required)}
+			return &ProtocolSchemaError{Kind: ProtocolSchemaMissingRequiredField, Field: required}
 		}
 	}
 	for name, pid := range map[string]*int{
 		"shim_pid": response.ShimPID, "child_pid": response.ChildPID,
 		"caller_pid": response.CallerPID, "target_pid": response.TargetPID,
 	} {
-		if pid != nil && *pid <= 0 {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q must be a positive integer", name)}
+		if pid != nil && !validDarwinPID(*pid) {
+			return &ProtocolValueError{Field: name, Reason: "must be a positive signed Darwin pid_t"}
 		}
 	}
 	for name, token := range map[string]*StartToken{
 		"recorded_token": response.RecordedToken, "observed_token": response.ObservedToken,
 	} {
 		if token != nil && (token.Sec <= 0 || token.Usec < 0 || token.Usec >= 1_000_000) {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q must be a raw timeval", name)}
+			return &ProtocolValueError{Field: name, Reason: "must be a raw timeval"}
 		}
 	}
 	switch response.Outcome {
 	case OutcomeDeliverySubmitted:
 		if *response.BytesWritten == 0 {
-			return &ProtocolSchemaError{Reason: `field "bytes_written" must be positive for outcome "delivery-submitted"`}
+			return &ProtocolValueError{Field: "bytes_written", Reason: `must be positive for outcome "delivery-submitted"`}
 		}
 		if !*response.SubmitObserved {
-			return &ProtocolSchemaError{Reason: `field "submit_observed" must be true for outcome "delivery-submitted"`}
+			return &ProtocolValueError{Field: "submit_observed", Reason: `must be true for outcome "delivery-submitted"`}
 		}
 	case OutcomeDeliveryCancelledWithResidue:
 		if *response.BytesWritten == 0 {
-			return &ProtocolSchemaError{Reason: `field "bytes_written" must be positive for outcome "delivery-cancelled-with-residue"`}
+			return &ProtocolValueError{Field: "bytes_written", Reason: `must be positive for outcome "delivery-cancelled-with-residue"`}
 		}
 	case OutcomeStarting:
 		if *response.State != string(RecordStateChildStarting) && *response.State != string(RecordStateChildRecorded) {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
 		}
 	case OutcomeIndeterminateChildStarting:
 		if *response.State != string(RecordStateChildStarting) {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
 		}
 	case OutcomeRunning:
 		if *response.State != string(OutcomeRunning) {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has invalid state %q for outcome %q", "state", *response.State, response.Outcome)}
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
 		}
 	case OutcomeStateRootDisagreement:
 		if *response.LocalRoot == *response.RecordedRoot {
-			return &ProtocolSchemaError{Reason: "state-root-disagreement requires different local_root and recorded_root values"}
+			return &ProtocolValueError{Field: "local_root", Reason: "must differ from recorded_root for state-root-disagreement"}
 		}
 	case OutcomeOrphan:
 		if !response.RecordedToken.Equal(*response.ObservedToken) {
-			return &ProtocolSchemaError{Reason: "orphan requires equal recorded_token and observed_token values"}
+			return &ProtocolValueError{Field: "observed_token", Reason: "must equal recorded_token for orphan"}
 		}
 	case OutcomePresentTokenDisagreement:
 		if response.RecordedToken.Equal(*response.ObservedToken) {
-			return &ProtocolSchemaError{Reason: "present-token-disagreement requires different recorded_token and observed_token values"}
+			return &ProtocolValueError{Field: "observed_token", Reason: "must differ from recorded_token for present-token-disagreement"}
 		}
 	}
 	return nil
@@ -369,61 +513,69 @@ func responsePresentFields(response Response) map[string]bool {
 
 func decodeJSONObject(payload []byte) (map[string][]json.RawMessage, error) {
 	if !utf8.Valid(payload) {
-		return nil, errors.New("payload is not valid UTF-8")
+		return nil, &JSONError{Kind: JSONInvalidUTF8}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.UseNumber()
 	first, err := decoder.Token()
 	if err != nil {
-		return nil, err
+		return nil, canonicalJSONError(err)
 	}
 	delimiter, ok := first.(json.Delim)
 	if !ok || delimiter != '{' {
-		return nil, errors.New("payload top level is not an object")
+		return nil, &JSONError{Kind: JSONTopLevelNotObject}
 	}
 	fields := make(map[string][]json.RawMessage)
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
-			return nil, err
+			return nil, canonicalJSONError(err)
 		}
 		name, ok := token.(string)
 		if !ok {
-			return nil, errors.New("object field name is not a string")
+			return nil, &JSONError{Kind: JSONSyntax, Detail: "object field name is not a string"}
 		}
 		var raw json.RawMessage
 		if err := decoder.Decode(&raw); err != nil {
-			return nil, err
+			return nil, canonicalJSONError(err)
 		}
 		fields[name] = append(fields[name], append(json.RawMessage(nil), raw...))
 	}
 	if _, err := decoder.Token(); err != nil {
-		return nil, err
+		return nil, canonicalJSONError(err)
 	}
 	if trailing := bytes.TrimSpace(payload[decoder.InputOffset():]); len(trailing) != 0 {
-		return nil, errors.New("payload has trailing bytes after its JSON value")
+		return nil, &JSONError{Kind: JSONTrailingBytes}
 	}
 	return fields, nil
+}
+
+func canonicalJSONError(err error) error {
+	detail := err.Error()
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		detail = "unexpected EOF"
+	}
+	return &JSONError{Kind: JSONSyntax, Detail: detail}
 }
 
 func requireCurrentVersion(fields map[string][]json.RawMessage) error {
 	versions := fields["version"]
 	if len(versions) == 0 {
-		return &ProtocolSkewError{Observed: "absent"}
+		return &ProtocolSkewError{Kind: ProtocolSkewAbsent}
 	}
 	if len(versions) != 1 {
-		return &ProtocolSkewError{Observed: "duplicate"}
+		return &ProtocolSkewError{Kind: ProtocolSkewDuplicate}
 	}
 	raw := strings.TrimSpace(string(versions[0]))
-	if raw == "" || strings.ContainsAny(raw, ".eE") {
-		return &ProtocolSkewError{Observed: raw}
+	if raw == "" || strings.ContainsAny(raw, ".eE") || !isJSONInteger(versions[0]) {
+		return &ProtocolSkewError{Kind: ProtocolSkewNonInteger, Token: raw}
 	}
-	version, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return &ProtocolSkewError{Observed: raw}
+	version, ok := new(big.Int).SetString(raw, 10)
+	if !ok {
+		return &ProtocolSkewError{Kind: ProtocolSkewNonInteger, Token: raw}
 	}
-	if version != ShimProtocolVersion {
-		return &ProtocolSkewError{Observed: strconv.FormatInt(version, 10)}
+	if version.Cmp(big.NewInt(ShimProtocolVersion)) != 0 {
+		return &ProtocolSkewError{Kind: ProtocolSkewForeign, Token: version.String()}
 	}
 	return nil
 }
@@ -431,15 +583,15 @@ func requireCurrentVersion(fields map[string][]json.RawMessage) error {
 func requireFields(fields map[string][]json.RawMessage, allowed map[string]bool, required []string) error {
 	for name, values := range fields {
 		if len(values) > 1 {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("duplicate field %q", name)}
+			return &objectSchemaError{Kind: ProtocolSchemaDuplicateField, Field: name}
 		}
 		if !allowed[name] {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("unknown field %q", name)}
+			return &objectSchemaError{Kind: ProtocolSchemaUnknownField, Field: name}
 		}
 	}
 	for _, name := range required {
 		if len(fields[name]) == 0 {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("missing required field %q", name)}
+			return &objectSchemaError{Kind: ProtocolSchemaMissingRequiredField, Field: name}
 		}
 	}
 	return nil
@@ -456,8 +608,24 @@ func requireJSONTypes(fields map[string][]json.RawMessage, expected map[string]s
 			continue
 		}
 		if observed != expectedType {
-			return &ProtocolSchemaError{Reason: fmt.Sprintf("field %q has JSON type %s; expected %s", name, observed, expectedType)}
+			return &objectSchemaError{
+				Kind: ProtocolSchemaWrongJSONType, Field: name,
+				ObservedType: observed, ExpectedType: expectedType,
+			}
 		}
+	}
+	return nil
+}
+
+func requireJSONIntegerRange(fields map[string][]json.RawMessage, name string, minimum, maximum *big.Int) error {
+	values := fields[name]
+	if len(values) != 1 {
+		return nil
+	}
+	raw := strings.TrimSpace(string(values[0]))
+	value, ok := new(big.Int).SetString(raw, 10)
+	if !ok || value.Cmp(minimum) < 0 || value.Cmp(maximum) > 0 {
+		return &integerRangeError{Field: name, Value: raw}
 	}
 	return nil
 }
@@ -471,7 +639,13 @@ func validateStartTokenJSON(raw json.RawMessage) error {
 	if err := requireFields(fields, allowed, []string{"sec", "usec"}); err != nil {
 		return err
 	}
-	return requireJSONTypes(fields, map[string]string{"sec": "integer", "usec": "integer"})
+	if err := requireJSONTypes(fields, map[string]string{"sec": "integer", "usec": "integer"}); err != nil {
+		return err
+	}
+	if err := requireJSONIntegerRange(fields, "sec", big.NewInt(1), big.NewInt(1<<63-1)); err != nil {
+		return err
+	}
+	return requireJSONIntegerRange(fields, "usec", big.NewInt(0), big.NewInt(999_999))
 }
 
 func jsonType(raw json.RawMessage) string {
@@ -500,19 +674,15 @@ func isJSONInteger(raw json.RawMessage) bool {
 	if value == "" || strings.ContainsAny(value, ".eE") {
 		return false
 	}
-	_, err := strconv.ParseInt(value, 10, 64)
-	if err == nil {
-		return true
-	}
-	_, err = strconv.ParseUint(value, 10, 64)
-	return err == nil
+	_, ok := new(big.Int).SetString(value, 10)
+	return ok
 }
 
 func unmarshalStrictFields(payload []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
-		return &ProtocolSchemaError{Reason: err.Error()}
+		return &ProtocolValueError{Field: "payload", Reason: "could not be decoded after strict validation"}
 	}
 	return nil
 }
