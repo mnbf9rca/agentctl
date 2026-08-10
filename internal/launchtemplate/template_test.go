@@ -270,6 +270,61 @@ func TestDecoderFixtureErrorsPinStrictnessOrderAndMessageShape(t *testing.T) {
 	}
 }
 
+func TestDecoderSchemaFailuresKeepAgentctlDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "relative directory",
+			contents: `{"version":1,"dir":"relative/work"}`,
+			want:     `template /fleet.json: dir: path "relative/work" must be absolute; omit dir and supply --dir at invocation`,
+		},
+		{
+			name:     "invalid role name",
+			contents: `{"version":1,"roles":[{"role":"Planner"}]}`,
+			want:     `template /fleet.json: roles[0].role: value "Planner" must match ^[a-z0-9][a-z0-9_-]*$`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+		})
+	}
+}
+
+func TestDecoderRejectsSchemaKeywordBeforeGenericUnknownFieldHandling(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1,"$schema":"https://example.invalid/fleet-template.schema.json"}`),
+		`template /fleet.json: "$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`,
+	)
+}
+
+func TestDecoderKeepsVersionOneLexicallyExact(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1.0}`),
+		`template /fleet.json: version: must be exactly 1, got 1.0`,
+	)
+}
+
+func TestDecoderTreatsMalformedTrailingContentAsAnotherDocument(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1} trailing`),
+		`template /fleet.json: must contain exactly one JSON document`,
+	)
+}
+
 func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testing.T) {
 	t.Parallel()
 
@@ -279,10 +334,10 @@ func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testi
 	}
 	want := Document{
 		Path:      filepath.Join("testdata", "valid-partial.json"),
-		Directory: stringPointer("relative-is-validated-by-config"),
+		Directory: stringPointer("/schema-valid-directory"),
 		Roles: []Role{
 			{Name: "planner"},
-			{Name: "Reviewer", Harness: stringPointer("future-harness"), Model: stringPointer("bad model"), Effort: stringPointer("extreme")},
+			{Name: "reviewer", Harness: stringPointer("future-harness"), Model: stringPointer("bad model"), Effort: stringPointer("extreme")},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -320,3 +375,20 @@ func assertTemplateError(t *testing.T, err error, want string) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func decodeTemplateContents(t *testing.T, contents string) error {
+	t.Helper()
+
+	var events []string
+	_, err := (Decoder{Open: func(path string) (File, error) {
+		if path != "/fleet.json" {
+			t.Fatalf("Open path = %q, want /fleet.json", path)
+		}
+		return &stubFile{
+			reader: strings.NewReader(contents),
+			info:   stubFileInfo{mode: 0o600},
+			events: &events,
+		}, nil
+	}}).Decode("/fleet.json")
+	return err
+}

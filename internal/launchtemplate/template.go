@@ -11,12 +11,41 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/mnbf9rca/agentctl/skills"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
 
 // MaxBytes is the largest launch template agentctl will read.
 const MaxBytes = 1 << 20
+
+const fleetTemplateSchemaPath = skills.Root + "/references/fleet-template.schema.json"
+
+var fleetTemplateSchema = mustCompileFleetTemplateSchema()
+
+func mustCompileFleetTemplateSchema() *jsonschema.Schema {
+	contents, err := skills.Tree.ReadFile(fleetTemplateSchemaPath)
+	if err != nil {
+		panic(fmt.Sprintf("read embedded launch template schema: %v", err))
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(contents))
+	if err != nil {
+		panic(fmt.Sprintf("decode embedded launch template schema: %v", err))
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(fleetTemplateSchemaPath, document); err != nil {
+		panic(fmt.Sprintf("register embedded launch template schema: %v", err))
+	}
+	schema, err := compiler.Compile(fleetTemplateSchemaPath)
+	if err != nil {
+		panic(fmt.Sprintf("compile embedded launch template schema: %v", err))
+	}
+	return schema
+}
 
 // File is the opened descriptor the decoder verifies and then reads.
 type File interface {
@@ -125,87 +154,86 @@ func fileKind(mode fs.FileMode) string {
 
 type versionState struct {
 	present bool
-	value   any
+	raw     json.RawMessage
+}
+
+type tokenState struct {
+	version     versionState
+	trailing    bool
+	schema      bool
+	session     bool
+	rootUnknown *unknownFieldError
+	roleUnknown *unknownFieldError
+}
+
+type unknownFieldError struct {
+	Location string
+	Field    string
 }
 
 func decodeDocument(path string, contents []byte) (Document, error) {
-	version, err := inspectTokens(path, contents)
+	tokens, err := inspectTokens(path, contents)
 	if err != nil {
 		return Document{}, err
 	}
-	if err := requireVersion(path, version); err != nil {
+	if err := requireVersion(path, tokens.version); err != nil {
 		return Document{}, err
+	}
+	if tokens.trailing {
+		return Document{}, templateError(path, "", "must contain exactly one JSON document", nil)
+	}
+	if tokens.schema {
+		return Document{}, templateError(path, "", `"$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`, nil)
+	}
+	if tokens.session {
+		return Document{}, templateError(path, "", `"session" is not a template field; session identity is supplied per invocation with --session`, nil)
+	}
+	if tokens.rootUnknown != nil {
+		return Document{}, templateError(path, tokens.rootUnknown.Location, fmt.Sprintf("unknown field %q", tokens.rootUnknown.Field), nil)
+	}
+	if tokens.roleUnknown != nil {
+		return Document{}, templateError(path, tokens.roleUnknown.Location, fmt.Sprintf("unknown field %q", tokens.roleUnknown.Field), nil)
+	}
+
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(contents))
+	if err != nil {
+		return Document{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
+	}
+	if err := fleetTemplateSchema.Validate(instance); err != nil {
+		return Document{}, translateSchemaError(path, err)
 	}
 
 	var wire documentWire
-	if err := strictDecode(contents, &wire); err != nil {
-		if isTrailingDocument(err) {
-			return Document{}, templateError(path, "", "must contain exactly one JSON document", err)
-		}
-		return Document{}, decoderError(path, "", err)
+	if err := json.Unmarshal(contents, &wire); err != nil {
+		return Document{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
 	}
-	if wire.Session != nil {
-		return Document{}, templateError(path, "", `"session" is not a template field; session identity is supplied per invocation with --session`, nil)
-	}
-
-	directory, err := optionalString(path, "dir", wire.Directory)
-	if err != nil {
-		return Document{}, err
-	}
-	roles, err := decodeRoles(path, wire.Roles)
-	if err != nil {
-		return Document{}, err
-	}
-	return Document{Path: path, Directory: directory, Roles: roles}, nil
+	return decodeWire(path, wire)
 }
 
-func inspectTokens(path string, contents []byte) (versionState, error) {
+func inspectTokens(path string, contents []byte) (tokenState, error) {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.UseNumber()
-	var version versionState
-	if err := scanValue(decoder, "", true, &version); err != nil {
+	var state tokenState
+	if err := scanValue(decoder, "", true, &state, contents); err != nil {
 		var duplicate *duplicateFieldError
 		if errors.As(err, &duplicate) {
-			return versionState{}, templateError(path, duplicate.Location, fmt.Sprintf("duplicate field %q", duplicate.Field), err)
+			return tokenState{}, templateError(path, duplicate.Location, fmt.Sprintf("duplicate field %q", duplicate.Field), err)
 		}
-		return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
+		return tokenState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
 	}
-	if version.present {
-		value, err := decodeVersionValue(contents)
-		if err != nil {
-			return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
-		}
-		version.value = value
+	if _, err := decoder.Token(); err != io.EOF {
+		state.trailing = true
 	}
-	return version, nil
+	return state, nil
 }
 
-func decodeVersionValue(contents []byte) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.UseNumber()
-	var root map[string]json.RawMessage
-	if err := decoder.Decode(&root); err != nil {
-		return nil, err
-	}
-	decoder = json.NewDecoder(bytes.NewReader(root["version"]))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
-func scanValue(decoder *json.Decoder, location string, root bool, version *versionState) error {
+func scanValue(decoder *json.Decoder, location string, root bool, state *tokenState, contents []byte) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
 	delimiter, composite := token.(json.Delim)
 	if !composite {
-		if location == "version" {
-			version.value = token
-		}
 		return nil
 	}
 
@@ -225,12 +253,31 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 				return &duplicateFieldError{Location: location, Field: key}
 			}
 			seen[key] = struct{}{}
+
+			valueStart := decoder.InputOffset()
 			child := fieldLocation(location, key)
-			if root && key == "version" {
-				version.present = true
+			if root {
+				switch key {
+				case "version":
+					state.version.present = true
+				case "$schema":
+					state.schema = true
+				case "session":
+					state.session = true
+				default:
+					if !isDocumentField(key) && state.rootUnknown == nil {
+						state.rootUnknown = &unknownFieldError{Location: location, Field: key}
+					}
+				}
+			} else if isRoleObjectLocation(location) && !isRoleField(key) && state.roleUnknown == nil {
+				state.roleUnknown = &unknownFieldError{Location: location, Field: key}
 			}
-			if err := scanValue(decoder, child, false, version); err != nil {
+
+			if err := scanValue(decoder, child, false, state, contents); err != nil {
 				return err
+			}
+			if root && key == "version" {
+				state.version.raw = rawValue(contents[valueStart:decoder.InputOffset()])
 			}
 		}
 		_, err = decoder.Token()
@@ -239,7 +286,7 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 		index := 0
 		for decoder.More() {
 			child := fmt.Sprintf("%s[%d]", location, index)
-			if err := scanValue(decoder, child, false, version); err != nil {
+			if err := scanValue(decoder, child, false, state, contents); err != nil {
 				return err
 			}
 			index++
@@ -249,6 +296,38 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 	default:
 		return fmt.Errorf("unexpected delimiter %q", delimiter)
 	}
+}
+
+func rawValue(value []byte) json.RawMessage {
+	value = bytes.TrimSpace(value)
+	value = bytes.TrimLeft(value, ": \t\r\n")
+	return append(json.RawMessage(nil), bytes.TrimSpace(value)...)
+}
+
+func isDocumentField(field string) bool {
+	switch field {
+	case "version", "dir", "roles", "session", "$schema":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRoleField(field string) bool {
+	switch field {
+	case "role", "harness", "model", "effort":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRoleObjectLocation(location string) bool {
+	if !strings.HasPrefix(location, "roles[") || !strings.HasSuffix(location, "]") {
+		return false
+	}
+	_, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(location, "roles["), "]"))
+	return err == nil
 }
 
 type duplicateFieldError struct {
@@ -267,16 +346,34 @@ func requireVersion(path string, version versionState) error {
 	if !version.present {
 		return templateError(path, "version", "is required", nil)
 	}
-	number, ok := version.value.(json.Number)
+	if string(version.raw) == "1" {
+		return nil
+	}
+
+	value, err := decodeRawJSON(version.raw)
+	if err != nil {
+		return templateError(path, "", "invalid JSON: "+err.Error(), err)
+	}
+	number, ok := value.(json.Number)
 	if !ok || string(number) != "1" {
 		if ok {
 			if integer, err := number.Int64(); err == nil {
 				return templateError(path, "", fmt.Sprintf("version %d is not supported by this agentctl (supports 1)", integer), nil)
 			}
 		}
-		return templateError(path, "version", "must be exactly 1, got "+renderJSONValue(version.value), nil)
+		return templateError(path, "version", "must be exactly 1, got "+renderJSONValue(value), nil)
 	}
 	return nil
+}
+
+func decodeRawJSON(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func renderJSONValue(value any) string {
@@ -291,133 +388,122 @@ func renderJSONValue(value any) string {
 }
 
 type documentWire struct {
-	Version   json.RawMessage `json:"version"`
-	Directory json.RawMessage `json:"dir"`
-	Roles     json.RawMessage `json:"roles"`
-	Session   json.RawMessage `json:"session"`
+	Version   int        `json:"version"`
+	Directory *string    `json:"dir"`
+	Roles     []roleWire `json:"roles"`
 }
 
 type roleWire struct {
-	Name    json.RawMessage `json:"role"`
-	Harness json.RawMessage `json:"harness"`
-	Model   json.RawMessage `json:"model"`
-	Effort  json.RawMessage `json:"effort"`
+	Name    *string `json:"role"`
+	Harness *string `json:"harness"`
+	Model   *string `json:"model"`
+	Effort  *string `json:"effort"`
 }
 
-type trailingDocumentError struct{ Cause error }
-
-func (e *trailingDocumentError) Error() string { return e.Cause.Error() }
-func (e *trailingDocumentError) Unwrap() error { return e.Cause }
-
-func strictDecode(contents []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("found another JSON value")
-		}
-		return &trailingDocumentError{Cause: err}
-	}
-	return nil
-}
-
-func isTrailingDocument(err error) bool {
-	_, ok := err.(*trailingDocumentError)
-	return ok
-}
-
-func decodeRoles(path string, raw json.RawMessage) ([]Role, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, templateError(path, "roles", "must not be null; omit the field instead", nil)
-	}
-	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, templateError(path, "roles", "must be an array", err)
-	}
-
-	roles := make([]Role, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
-	for index, entry := range entries {
+func decodeWire(path string, wire documentWire) (Document, error) {
+	roles := make([]Role, 0, len(wire.Roles))
+	seen := make(map[string]struct{}, len(wire.Roles))
+	for index, role := range wire.Roles {
 		location := fmt.Sprintf("roles[%d]", index)
-		trimmed := bytes.TrimSpace(entry)
-		if len(trimmed) == 0 || trimmed[0] != '{' {
-			return nil, templateError(path, location, "must be an object", nil)
+		if role.Name == nil {
+			return Document{}, templateError(path, location+".role", "is required", nil)
 		}
-		var wire roleWire
-		if err := strictDecode(entry, &wire); err != nil {
-			return nil, decoderError(path, location, err)
+		if _, duplicate := seen[*role.Name]; duplicate {
+			return Document{}, templateError(path, location, fmt.Sprintf("duplicate role %q", *role.Name), nil)
 		}
-
-		name, err := requiredString(path, location+".role", wire.Name)
-		if err != nil {
-			return nil, err
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return nil, templateError(path, location, fmt.Sprintf("duplicate role %q", name), nil)
-		}
-		seen[name] = struct{}{}
-
-		harness, err := optionalString(path, location+".harness", wire.Harness)
-		if err != nil {
-			return nil, err
-		}
-		model, err := optionalString(path, location+".model", wire.Model)
-		if err != nil {
-			return nil, err
-		}
-		effort, err := optionalString(path, location+".effort", wire.Effort)
-		if err != nil {
-			return nil, err
-		}
-		roles = append(roles, Role{Name: name, Harness: harness, Model: model, Effort: effort})
+		seen[*role.Name] = struct{}{}
+		roles = append(roles, Role{Name: *role.Name, Harness: role.Harness, Model: role.Model, Effort: role.Effort})
 	}
-	return roles, nil
+	return Document{Path: path, Directory: wire.Directory, Roles: roles}, nil
 }
 
-func requiredString(path, location string, raw json.RawMessage) (string, error) {
-	if raw == nil {
-		return "", templateError(path, location, "is required", nil)
+func translateSchemaError(path string, err error) error {
+	var validation *jsonschema.ValidationError
+	if !errors.As(err, &validation) {
+		return templateError(path, "", "does not match the embedded template schema", err)
 	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", templateError(path, location, "must not be null", nil)
+	failure := firstSchemaFailure(validation)
+	if failure == nil {
+		return templateError(path, "", "does not match the embedded template schema", err)
 	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", templateError(path, location, "must be a string", err)
+	location := schemaLocation(failure.InstanceLocation)
+	switch issue := failure.ErrorKind.(type) {
+	case *kind.Required:
+		return templateError(path, fieldLocation(location, issue.Missing[0]), "is required", err)
+	case *kind.Type:
+		return schemaTypeError(path, location, issue.Got, err)
+	case *kind.MinLength:
+		if strings.HasSuffix(location, ".role") {
+			return templateError(path, location, "must not be empty", err)
+		}
+		return templateError(path, location, "must not be empty; omit the field instead", err)
+	case *kind.Pattern:
+		if location == "dir" {
+			if issue.Got == "" {
+				return templateError(path, location, "must not be empty; omit the field instead", err)
+			}
+			return templateError(path, location, fmt.Sprintf("path %q must be absolute; omit dir and supply --dir at invocation", issue.Got), err)
+		}
+		if issue.Got == "" {
+			return templateError(path, location, "must not be empty", err)
+		}
+		return templateError(path, location, fmt.Sprintf("value %q must match ^[a-z0-9][a-z0-9_-]*$", issue.Got), err)
+	case *kind.AdditionalProperties:
+		return templateError(path, location, fmt.Sprintf("unknown field %q", issue.Properties[0]), err)
+	default:
+		return templateError(path, location, "does not match the embedded template schema", err)
 	}
-	if value == "" {
-		return "", templateError(path, location, "must not be empty", nil)
-	}
-	return value, nil
 }
 
-func optionalString(path, location string, raw json.RawMessage) (*string, error) {
-	if raw == nil {
-		return nil, nil
+func firstSchemaFailure(validation *jsonschema.ValidationError) *jsonschema.ValidationError {
+	for _, cause := range validation.Causes {
+		if failure := firstSchemaFailure(cause); failure != nil {
+			return failure
+		}
 	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, templateError(path, location, "must not be null; omit the field instead", nil)
+	if _, root := validation.ErrorKind.(*kind.Schema); root {
+		return nil
 	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, templateError(path, location, "must be a string", err)
-	}
-	if value == "" {
-		return nil, templateError(path, location, "must not be empty; omit the field instead", nil)
-	}
-	return &value, nil
+	return validation
 }
 
-func decoderError(path, location string, err error) error {
-	reason := strings.TrimPrefix(err.Error(), "json: ")
-	return templateError(path, location, reason, err)
+func schemaTypeError(path, location, got string, cause error) error {
+	switch {
+	case location == "dir":
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	case location == "roles":
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be an array", cause)
+	case isRoleObjectLocation(location):
+		return templateError(path, location, "must be an object", cause)
+	case strings.HasSuffix(location, ".role"):
+		if got == "null" {
+			return templateError(path, location, "must not be null", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	default:
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	}
+}
+
+func schemaLocation(parts []string) string {
+	var location string
+	for index, part := range parts {
+		if index == 1 && parts[0] == "roles" {
+			location += "[" + part + "]"
+			continue
+		}
+		location = fieldLocation(location, part)
+	}
+	return location
 }
 
 func templateError(path, location, reason string, cause error) *Error {
