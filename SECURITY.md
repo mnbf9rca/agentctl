@@ -36,9 +36,12 @@ verification bypass could affect a built binary. Review every dependency change
 with its version, `go mod graph`, and `go.sum`; do not add dependencies merely
 for convenience. CI runs the pinned govulncheck scanner on every pull request
 and daily on `main`, covering dependencies introduced by a change and advisories
-published after merge. Dependencies are compiled into release artifacts and are
-not fetched or selected from template input at runtime. Template schemas remain
-an embedded, release-reviewed asset, so a template cannot choose code, a schema
+published after merge. Dependabot opens grouped monthly version-update pull
+requests for Go modules and GitHub Actions and opens security-update pull
+requests when advisories publish; both pass through the same required CI and
+govulncheck checks. Dependencies are compiled into release artifacts and are not
+fetched or selected from template input at runtime. Template schemas remain an
+embedded, release-reviewed asset, so a template cannot choose code, a schema
 location, or a validator.
 
 Release archives reproduce the upstream license for
