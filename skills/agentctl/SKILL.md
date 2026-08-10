@@ -3,7 +3,7 @@ name: agentctl
 description: Use when operating an agentctl fleet from inside it — checking sibling agent status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
 compatibility: Requires the agentctl binary on PATH, run from inside an agentctl-managed tmux window.
 metadata:
-  version: "0.4.0"
+  version: "0.4.1"
 ---
 
 # Driving agentctl

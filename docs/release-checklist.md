@@ -220,6 +220,11 @@ The Part C wrapper's current authentication, consent, launch, and cleanup legs
 introduced for #148 were executed in the [#178 audit and final
 re-gate](https://github.com/mnbf9rca/agentctl/pull/178#issuecomment-5230449087).
 
+The Part C synthesized-onboarding seed, link-only consent scope, and C.C1
+no-reauthentication mechanism changed for #188 were executed in the [#199
+probe, mutation checks, and final reviewer
+gate](https://github.com/mnbf9rca/agentctl/pull/199#issuecomment-5236425269).
+
 If the Claude link is declined or its fixed source is absent, the verifier
 offers guided Claude sign-in instead. On consent it creates a mode-`0700`
 `$TEMP_HOME/Library/Keychains` and an empty `login.keychain-db` there with
