@@ -1723,10 +1723,12 @@ paper's Option A fallback could replace this contract.
 
 The runtime plane is authoritative for role identity, liveness, status, and control. One resident agentctl shim owns
 one role, holds its kernel claim, runs the unchanged `amq coop exec ... HARNESS` argv on a nested PTY, and serves one
-versioned local socket. The socket protocol carries closed-registry operation names only. The server resolves the
-operation through `internal/control`; no request or decoder field can represent payload bytes, raw keys, slash
-commands, arguments, model values, environment values, or caller text. The shim is the sole writer to the harness
-PTY, serializing relayed operator input and registered control bytes at one point.
+versioned local socket. The request's only delivery instruction is one closed-registry operation name; its other
+permitted values are framing/version and validated session/role identity, and the response carries only
+framing/version and typed objective facts. The server resolves the operation through `internal/control`; no request or
+decoder field can represent payload bytes, raw keys, slash commands, arguments, model values, environment values, or
+caller text. The exact §15.5 schema is not broadened. The shim is the sole writer to the harness PTY, serializing
+relayed operator input and registered control bytes at one point.
 
 tmux becomes optional presentation and fleet-launch plumbing. `launch` may create tmux windows whose command starts
 the shim, `attach` remains tmux-only, and tmux observations may enrich status, but no tmux session/window/pane name,
@@ -1741,7 +1743,7 @@ protocol version skew fails closed.
 | `internal/ptyx` | standard-library Darwin nested PTY, child launch, relay, resize/termios observation, readiness, serialized writes |
 | `internal/fleet` | tmux-backed shim launch or foreground composition, roster/config persistence, rollback, relaunch, kill |
 | `internal/status` | runtime-first enumeration and §15.6 precedence; tmux presentation is additive only |
-| `internal/control` | closed operation registry and shim client dispatch; no payload-bearing client API |
+| `internal/control` | closed operation registry and shim client dispatch; no caller-payload-bearing delivery API |
 | `internal/tmuxx` | optional presentation/create/attach/kill operations only; production payload delivery is removed |
 | `internal/target` | retained through compile-safe adapters, then removed in PR 7 according to §15.5 |
 
@@ -1971,8 +1973,9 @@ roster size. Below, above, multiple role-less windows, or any matched role windo
 note: all N roster roles are missing; unmanaged window "W" has N panes
 ```
 
-JSON carries the same optional `"note"`. This names no cause: a role-less roster-sized window is not proof that panes
-were joined or that it contains the missing harnesses.
+The human table emits this exact note immediately after the corresponding session's last row, before any later
+session's rows. JSON carries the same optional `"note"` on that session object. This names no cause: a role-less
+roster-sized window is not proof that panes were joined or that it contains the missing harnesses.
 
 ### 15.7 Command outcomes and attach limitation
 
@@ -1982,9 +1985,11 @@ Tmux launch uses the single §12.1 shell site to start the hidden shim; foregrou
 could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
 cleanup remains reported.
 
-Control sends only the operation name after version, answerer, ancestry, child identity, and readiness pass. The shim
-reports only accepted request, bytes written, submit observed, cancellation residue, child exit, and cleanup facts.
-It never reports harness execution from a PTY write. `attach` requires tmux presentation; without one:
+The only delivery instruction at the control boundary is the operation name after version, answerer, ancestry, child
+identity, and readiness pass. The request's other permitted values are the protocol version and validated
+session/role identity pinned in §15.5; the response contains only its protocol version and typed objective facts. The
+shim reports only accepted request, bytes written, submit observed, cancellation residue, child exit, and cleanup
+facts. It never reports harness execution from a PTY write. `attach` requires tmux presentation; without one:
 
 ```text
 agentctl: refusing to attach session "S"; no tmux presentation was observed; status and control remain available without tmux
