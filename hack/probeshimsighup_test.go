@@ -97,6 +97,7 @@ func TestProbeShimSIGHUPRecordsTopologyOutcomeAndCleansOwnedFixture(t *testing.T
 				"topology":              "shim-parent-of-harness-child-on-pty",
 				"child_ppid_matches":    "true",
 				"child_tty":             "ttys999",
+				"child_command":         fixture.directCommand,
 				"signal_target":         "owned-shim-only",
 				"signal":                "SIGHUP",
 				"shim_terminated":       "true",
@@ -128,23 +129,94 @@ func TestProbeShimSIGHUPRecordsTopologyOutcomeAndCleansOwnedFixture(t *testing.T
 	}
 }
 
+func TestProbeShimSIGHUPRefusesIntermediateDirectChildAndCleansOwnedFixture(t *testing.T) {
+	fixture := newIntermediateProbeFixture(t, "claude")
+	output := filepath.Join(t.TempDir(), "claude.txt")
+	sentinel := exec.Command("sleep", "30")
+	if err := sentinel.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sentinel.Process.Kill()
+		_, _ = sentinel.Process.Wait()
+	})
+
+	command := exec.Command("bash", "hack/probe-shim-sighup.sh", "--harness", "claude", "--output", output)
+	command.Dir = repositoryRoot(t)
+	command.Env = append(os.Environ(),
+		"PATH="+fixture.binDir+":"+os.Getenv("PATH"),
+		"AGENTCTL_PROBE_SCRIPT_BIN="+filepath.Join(fixture.binDir, "script"),
+		"AGENTCTL_PROBE_PS_BIN="+filepath.Join(fixture.binDir, "ps"),
+		"AGENTCTL_PROBE_SHIM_PID_FILE="+fixture.shimPIDFile,
+		"AGENTCTL_PROBE_CHILD_PID_FILE="+fixture.childPIDFile,
+		"AGENTCTL_PROBE_PS_COUNT_FILE="+fixture.psCountFile,
+		"AGENTCTL_PROBE_INTERMEDIATE_BIN="+fixture.intermediateBin,
+		"AGENTCTL_PROBE_GRANDCHILD_PID_FILE="+fixture.grandchildPIDFile,
+	)
+	combined, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("probe exit = 0, want wrong-direct-child refusal; output:\n%s", combined)
+	}
+	wantRefusal := fmt.Sprintf(`direct child command "/opt/agentctl-probe/bridge" did not match selected claude harness command %q`, fixture.selectedCommand)
+	if !strings.Contains(string(combined), wantRefusal) {
+		t.Fatalf("probe output = %q, want factual wrong-direct-child refusal", combined)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output file exists after wrong-direct-child refusal: %v", statErr)
+	}
+	if err := sentinel.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("unrelated sentinel was terminated: %v", err)
+	}
+	for _, pidFile := range []string{fixture.childPIDFile, fixture.grandchildPIDFile} {
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(readFile(t, pidFile)))
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		if processExists(pid) {
+			t.Fatalf("owned fixture process %d from %s remains after refusal cleanup", pid, pidFile)
+		}
+	}
+	if _, err := os.Stat(fixture.tmuxMarker); !os.IsNotExist(err) {
+		t.Fatalf("tmux marker exists; probe targeted tmux: %v", err)
+	}
+}
+
 type probeFixture struct {
-	binDir       string
-	shimPIDFile  string
-	childPIDFile string
-	psCountFile  string
-	tmuxMarker   string
+	binDir            string
+	shimPIDFile       string
+	childPIDFile      string
+	grandchildPIDFile string
+	psCountFile       string
+	tmuxMarker        string
+	directCommand     string
+	selectedCommand   string
+	intermediateBin   string
 }
 
 func newProbeFixture(t *testing.T, harness string) probeFixture {
+	t.Helper()
+	return newProbeFixtureWithDirectChild(t, harness, "", false)
+}
+
+func newIntermediateProbeFixture(t *testing.T, harness string) probeFixture {
+	t.Helper()
+	return newProbeFixtureWithDirectChild(t, harness, "/opt/agentctl-probe/bridge", true)
+}
+
+func newProbeFixtureWithDirectChild(t *testing.T, harness, directCommand string, intermediate bool) probeFixture {
 	t.Helper()
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.Mkdir(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	selectedCommand := filepath.Join(binDir, harness)
+	if directCommand == "" {
+		directCommand = selectedCommand
+	}
 	shimPIDFile := filepath.Join(dir, "shim.pid")
 	childPIDFile := filepath.Join(dir, "child.pid")
+	grandchildPIDFile := filepath.Join(dir, "grandchild.pid")
 	psCountFile := filepath.Join(dir, "ps.count")
 	tmuxMarker := filepath.Join(dir, "tmux-called")
 	versionOutput := "1.0 (Claude Code)"
@@ -159,27 +231,61 @@ fi
 trap '' HUP
 while :; do sleep 1; done
 `, versionOutput))
+	intermediateBin := ""
+	if intermediate {
+		intermediateBin = filepath.Join(binDir, "bridge")
+		writeExecutable(t, intermediateBin, `#!/bin/sh
+"$@" &
+grandchild=$!
+echo "$grandchild" >"$AGENTCTL_PROBE_GRANDCHILD_PID_FILE"
+terminate() {
+  kill -TERM "$grandchild" 2>/dev/null || true
+  wait "$grandchild" 2>/dev/null || true
+  exit 0
+}
+trap terminate TERM INT
+trap '' HUP
+wait "$grandchild"
+`)
+	}
 	writeExecutable(t, filepath.Join(binDir, "script"), `#!/bin/sh
 echo "$$" >"$AGENTCTL_PROBE_SHIM_PID_FILE"
 shift 2
+if [ -n "${AGENTCTL_PROBE_INTERMEDIATE_BIN-}" ]; then
+  set -- "$AGENTCTL_PROBE_INTERMEDIATE_BIN" "$@"
+fi
 "$@" &
 child=$!
 echo "$child" >"$AGENTCTL_PROBE_CHILD_PID_FILE"
 wait "$child"
 `)
-	writeExecutable(t, filepath.Join(binDir, "ps"), `#!/bin/sh
+	writeExecutable(t, filepath.Join(binDir, "ps"), fmt.Sprintf(`#!/bin/sh
 shim=$(cat "$AGENTCTL_PROBE_SHIM_PID_FILE")
 child=$(cat "$AGENTCTL_PROBE_CHILD_PID_FILE")
 count=0
 if [ -f "$AGENTCTL_PROBE_PS_COUNT_FILE" ]; then count=$(cat "$AGENTCTL_PROBE_PS_COUNT_FILE"); fi
 count=$((count + 1))
 echo "$count" >"$AGENTCTL_PROBE_PS_COUNT_FILE"
+if [ -n "${AGENTCTL_PROBE_GRANDCHILD_PID_FILE-}" ]; then
+  while [ ! -s "$AGENTCTL_PROBE_GRANDCHILD_PID_FILE" ]; do sleep 0.01; done
+fi
 tty=ttys999
 if [ "$count" -eq 1 ]; then tty='??'; fi
-printf ' %s %s %s %s\n' "$child" "$shim" "$tty" "$3"
-`)
+direct_command=%q
+printf ' %%s %%s %%s %%s\n' "$child" "$shim" "$tty" "$direct_command"
+`, directCommand))
 	writeExecutable(t, filepath.Join(binDir, "tmux"), fmt.Sprintf("#!/bin/sh\ntouch %q\nexit 99\n", tmuxMarker))
-	return probeFixture{binDir: binDir, shimPIDFile: shimPIDFile, childPIDFile: childPIDFile, psCountFile: psCountFile, tmuxMarker: tmuxMarker}
+	return probeFixture{
+		binDir:            binDir,
+		shimPIDFile:       shimPIDFile,
+		childPIDFile:      childPIDFile,
+		grandchildPIDFile: grandchildPIDFile,
+		psCountFile:       psCountFile,
+		tmuxMarker:        tmuxMarker,
+		directCommand:     directCommand,
+		selectedCommand:   selectedCommand,
+		intermediateBin:   intermediateBin,
+	}
 }
 
 func writeExecutable(t *testing.T, path, contents string) {

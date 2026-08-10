@@ -36,10 +36,12 @@ Issue #182 pre-cutover evidence (separate from the release-verifier block below)
 
 - `hack/probe-shim-sighup.sh` used isolated mode-`0700` homes and nested `/usr/bin/script` PTYs; it invoked no tmux
   command and signaled only each invocation's recorded shim PID.
-- Claude Code `2.1.226 (Claude Code)`: shim PID 3892, direct child PID 3896 on `ttys006`; child observed terminated
-  after shim SIGHUP.
-- codex-cli `0.147.0`: shim PID 11979, direct child PID 11983 on `ttys006`; child observed terminated after shim
-  SIGHUP.
+- Claude Code `2.1.226 (Claude Code)`: shim PID 55862, direct child PID 55866 on `ttys006`, observed command
+  `/Users/rob/.local/bin/claude`; child observed terminated after shim SIGHUP.
+- codex-cli `0.147.0`: shim PID 56309, direct child PID 56313 on `ttys006`, observed command
+  `/Users/rob/.local/bin/codex`; child observed terminated after shim SIGHUP.
+- The command field exactly matched the selected harness path in each live leg. The fixture suite separately refuses a
+  PTY-bearing intermediate direct child and observes cleanup without signaling an unrelated sentinel.
 - Full records and safety boundary:
   [`docs/security/2026-08-10-issue-182-shim-probe-evidence.md`](security/2026-08-10-issue-182-shim-probe-evidence.md).
   These observations inform teardown but do not replace `kill(pid,0)` ESRCH-only absence.

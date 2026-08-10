@@ -8,8 +8,8 @@ Both pinned harnesses terminated after SIGHUP was sent to the parent PTY fixture
 
 | Harness | Version | Shim PID | Child PID / TTY | Observed child outcome |
 |---|---|---:|---|---|
-| Claude Code | `2.1.226 (Claude Code)` | 3892 | 3896 / `ttys006` | `terminated` |
-| codex-cli | `codex-cli 0.147.0` | 11979 | 11983 / `ttys006` | `terminated` |
+| Claude Code | `2.1.226 (Claude Code)` | 55862 | 55866 / `ttys006` | `terminated` |
+| codex-cli | `codex-cli 0.147.0` | 56309 | 56313 / `ttys006` | `terminated` |
 
 This is version-pinned evidence for teardown selection, not an absence oracle. The approved design still records child
 identity durably, uses `kill(pid, 0)` as the sole presence/absence observation, and refuses relaunch unless it observes
@@ -21,7 +21,8 @@ identity durably, uses `kill(pid, 0)` as the sole presence/absence observation, 
 - Each leg created its own mode-`0700` temporary HOME and `/usr/bin/script` nested PTY.
 - The probe accepted only the literal harness names `claude` and `codex`.
 - Process topology was read from one `ps -axo pid=,ppid=,tty=,comm=` snapshot at a time until the direct child had a
-  PTY. The recorded child PPID equaled the recorded shim PID.
+  PTY and its `comm` exactly matched the executable path selected for that harness. The recorded child PPID equaled
+  the recorded shim PID. A PTY-bearing intermediate or unrelated direct child is refused, not labeled a harness.
 - The only probe signal was `SIGHUP` to the recorded, invocation-owned shim PID. Cleanup was restricted to that shim,
   its recorded direct child, and its exact temporary directory.
 - No tmux command appears in the script. The default tmux server and every existing agent/fleet were untouched.
@@ -37,16 +38,17 @@ hack/probe-shim-sighup.sh --harness claude --output "$probe_evidence_dir/claude.
 hack/probe-shim-sighup.sh --harness codex --output "$probe_evidence_dir/codex.txt"
 ```
 
-Claude record (SHA-256 `e71d0f4b6019b4881392461df1d05db9dbaaf811cad143873adaaf5273bdf47b`):
+Claude record (SHA-256 `65b77ef95b64c4d75823b23e3088c85c884d106970a0f4e1dcb4c25a9c907c12`):
 
 ```text
 harness=claude
 harness_version=2.1.226 (Claude Code)
 topology=shim-parent-of-harness-child-on-pty
-shim_pid=3892
-child_pid=3896
+shim_pid=55862
+child_pid=55866
 child_ppid_matches=true
 child_tty=ttys006
+child_command=/Users/rob/.local/bin/claude
 signal_target=owned-shim-only
 signal=SIGHUP
 shim_terminated=true
@@ -54,16 +56,17 @@ child_outcome=terminated
 default_tmux_targeted=false
 ```
 
-Codex record (SHA-256 `d2c03c94eb6f151a2a6ee37910de530952a997af2fab7674f4c734447c945aa1`):
+Codex record (SHA-256 `d539bbb1a9ccb736e201af3e47c586901626776d00d3bc8bbd26a9839f0a53fb`):
 
 ```text
 harness=codex
 harness_version=codex-cli 0.147.0
 topology=shim-parent-of-harness-child-on-pty
-shim_pid=11979
-child_pid=11983
+shim_pid=56309
+child_pid=56313
 child_ppid_matches=true
 child_tty=ttys006
+child_command=/Users/rob/.local/bin/codex
 signal_target=owned-shim-only
 signal=SIGHUP
 shim_terminated=true
@@ -78,5 +81,7 @@ matches; the warning is not mistaken for the pinned version.
 ## Automated fixture coverage
 
 `go test ./hack -run TestProbeShimSIGHUP -count=1` covers closed harness-name refusal, existing-output refusal,
-multi-line version parsing, transient pre-PTY topology observation, required output keys, owned child cleanup, and an
-unrelated sentinel process remaining alive. The fake PATH includes a `tmux` canary and fails if the probe invokes it.
+multi-line version parsing, transient pre-PTY topology observation, realistic nonempty command fields, required output
+keys, owned child cleanup, and an unrelated sentinel process remaining alive. A dedicated intermediate fixture puts a
+PTY-bearing bridge between the shim and selected harness and requires factual refusal plus cleanup of both owned
+processes. The fake PATH includes a `tmux` canary and fails if the probe invokes it.

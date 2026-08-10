@@ -40,8 +40,10 @@ hack/probe-shim-sighup.sh --harness codex --output "$shim_probe_dir/codex.txt"
 ```
 
 - [ ] Each record names the exact harness version, positive shim/child PIDs, matching parent topology, a nonempty PTY,
+      and a nonempty `child_command` exactly equal to the selected harness path, plus
       `signal_target=owned-shim-only`, shim termination, child outcome, and `default_tmux_targeted=false`
-- [ ] `go test ./hack -run TestProbeShimSIGHUP -count=1` passed, including the unrelated-process and tmux canaries
+- [ ] `go test ./hack -run TestProbeShimSIGHUP -count=1` passed, including the intermediate-child refusal,
+      owned-descendant cleanup, unrelated-process sentinel, and tmux canary
 - [ ] The release notes record both observed child outcomes; no SIGHUP result is used as absence evidence
 - [ ] Focused aggregate tests cover below/equal/above pane counts and near misses, and the exact emitted line remains
       `note: all N roster roles are missing; unmanaged window "W" has N panes`

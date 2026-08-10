@@ -94,6 +94,7 @@ case "$harness" in
     ;;
 esac
 [[ -n "$harness_version" && "$harness_version" != *$'\n'* && "$harness_version" != *$'\r'* ]] || fail "could not identify exactly one $harness version line"
+harness_command=$harness_bin
 
 "$script_bin" -q /dev/null /usr/bin/env -i \
   HOME="$probe_home" PATH="$PATH" TERM=xterm-256color \
@@ -103,6 +104,7 @@ shim_pid=$!
 topology_line=""
 child_ppid=""
 child_tty=""
+child_command=""
 for _ in {1..100}; do
   if ! process_exists "$shim_pid"; then
     fail "owned shim fixture exited before topology was observed; log: $(tr '\n' ' ' <"$shim_log")"
@@ -112,19 +114,25 @@ for _ in {1..100}; do
       awk -v parent="$shim_pid" '$2 == parent { print; exit }'
   ) || true
   if [[ -n "$topology_line" ]]; then
-    read -r child_pid child_ppid child_tty _ <<<"$topology_line"
-    if [[ "$child_pid" =~ ^[1-9][0-9]*$ && "$child_ppid" == "$shim_pid" && -n "$child_tty" && "$child_tty" != "??" && "$child_tty" != "?" ]]; then
+    read -r child_pid child_ppid child_tty child_command <<<"$topology_line"
+    if [[ "$child_pid" =~ ^[1-9][0-9]*$ && "$child_ppid" == "$shim_pid" && -n "$child_tty" && "$child_tty" != "??" && "$child_tty" != "?" && "$child_command" == "$harness_command" ]]; then
       break
     fi
     topology_line=""
   fi
   sleep 0.05
 done
-[[ -n "$topology_line" ]] || fail "could not observe a direct child of owned shim $shim_pid"
+if [[ -z "$topology_line" ]]; then
+  if [[ -n "$child_command" && "$child_command" != "$harness_command" ]]; then
+    fail "direct child command \"$child_command\" did not match selected $harness harness command \"$harness_command\""
+  fi
+  fail "could not observe the selected $harness harness as a direct child of owned shim $shim_pid"
+fi
 
 [[ "$child_pid" =~ ^[1-9][0-9]*$ ]] || fail "observed invalid child pid: $child_pid"
 [[ "$child_ppid" == "$shim_pid" ]] || fail "child $child_pid parent was $child_ppid, expected owned shim $shim_pid"
 [[ -n "$child_tty" && "$child_tty" != "??" && "$child_tty" != "?" ]] || fail "child $child_pid had no nested PTY"
+[[ "$child_command" == "$harness_command" ]] || fail "direct child command \"$child_command\" did not match selected $harness harness command \"$harness_command\""
 
 kill -HUP "$shim_pid" || fail "could not signal owned shim $shim_pid"
 for _ in {1..100}; do
@@ -153,6 +161,7 @@ if ! (set -o noclobber; printf '%s\n' \
   "child_pid=$child_pid" \
   "child_ppid_matches=true" \
   "child_tty=$child_tty" \
+  "child_command=$child_command" \
   "signal_target=owned-shim-only" \
   "signal=SIGHUP" \
   "shim_terminated=true" \
