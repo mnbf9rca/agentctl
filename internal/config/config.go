@@ -40,10 +40,12 @@ func ValidateEffort(effort string) error {
 		return nil
 	}
 	return &ValidationError{
-		Option:     "effort",
-		Value:      effort,
-		EntryIndex: -1,
-		Reason:     "must match " + modelPattern,
+		Option:          "effort",
+		Value:           effort,
+		EntryIndex:      -1,
+		Reason:          "must match " + modelPattern,
+		DirectSubject:   "effort",
+		TemplateSubject: "effort",
 	}
 }
 
@@ -60,6 +62,10 @@ type ValidationError struct {
 	EntryIndex int
 	Entry      string
 	Reason     string
+	// DirectSubject and TemplateSubject name the rejected value when a caller
+	// needs it rendered alongside Reason. An empty subject renders Reason alone.
+	DirectSubject   string
+	TemplateSubject string
 }
 
 func (e *ValidationError) Error() string {
@@ -72,21 +78,16 @@ func (e *ValidationError) Error() string {
 	if e.EntryIndex >= 1 {
 		return fmt.Sprintf("invalid --%s entry %d %q: %s", e.Option, e.EntryIndex, e.Entry, e.Reason)
 	}
-	reason := e.Reason
-	if e.Option == "effort" {
-		reason = e.ValueReason()
-	}
-	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, reason)
+	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, e.FormatReason(e.DirectSubject))
 }
 
-// ValueReason formats the validation reason with the rejected value for a
-// field-specific diagnostic whose location already identifies the source.
-func (e *ValidationError) ValueReason() string {
-	label := "value"
-	if e.Option == "effort" {
-		label = "effort"
+// FormatReason renders Reason with Value under a caller-selected declarative
+// subject. An empty subject leaves Reason unchanged.
+func (e *ValidationError) FormatReason(subject string) string {
+	if subject == "" {
+		return e.Reason
 	}
-	return fmt.Sprintf("%s %q %s", label, e.Value, e.Reason)
+	return fmt.Sprintf("%s %q %s", subject, e.Value, e.Reason)
 }
 
 // ValidateSessionName validates a tmux session name accepted by agentctl.
@@ -106,10 +107,11 @@ func ValidateSessionName(name string) error {
 func ValidateRoleName(role string) error {
 	if !nameExpression.MatchString(role) {
 		return &ValidationError{
-			Option:     "role",
-			Value:      role,
-			EntryIndex: -1,
-			Reason:     "must match " + namePattern,
+			Option:          "role",
+			Value:           role,
+			EntryIndex:      -1,
+			Reason:          "must match " + namePattern,
+			TemplateSubject: "value",
 		}
 	}
 	return nil
@@ -121,10 +123,11 @@ func ValidateRoleName(role string) error {
 func ValidateModelName(model string) error {
 	if !modelExpression.MatchString(model) {
 		return &ValidationError{
-			Option:     "model",
-			Value:      model,
-			EntryIndex: -1,
-			Reason:     "must match " + modelPattern,
+			Option:          "model",
+			Value:           model,
+			EntryIndex:      -1,
+			Reason:          "must match " + modelPattern,
+			TemplateSubject: "value",
 		}
 	}
 	return nil
@@ -139,10 +142,11 @@ func ParseHarness(name string) (Harness, error) {
 		return HarnessCodex, nil
 	}
 	return "", &ValidationError{
-		Option:     "harness",
-		Value:      name,
-		EntryIndex: -1,
-		Reason:     "must be claude or codex",
+		Option:          "harness",
+		Value:           name,
+		EntryIndex:      -1,
+		Reason:          "must be claude or codex",
+		TemplateSubject: "value",
 	}
 }
 
@@ -236,7 +240,7 @@ func parseRoles(roles string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, "harness is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 
 		harness, err := ParseHarness(harnessName)
@@ -280,10 +284,10 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, "model is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 		if err := ValidateModelName(model); err != nil {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, assignmentValueReason("model", model, err))
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, validationReason(err, "model"))
 		}
 		if _, duplicate := modelRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("duplicate model entry for role %q", role))
@@ -324,7 +328,7 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "effort is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 		if _, duplicate := effortRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("duplicate effort entry for role %q", role))
@@ -334,7 +338,7 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
 		if err := ValidateEffort(effort); err != nil {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, assignmentValueReason("effort", effort, err))
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err, "effort"))
 		}
 
 		effortRoles[role] = struct{}{}
@@ -344,16 +348,12 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 	return fleet, nil
 }
 
-func validationReason(err error) string {
+func validationReason(err error, subject string) string {
 	validation, ok := err.(*ValidationError)
 	if !ok {
 		return err.Error()
 	}
-	return validation.Reason
-}
-
-func assignmentValueReason(field, value string, err error) string {
-	return fmt.Sprintf("%s %q %s", field, value, validationReason(err))
+	return validation.FormatReason(subject)
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {

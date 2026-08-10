@@ -360,6 +360,53 @@ func TestValidateModelAndEffortReasonsExcludeTheRejectedValue(t *testing.T) {
 	}
 }
 
+func TestValidationErrorsDeclareTheirDisplaySubjects(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name            string
+		err             error
+		directSubject   string
+		templateSubject string
+		wantTemplate    string
+	}{
+		{
+			name: "model", err: ValidateModelName("bad model"),
+			directSubject: "", templateSubject: "value",
+			wantTemplate: `value "bad model" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+		},
+		{
+			name: "effort", err: ValidateEffort("bad effort"),
+			directSubject: "effort", templateSubject: "effort",
+			wantTemplate: `effort "bad effort" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+		},
+		{
+			name: "harness", err: invalidHarnessErrorForDisplaySubjects(),
+			directSubject: "", templateSubject: "value",
+			wantTemplate: `value "future" must be claude or codex`,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			var validation *ValidationError
+			if !errors.As(test.err, &validation) {
+				t.Fatalf("error = %T %v, want *ValidationError", test.err, test.err)
+			}
+			if validation.DirectSubject != test.directSubject || validation.TemplateSubject != test.templateSubject {
+				t.Fatalf("display subjects = (%q, %q), want (%q, %q)", validation.DirectSubject, validation.TemplateSubject, test.directSubject, test.templateSubject)
+			}
+			if got := validation.FormatReason(validation.TemplateSubject); got != test.wantTemplate {
+				t.Fatalf("FormatReason() = %q, want %q", got, test.wantTemplate)
+			}
+		})
+	}
+}
+
+func invalidHarnessErrorForDisplaySubjects() error {
+	_, err := ParseHarness("future")
+	return err
+}
+
 func TestParseFleetAcceptsMixedCaseEffortWithoutChangingIt(t *testing.T) {
 	t.Parallel()
 
