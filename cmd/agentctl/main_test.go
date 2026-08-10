@@ -134,6 +134,7 @@ func TestRunRejectsEveryDuplicateOptionSpelling(t *testing.T) {
 	const statusUsage = "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
 		"A leading * marks the caller's session when agentctl can determine it from tmux.\n" +
+		"A roster-missing, role-less roster-sized window note reports only the observed aggregate, never a cause.\n" +
 		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n"
 	tests := []struct {
 		name   string
@@ -447,6 +448,29 @@ func TestStatusAllTreatsReportPresenceSeparatelyFromSchemaValue(t *testing.T) {
 	}
 }
 
+func TestStatusAllRendersAggregateNote(t *testing.T) {
+	collector := statusCollectorStub{report: statuspkg.SessionsReport{Schema: 1, Sessions: []statuspkg.Report{{
+		Schema: 1, Session: "fleet", Managed: true,
+		Agents: []statuspkg.Agent{{Role: "planner", State: statuspkg.StateMissing}},
+		Note:   `all 1 roster roles are missing; unmanaged window "joined" has 1 panes`,
+	}}}}
+	var stdout, stderr bytes.Buffer
+
+	code := statusAll(context.Background(), &stdout, &stderr, collector, false)
+
+	if code != exitOK {
+		t.Fatalf("statusAll() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `note: all 1 roster roles are missing; unmanaged window "joined" has 1 panes`) {
+		t.Fatalf("stdout = %q, want aggregate observation", stdout.String())
+	}
+	for _, causal := range []string{"joined panes", "merged panes", "caused"} {
+		if strings.Contains(strings.ToLower(stdout.String()), causal) {
+			t.Fatalf("stdout = %q, want no causal language %q", stdout.String(), causal)
+		}
+	}
+}
+
 func TestRunLaunchRequiresAndValidatesExplicitSessionWithoutResolving(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -667,6 +691,9 @@ func TestRunHelpWritesUsageToStdout(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "ambient session sources never narrow") {
 		t.Fatalf("stdout = %q, want bare-listing explanation", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "reports only the observed aggregate, never a cause") {
+		t.Fatalf("stdout = %q, want aggregate-note truthfulness explanation", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "Exited agents normally report missing, not dead") {
 		t.Fatalf("stdout = %q, want remain-on-exit status explanation", stdout.String())

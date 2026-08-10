@@ -226,7 +226,34 @@ func (c Collector) Collect(ctx context.Context, sessionName string, sessionID tm
 		}
 		report.Agents = append(report.Agents, agent)
 	}
+	report.Note = c.mergedLayoutAggregateNote(ctx, roles, windows, report.Agents)
 	return report, nil
+}
+
+func (c Collector) mergedLayoutAggregateNote(ctx context.Context, roles []string, windows []tmuxx.Window, agents []Agent) string {
+	if len(agents) != len(roles) {
+		return ""
+	}
+	for _, agent := range agents {
+		if agent.State != StateMissing {
+			return ""
+		}
+	}
+
+	var roleless []tmuxx.Window
+	for _, window := range windows {
+		if window.Role == "" {
+			roleless = append(roleless, window)
+		}
+	}
+	if len(roleless) != 1 {
+		return ""
+	}
+	panes, err := c.client.ListPanes(ctx, roleless[0].ID)
+	if err != nil || len(panes) != len(roles) {
+		return ""
+	}
+	return fmt.Sprintf("all %d roster roles are missing; unmanaged window %q has %d panes", len(roles), roleless[0].Name, len(panes))
 }
 
 func agentForWindow(role string, window tmuxx.Window) Agent {

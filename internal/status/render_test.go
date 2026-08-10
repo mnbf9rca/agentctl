@@ -55,6 +55,40 @@ func TestWriteTableRendersDefaultModelAndEffortOnlyForHumans(t *testing.T) {
 	}
 }
 
+func TestWriteTableRendersAggregateNote(t *testing.T) {
+	t.Parallel()
+
+	report := Report{
+		Schema: 1, Session: "fleet", Managed: true,
+		Agents: []Agent{{Role: "planner", State: StateMissing}},
+		Note:   `all 1 roster roles are missing; unmanaged window "joined" has 1 panes`,
+	}
+	var output bytes.Buffer
+	if err := WriteTable(&output, report); err != nil {
+		t.Fatalf("WriteTable() error = %v", err)
+	}
+	want := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
+		"fleet    planner           default  default                 missing\n" +
+		"note: all 1 roster roles are missing; unmanaged window \"joined\" has 1 panes\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteTable() output = %q, want %q", got, want)
+	}
+}
+
+func TestWriteJSONRendersAggregateNote(t *testing.T) {
+	t.Parallel()
+
+	report := Report{Schema: 1, Session: "fleet", Managed: true, Agents: []Agent{}, Note: "observed aggregate"}
+	var output bytes.Buffer
+	if err := WriteJSON(&output, report); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+	want := "{\"schema\":1,\"session\":\"fleet\",\"managed\":true,\"agents\":[],\"note\":\"observed aggregate\"}\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteJSON() output = %q, want %q", got, want)
+	}
+}
+
 func TestWriteJSONMatchesVersionedSchemaAndPreservesEmptyModelAndEffort(t *testing.T) {
 	t.Parallel()
 

@@ -80,7 +80,18 @@ func writeTable(output io.Writer, reports []Report, currentColumn bool) error {
 			}
 		}
 	}
-	return table.Flush()
+	if err := table.Flush(); err != nil {
+		return err
+	}
+	for _, report := range reports {
+		if report.Note == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(output, "note: %s\n", report.Note); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // WriteJSON writes the versioned JSON status document.

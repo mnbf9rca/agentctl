@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -61,6 +62,21 @@ func TestValidateSessionNameRejectsInvalidNames(t *testing.T) {
 	}
 }
 
+func TestValidateSessionNameLengthBoundary(t *testing.T) {
+	t.Parallel()
+
+	if err := ValidateSessionName(strings.Repeat("s", 32)); err != nil {
+		t.Fatalf("ValidateSessionName(32 bytes) error = %v, want nil", err)
+	}
+	err := ValidateSessionName(strings.Repeat("s", 33))
+	if err == nil {
+		t.Fatal("ValidateSessionName(33 bytes) error = nil, want length refusal")
+	}
+	if got, want := err.Error(), fmt.Sprintf("invalid session %q: must be at most 32 bytes", strings.Repeat("s", 33)); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestValidateRoleNameAcceptsValidNames(t *testing.T) {
 	t.Parallel()
 
@@ -96,6 +112,21 @@ func TestValidateRoleNameRejectsInvalidNames(t *testing.T) {
 				t.Fatalf("error = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestValidateRoleNameLengthBoundary(t *testing.T) {
+	t.Parallel()
+
+	if err := ValidateRoleName(strings.Repeat("r", 32)); err != nil {
+		t.Fatalf("ValidateRoleName(32 bytes) error = %v, want nil", err)
+	}
+	err := ValidateRoleName(strings.Repeat("r", 33))
+	if err == nil {
+		t.Fatal("ValidateRoleName(33 bytes) error = nil, want length refusal")
+	}
+	if got, want := err.Error(), fmt.Sprintf("invalid role %q: must be at most 32 bytes", strings.Repeat("r", 33)); got != want {
+		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 

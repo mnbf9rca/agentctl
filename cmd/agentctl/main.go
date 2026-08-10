@@ -62,6 +62,7 @@ var commandUsage = map[string]string{
 	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
 		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
 		"A leading * marks the caller's session when agentctl can determine it from tmux.\n" +
+		"A roster-missing, role-less roster-sized window note reports only the observed aggregate, never a cause.\n" +
 		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n",
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
