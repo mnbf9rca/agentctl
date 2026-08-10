@@ -43,7 +43,7 @@ func ValidateEffort(effort string) error {
 		Option:     "effort",
 		Value:      effort,
 		EntryIndex: -1,
-		Reason:     fmt.Sprintf("effort %q must match %s", effort, modelPattern),
+		Reason:     "must match " + modelPattern,
 	}
 }
 
@@ -72,7 +72,21 @@ func (e *ValidationError) Error() string {
 	if e.EntryIndex >= 1 {
 		return fmt.Sprintf("invalid --%s entry %d %q: %s", e.Option, e.EntryIndex, e.Entry, e.Reason)
 	}
-	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, e.Reason)
+	reason := e.Reason
+	if e.Option == "effort" {
+		reason = e.ValueReason()
+	}
+	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, reason)
+}
+
+// ValueReason formats the validation reason with the rejected value for a
+// field-specific diagnostic whose location already identifies the source.
+func (e *ValidationError) ValueReason() string {
+	label := "value"
+	if e.Option == "effort" {
+		label = "effort"
+	}
+	return fmt.Sprintf("%s %q %s", label, e.Value, e.Reason)
 }
 
 // ValidateSessionName validates a tmux session name accepted by agentctl.
@@ -155,6 +169,15 @@ func ParseFleet(roles string, models, efforts *string) (FleetConfig, error) {
 	if err != nil {
 		return FleetConfig{}, err
 	}
+	return ParseFleetRoles(fleet.Roles, models, efforts)
+}
+
+// ParseFleetRoles applies optional model and effort assignments to ordered,
+// validated role declarations. The roles slice is copied before assignments are
+// applied.
+func ParseFleetRoles(roles []RoleConfig, models, efforts *string) (FleetConfig, error) {
+	fleet := FleetConfig{Roles: append([]RoleConfig(nil), roles...)}
+	var err error
 	if models != nil {
 		if *models == "" {
 			return FleetConfig{}, &ValidationError{
@@ -260,7 +283,7 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
 		}
 		if err := ValidateModelName(model); err != nil {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q %s", model, validationReason(err)))
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, assignmentValueReason("model", model, err))
 		}
 		if _, duplicate := modelRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("duplicate model entry for role %q", role))
@@ -311,7 +334,7 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
 		if err := ValidateEffort(effort); err != nil {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err))
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, assignmentValueReason("effort", effort, err))
 		}
 
 		effortRoles[role] = struct{}{}
@@ -327,6 +350,10 @@ func validationReason(err error) string {
 		return err.Error()
 	}
 	return validation.Reason
+}
+
+func assignmentValueReason(field, value string, err error) string {
+	return fmt.Sprintf("%s %q %s", field, value, validationReason(err))
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {

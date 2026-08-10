@@ -110,7 +110,7 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 		}
 	}
 
-	roleAssignments := make([]string, len(roles))
+	roleAssignments := make([]config.RoleConfig, len(roles))
 	for index := range roles {
 		role := &roles[index]
 		if role.harness == nil {
@@ -126,10 +126,10 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 				)
 			}
 		}
-		roleAssignments[index] = role.name + ":" + *role.harness
+		roleAssignments[index] = config.RoleConfig{Name: role.name, Harness: config.Harness(*role.harness)}
 	}
 
-	effective, err := config.ParseFleet(strings.Join(roleAssignments, ","), options.models, options.efforts)
+	effective, err := config.ParseFleetRoles(roleAssignments, options.models, options.efforts)
 	if err != nil {
 		return launchConfiguration{}, err
 	}
@@ -189,11 +189,7 @@ func wrapTemplateValidation(path, location string, err error) error {
 	if !errors.As(err, &validation) {
 		return &launchtemplate.Error{Path: path, Location: location, Reason: err.Error(), Cause: err}
 	}
-	reason := validation.Reason
-	if validation.Option != "effort" {
-		reason = fmt.Sprintf("value %q %s", validation.Value, validation.Reason)
-	}
-	return &launchtemplate.Error{Path: path, Location: location, Reason: reason, Cause: err}
+	return &launchtemplate.Error{Path: path, Location: location, Reason: validation.ValueReason(), Cause: err}
 }
 
 func wrapTemplateDirectoryError(path, value string, err error) error {
