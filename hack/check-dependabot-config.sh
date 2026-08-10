@@ -7,19 +7,25 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 
+if ! command -v ruby >/dev/null 2>&1; then
+  echo "check-dependabot-config.sh: ruby is required" >&2
+  exit 1
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 config_path="${1:-$script_dir/../.github/dependabot.yml}"
 
 if [[ ! -f "$config_path" ]]; then
-  echo "dependabot.yml: config file not found" >&2
+  echo "$config_path: config file not found" >&2
   exit 1
 fi
 
 ruby -ryaml -e '
   begin
-    config = YAML.safe_load_file(ARGV.fetch(0), aliases: false)
+    filename = ARGV.fetch(0)
+    config = YAML.safe_load_file(filename, aliases: false)
   rescue Psych::SyntaxError => error
-    warn "dependabot.yml: invalid YAML: #{error.problem}"
+    warn "#{filename}: invalid YAML: #{error.problem}"
     exit 1
   end
 

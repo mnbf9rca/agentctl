@@ -109,6 +109,54 @@ func TestCheckDependabotConfigRejectsPolicyDrift(t *testing.T) {
 	}
 }
 
+func TestCheckDependabotConfigReportsCustomPathFailures(t *testing.T) {
+	dir := t.TempDir()
+	missingPath := filepath.Join(dir, "missing-custom.yml")
+	cmd := exec.Command("./check-dependabot-config.sh", missingPath)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("missing config passed:\n%s", out)
+	}
+	if want := missingPath + ": config file not found"; !strings.Contains(string(out), want) {
+		t.Fatalf("output must contain %q, got %q", want, out)
+	}
+
+	invalidPath := filepath.Join(dir, "invalid-custom.yml")
+	if err := os.WriteFile(invalidPath, []byte("version: [\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("./check-dependabot-config.sh", invalidPath)
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("invalid YAML passed:\n%s", out)
+	}
+	if want := invalidPath + ": invalid YAML:"; !strings.Contains(string(out), want) {
+		t.Fatalf("output must contain %q, got %q", want, out)
+	}
+}
+
+func TestCheckDependabotConfigReportsMissingRuby(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dependabot.yml")
+	if err := os.WriteFile(path, []byte(validDependabotConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("bash", "./check-dependabot-config.sh", path)
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "PATH=") {
+			cmd.Env = append(cmd.Env, variable)
+		}
+	}
+	cmd.Env = append(cmd.Env, "PATH=")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("check passed without Ruby:\n%s", out)
+	}
+	if want := "check-dependabot-config.sh: ruby is required"; !strings.Contains(string(out), want) {
+		t.Fatalf("output must contain %q, got %q", want, out)
+	}
+}
+
 func TestCheckDependabotConfigAcceptsRepositoryConfig(t *testing.T) {
 	cmd := exec.Command("./check-dependabot-config.sh")
 	out, err := cmd.CombinedOutput()
