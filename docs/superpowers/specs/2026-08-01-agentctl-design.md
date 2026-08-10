@@ -2096,6 +2096,28 @@ Tmux launch uses the single §12.1 shell site to start the hidden shim; foregrou
 could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
 cleanup remains reported.
 
+`kill` observes optional presentation by exact session name before role mutation and retains that observation's typed
+session ID. Only after every required child exit/absence fact does it attempt `kill-session -t SID` exactly once. Tmux
+normally removes the last non-`remain-on-exit` shim window and its session as the shim exits, so that exact-ID removal
+can race a presentation that has already disappeared. The closed post-removal table is:
+
+| Initial presentation | Exact-ID removal | One post-failure exact-name observation | Result facts | Fleet record |
+|---|---|---|---|---|
+| gone | not attempted | not attempted | `PresentationRemoved=false`, `PresentationGone=true` | remove after child cleanup |
+| present | success | not attempted | `PresentationRemoved=true`, `PresentationGone=false` | remove after child cleanup |
+| present | error | gone | `PresentationRemoved=false`, `PresentationGone=true` | remove after child cleanup |
+| present | error | present (same or different typed ID) | both facts `false` | retain and return typed error |
+| present | error | unavailable/error | both facts `false` | retain and return typed error |
+
+The post-failure observation is attempted exactly once; there is no second removal. The two result booleans are never
+both true. `PresentationRemoved` means the exact typed removal command succeeded; a presentation observed already gone
+is never called removed. The typed retained errors have exactly these internal literals, with `%q` substitutions:
+
+```text
+shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation %q remained present
+shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation observation failed: %q
+```
+
 Optional presentation lookup treats only tmux 3.7b's exact single-line `no server running on PATH` and
 `error connecting to PATH (No such file or directory)` diagnostics as presentation `gone`; any prefix, suffix,
 additional line, different exit diagnostic, or runner failure remains an error. This classification never implies

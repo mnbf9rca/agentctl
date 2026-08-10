@@ -145,6 +145,106 @@ func TestShimExecutorSucceedsWithoutTmuxPresentation(t *testing.T) {
 	}
 }
 
+func TestShimExecutorObservesPresentationGoneAfterExactIDRemovalRacesAutoDestruction(t *testing.T) {
+	t.Parallel()
+
+	events := &killEventLog{}
+	record := killFleetRecord(t, oneKillRole())
+	records := &killRecords{events: events, record: record}
+	inspector := &killInspector{events: events, observations: map[string]fleet.ShimRoleObservation{
+		"planner": {Outcome: shim.OutcomeRunning, ChildPID: 7001},
+	}}
+	lifecycle := &killLifecycle{events: events, responses: map[string]shim.Response{
+		"planner": killStoppedResponse(7001),
+	}}
+	presentation := &killPresentation{
+		events: events,
+		findResults: []killPresentationFindResult{
+			{session: tmuxx.Session{ID: "$4", Name: "fleet"}, present: true},
+			{},
+		},
+		removeErr: errors.New("tmux kill session: exit status 1"),
+	}
+	executor := NewShimExecutor(lifecycle, records, inspector, presentation)
+
+	result, err := executor.Execute(context.Background(), "fleet")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.StoppedRoles != 1 || result.PresentationRemoved || !result.PresentationGone {
+		t.Fatalf("Execute() = %#v, want one observed exit and post-failure presentation-gone fact", result)
+	}
+	want := []string{
+		"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner",
+		"presentation-remove:$4", "presentation-find:fleet", "record-remove:fleet",
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("auto-destruction events = %#v, want %#v", got, want)
+	}
+}
+
+func TestShimExecutorRetainsFleetRecordWhenFailedExactIDRemovalCannotProvePresentationGone(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		second      killPresentationFindResult
+		wantMessage string
+	}{
+		{
+			name:   "presentation remains present",
+			second: killPresentationFindResult{session: tmuxx.Session{ID: "$5", Name: "fleet"}, present: true},
+			wantMessage: "shim kill retained fleet record for session \"fleet\": exact-ID presentation removal of \"$4\" failed: " +
+				"\"tmux kill session: exit status 1\"; post-removal presentation \"$5\" remained present",
+		},
+		{
+			name:   "presentation observation unavailable",
+			second: killPresentationFindResult{err: errors.New("tmux list sessions: permission denied")},
+			wantMessage: "shim kill retained fleet record for session \"fleet\": exact-ID presentation removal of \"$4\" failed: " +
+				"\"tmux kill session: exit status 1\"; post-removal presentation observation failed: \"tmux list sessions: permission denied\"",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			events := &killEventLog{}
+			record := killFleetRecord(t, oneKillRole())
+			records := &killRecords{events: events, record: record}
+			inspector := &killInspector{events: events, observations: map[string]fleet.ShimRoleObservation{
+				"planner": {Outcome: shim.OutcomeRunning, ChildPID: 7001},
+			}}
+			lifecycle := &killLifecycle{events: events, responses: map[string]shim.Response{
+				"planner": killStoppedResponse(7001),
+			}}
+			presentation := &killPresentation{
+				events: events,
+				findResults: []killPresentationFindResult{
+					{session: tmuxx.Session{ID: "$4", Name: "fleet"}, present: true},
+					tt.second,
+				},
+				removeErr: errors.New("tmux kill session: exit status 1"),
+			}
+			executor := NewShimExecutor(lifecycle, records, inspector, presentation)
+
+			result, err := executor.Execute(context.Background(), "fleet")
+			var retained *ShimKillPresentationRetainedError
+			if !errors.As(err, &retained) || err.Error() != tt.wantMessage {
+				t.Fatalf("Execute() error = %T %v, want typed retained error %q", err, err, tt.wantMessage)
+			}
+			if result.StoppedRoles != 1 || result.PresentationRemoved || result.PresentationGone {
+				t.Fatalf("Execute() = %#v, want observed child exit with presentation outcome unproved", result)
+			}
+			want := []string{
+				"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner",
+				"presentation-remove:$4", "presentation-find:fleet",
+			}
+			if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("retained presentation events = %#v, want no fleet-record removal %#v", got, want)
+			}
+		})
+	}
+}
+
 func killFleetRecord(t *testing.T, roles []config.RoleConfig) fleet.ShimFleetRecord {
 	t.Helper()
 	record, err := fleet.NewShimFleetRecord("fleet", "/repo", config.FleetConfig{Roles: roles})
@@ -250,8 +350,17 @@ func (l *killLifecycle) Stop(_ context.Context, _, role string) (shim.Response, 
 }
 
 type killPresentation struct {
-	events *killEventLog
-	found  *tmuxx.Session
+	events      *killEventLog
+	found       *tmuxx.Session
+	findResults []killPresentationFindResult
+	findIndex   int
+	removeErr   error
+}
+
+type killPresentationFindResult struct {
+	session tmuxx.Session
+	present bool
+	err     error
 }
 
 func (*killPresentation) CreatePresentationSession(context.Context, string, string, string, string) (tmuxx.CreatedSession, error) {
@@ -265,10 +374,15 @@ func (*killPresentation) RemovePresentationWindow(context.Context, tmuxx.WindowI
 }
 func (p *killPresentation) RemovePresentationSession(_ context.Context, id tmuxx.SessionID) error {
 	p.events.add("presentation-remove:" + string(id))
-	return nil
+	return p.removeErr
 }
 func (p *killPresentation) FindPresentationSession(_ context.Context, name string) (tmuxx.Session, bool, error) {
 	p.events.add("presentation-find:" + name)
+	if p.findIndex < len(p.findResults) {
+		result := p.findResults[p.findIndex]
+		p.findIndex++
+		return result.session, result.present, result.err
+	}
 	if p.found == nil {
 		return tmuxx.Session{}, false, nil
 	}

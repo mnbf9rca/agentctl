@@ -9,6 +9,7 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/shim"
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 // ShimExecutor is the explicitly named runtime-backed compatibility
@@ -25,6 +26,29 @@ type ShimKillResult struct {
 	Session             string
 	StoppedRoles        int
 	PresentationRemoved bool
+	PresentationGone    bool
+}
+
+// ShimKillPresentationRetainedError reports that exact-ID presentation
+// removal failed and the one permitted post-failure observation did not prove
+// the optional presentation gone. The fleet record remains retained.
+type ShimKillPresentationRetainedError struct {
+	Session        string
+	PresentationID tmuxx.SessionID
+	RemoveErr      error
+	ObservedID     tmuxx.SessionID
+	ObservationErr error
+}
+
+func (e *ShimKillPresentationRetainedError) Error() string {
+	if e.ObservationErr != nil {
+		return fmt.Sprintf("shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation observation failed: %q", e.Session, e.PresentationID, e.RemoveErr, e.ObservationErr)
+	}
+	return fmt.Sprintf("shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation %q remained present", e.Session, e.PresentationID, e.RemoveErr, e.ObservedID)
+}
+
+func (e *ShimKillPresentationRetainedError) Unwrap() error {
+	return errors.Join(e.RemoveErr, e.ObservationErr)
 }
 
 // ShimKillRefusalError reports a role state that cannot safely enter stop or
@@ -101,7 +125,7 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 		}
 	}
 
-	result := ShimKillResult{Session: session}
+	result := ShimKillResult{Session: session, PresentationGone: !presentationPresent}
 	for _, role := range record.Roster {
 		observation := observations[role]
 		if observation.Outcome != shim.OutcomeRunning && observation.Outcome != shim.OutcomeStarting {
@@ -146,9 +170,21 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 	}
 	if presentationPresent {
 		if err := e.presentation.RemovePresentationSession(ctx, presentationSession.ID); err != nil {
-			return result, err
+			observed, present, observationErr := e.presentation.FindPresentationSession(ctx, session)
+			if observationErr != nil || present {
+				retained := &ShimKillPresentationRetainedError{
+					Session: session, PresentationID: presentationSession.ID,
+					RemoveErr: err, ObservationErr: observationErr,
+				}
+				if present {
+					retained.ObservedID = observed.ID
+				}
+				return result, retained
+			}
+			result.PresentationGone = true
+		} else {
+			result.PresentationRemoved = true
 		}
-		result.PresentationRemoved = true
 	}
 	if err := e.records.RemoveOwned(record); err != nil {
 		return result, err

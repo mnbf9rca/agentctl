@@ -134,7 +134,11 @@ socket response as runtime identity. Session-record creation is atomic and one-w
 short-held session-directory mutation flock and version-checked replacement. Neither flock is conflated with the
 lifetime role-ownership flock. A pre-rename failure removes and synchronizes only the empty reservation. Any visible
 commit uncertainty retains the record, and no launch/relaunch rollback removes the fleet record while an unobserved
-role child may live. This path and the isolated integration fixture are invoked directly by tests only until PR 7.
+role child may live. Kill attempts a previously observed typed presentation ID exactly once only after child cleanup.
+If tmux auto-removes the last shim window first, only one exact post-failure observation of presentation `gone` permits
+fleet-record removal; a still-present or unavailable presentation retains the fleet record. An already-gone
+presentation is never reported as removed. This path and the isolated integration fixture are invoked directly by
+tests only until PR 7.
 
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 

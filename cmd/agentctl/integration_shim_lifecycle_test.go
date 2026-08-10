@@ -205,8 +205,8 @@ func TestIntegrationShimKillObservesChildExitBeforePresentationAndFleetCleanup(t
 	if err != nil {
 		t.Fatalf("shim kill Execute() error = %v", err)
 	}
-	if result.StoppedRoles != 1 || !result.PresentationRemoved {
-		t.Fatalf("shim kill Execute() = %#v, want one observed exit and presentation removal", result)
+	if result.StoppedRoles != 1 || result.PresentationRemoved == result.PresentationGone {
+		t.Fatalf("shim kill Execute() = %#v, want one observed exit and exactly one presentation removed/gone fact", result)
 	}
 	if fixture.hasSession("shim-kill") {
 		t.Fatal("shim presentation remains after observed kill")
