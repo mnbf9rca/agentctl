@@ -75,6 +75,34 @@ func TestWriteTableRendersAggregateNote(t *testing.T) {
 	}
 }
 
+func TestWriteSessionsTableRendersAggregateNoteImmediatelyAfterItsSession(t *testing.T) {
+	t.Parallel()
+
+	report := SessionsReport{Schema: 1, Sessions: []Report{
+		{
+			Schema: 1, Session: "fleet", Managed: true,
+			Agents: []Agent{{Role: "planner", Harness: "claude", Model: "fable", Effort: "max", PaneID: "%1", Process: "claude", State: StateMissing}},
+			Note:   `all 1 roster roles are missing; unmanaged window "joined" has 1 panes`,
+		},
+		{
+			Schema: 1, Session: "other", Managed: true,
+			Agents: []Agent{{Role: "worker", Harness: "codex", Model: "atlas", Effort: "high", PaneID: "%2", Process: "codex", State: StateRunning}},
+		},
+	}}
+
+	var output bytes.Buffer
+	if err := WriteSessionsTable(&output, report); err != nil {
+		t.Fatalf("WriteSessionsTable() error = %v", err)
+	}
+	want := "  SESSION  ROLE     HARNESS  MODEL  EFFORT  PANE  PROCESS  STATE\n" +
+		"  fleet    planner  claude   fable  max     %1    claude   missing\n" +
+		"note: all 1 roster roles are missing; unmanaged window \"joined\" has 1 panes\n" +
+		"  other    worker   codex    atlas  high    %2    codex    running\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteSessionsTable() output =\n%q\nwant:\n%q", got, want)
+	}
+}
+
 func TestWriteJSONRendersAggregateNote(t *testing.T) {
 	t.Parallel()
 
