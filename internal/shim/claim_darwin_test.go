@@ -11,12 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 )
 
 func TestClaimUsesKernelFlockAndPreservesContendedSocket(t *testing.T) {
 	rolePath := newTestRolePath(t)
-	command := startClaimHolder(t, rolePath)
+	command := startClaimHolder(t, rolePath, false)
 	t.Cleanup(func() {
 		_ = command.Process.Kill()
 		_ = command.Wait()
@@ -55,7 +54,7 @@ func TestClaimAcquisitionRemovesOnlyAStaleSocketAfterOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { claim.Close() })
+	t.Cleanup(func() { _ = claim.Close() })
 	if _, err := os.Lstat(rolePath.Socket); !os.IsNotExist(err) {
 		t.Fatalf("stale socket remains after claim: %v", err)
 	}
@@ -102,7 +101,7 @@ func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { claim.Close() })
+	t.Cleanup(func() { _ = claim.Close() })
 
 	got, err := ReadAdvisory(rolePath.Lock)
 	if err != nil {
@@ -131,12 +130,27 @@ func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T
 	}
 }
 
+func TestClaimAdvisoryComparisonDetectsKernelAnswererDisagreement(t *testing.T) {
+	advisory := Advisory{Version: 1, ShimPID: 501, Nonce: "nonce", StateRoot: "/tmp/state"}
+	if err := advisory.CompareAnswerer(501); err != nil {
+		t.Fatalf("matching answerer: %v", err)
+	}
+	err := advisory.CompareAnswerer(502)
+	var disagreement *AnswererDisagreementError
+	if !errors.As(err, &disagreement) {
+		t.Fatalf("different answerer error = %T %v, want *AnswererDisagreementError", err, err)
+	}
+	if disagreement.RecordedPID != 501 || disagreement.AnswererPID != 502 {
+		t.Fatalf("disagreement = %#v", disagreement)
+	}
+}
+
 // TestClaimSIGKILLReleasesKernelFlock is a live Darwin kernel probe. The child
 // cannot run cleanup after SIGKILL, so successful reacquisition proves the
 // kernel released the held flock independently of lockfile/socket residue.
 func TestClaimSIGKILLReleasesKernelFlock(t *testing.T) {
 	rolePath := newTestRolePath(t)
-	command := startClaimHolder(t, rolePath)
+	command := startClaimHolder(t, rolePath, true)
 	if err := command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -148,10 +162,10 @@ func TestClaimSIGKILLReleasesKernelFlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reacquire after SIGKILL: %v", err)
 	}
-	claim.Close()
+	_ = claim.Close()
 }
 
-func startClaimHolder(t *testing.T, rolePath *RolePath) *exec.Cmd {
+func startClaimHolder(t *testing.T, rolePath *RolePath, bindSocket bool) *exec.Cmd {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestClaimHolderHelper$")
 	command.Env = append(os.Environ(),
@@ -159,6 +173,9 @@ func startClaimHolder(t *testing.T, rolePath *RolePath) *exec.Cmd {
 		"AGENTCTL_RUNTIME_ROOT="+rolePath.RuntimeRoot,
 		"AGENTCTL_STATE_ROOT="+rolePath.StateRoot,
 	)
+	if bindSocket {
+		command.Env = append(command.Env, "AGENTCTL_CLAIM_HELPER_SOCKET=1")
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -184,61 +201,83 @@ func TestClaimHolderHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer namespace.Close()
+	defer func() { _ = namespace.Close() }()
 	rolePath, err := namespace.RolePath("session", "role")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rolePath.Close()
+	defer func() { _ = rolePath.Close() }()
 	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer claim.Close()
+	defer func() { _ = claim.Close() }()
+	if os.Getenv("AGENTCTL_CLAIM_HELPER_SOCKET") == "1" {
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		defer func() { _ = listener.Close() }()
+	}
 	println("claim-held")
 	select {}
 }
 
 // TestLocalPeerPIDObservesConnectedAnswerer is a live Darwin kernel probe for
-// SOL_LOCAL/LOCAL_PEERPID on the accepted Unix socket descriptor.
+// SOL_LOCAL/LOCAL_PEERPID on the client's connected Unix socket descriptor.
+// The answerer runs in a separate process so reversing the endpoint fails.
 func TestLocalPeerPIDObservesConnectedAnswerer(t *testing.T) {
 	path := filepath.Join(shortTempDir(t), "peer.sock")
+	command := exec.Command(os.Args[0], "-test.run=^TestLocalPeerPIDAnswererHelper$")
+	command.Env = append(os.Environ(), "AGENTCTL_PEERPID_HELPER="+path)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() || scanner.Text() != "answerer-ready" {
+		t.Fatalf("answerer readiness = %q, error = %v", scanner.Text(), scanner.Err())
+	}
+	client, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	pid, err := LocalPeerPID(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pid, command.Process.Pid; got != want {
+		t.Fatalf("LOCAL_PEERPID answerer = %d, want child server PID %d", got, want)
+	}
+}
+
+func TestLocalPeerPIDAnswererHelper(t *testing.T) {
+	path := os.Getenv("AGENTCTL_PEERPID_HELPER")
+	if path == "" {
+		t.Skip("helper process")
+	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
-
-	accepted := make(chan *net.UnixConn, 1)
-	errorsCh := make(chan error, 1)
-	go func() {
-		connection, acceptErr := listener.AcceptUnix()
-		if acceptErr != nil {
-			errorsCh <- acceptErr
-			return
-		}
-		accepted <- connection
-	}()
-	client, err := net.DialUnix("unix", nil, listener.Addr().(*net.UnixAddr))
+	defer func() { _ = listener.Close() }()
+	println("answerer-ready")
+	connection, err := listener.AcceptUnix()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
-	select {
-	case err := <-errorsCh:
-		t.Fatal(err)
-	case server := <-accepted:
-		defer server.Close()
-		pid, err := LocalPeerPID(server)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, want := pid, os.Getpid(); got != want {
-			t.Fatalf("LOCAL_PEERPID = %d, want %d", got, want)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("accept timed out")
-	}
+	defer func() { _ = connection.Close() }()
+	select {}
 }
 
 func newTestRolePath(t *testing.T) *RolePath {
@@ -251,12 +290,12 @@ func newTestRolePath(t *testing.T) *RolePath {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { namespace.Close() })
+	t.Cleanup(func() { _ = namespace.Close() })
 	rolePath, err := namespace.RolePath("session", "role")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { rolePath.Close() })
+	t.Cleanup(func() { _ = rolePath.Close() })
 	return rolePath
 }
 

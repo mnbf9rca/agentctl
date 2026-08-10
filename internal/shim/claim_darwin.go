@@ -33,6 +33,25 @@ type StateRootDisagreementError struct {
 	RecordedRoot string
 }
 
+// AnswererDisagreementError compares advisory metadata with the kernel's
+// LOCAL_PEERPID fact; it does not describe the advisory PID as kernel identity.
+type AnswererDisagreementError struct {
+	RecordedPID int
+	AnswererPID int
+}
+
+func (e *AnswererDisagreementError) Error() string {
+	return fmt.Sprintf("lockfile shim PID %d differs from connected LOCAL_PEERPID %d", e.RecordedPID, e.AnswererPID)
+}
+
+// CompareAnswerer detects advisory-record/kernel-answerer disagreement.
+func (a Advisory) CompareAnswerer(answererPID int) error {
+	if a.ShimPID == answererPID {
+		return nil
+	}
+	return &AnswererDisagreementError{RecordedPID: a.ShimPID, AnswererPID: answererPID}
+}
+
 func (e *StateRootDisagreementError) Error() string {
 	return fmt.Sprintf("resolved state root %q differs from lockfile-recorded state root %q", e.LocalRoot, e.RecordedRoot)
 }
@@ -77,17 +96,22 @@ func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
 		return nil, err
 	}
 	lockName := path.Role + ".lock"
-	fd, err := unix.Openat(int(path.runtimeSession.Fd()), lockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	file, err := path.runtimeSession.OpenFile(lockName, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open role lock: %w", err)
 	}
-	file := os.NewFile(uintptr(fd), path.Lock)
-	if err := verifyPrivateArtifact(file, path.Lock); err != nil {
-		file.Close()
+	if err := verifyPrivateArtifact(file, path.Lock, "lockfile"); err != nil {
+		_ = file.Close()
 		return nil, err
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		file.Close()
+	pathInfo, err := path.runtimeSession.Lstat(lockName)
+	fileInfo, statErr := file.Stat()
+	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+		_ = file.Close()
+		return nil, fmt.Errorf("lockfile %q was substituted", path.Lock)
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = file.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return nil, &ClaimContendedError{Path: path.Lock}
 		}
@@ -95,11 +119,11 @@ func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
 	}
 	claim := &Claim{path: path, file: file}
 	if err := writeAdvisory(file, advisory); err != nil {
-		claim.Close()
+		_ = claim.Close()
 		return nil, err
 	}
 	if err := removeStaleSocket(path); err != nil {
-		claim.Close()
+		_ = claim.Close()
 		return nil, err
 	}
 	return claim, nil
@@ -120,27 +144,6 @@ func validateAdvisory(advisory Advisory, stateRoot string) error {
 	}
 	if advisory.StateRoot != stateRoot {
 		return &StateRootDisagreementError{LocalRoot: stateRoot, RecordedRoot: advisory.StateRoot}
-	}
-	return nil
-}
-
-func verifyPrivateArtifact(file *os.File, path string) error {
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("lockfile %q descriptor is not a regular file", path)
-	}
-	if info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("lockfile %q mode is %04o; expected 0600", path, info.Mode().Perm())
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return err
-	}
-	if int(stat.Uid) != os.Geteuid() {
-		return fmt.Errorf("lockfile %q is not owned by uid %d", path, os.Geteuid())
 	}
 	return nil
 }
@@ -167,19 +170,18 @@ func writeAdvisory(file *os.File, advisory Advisory) error {
 }
 
 func removeStaleSocket(path *RolePath) error {
-	var stat unix.Stat_t
 	name := path.Role + ".sock"
-	err := unix.Fstatat(int(path.runtimeSession.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	if errors.Is(err, unix.ENOENT) {
+	info, err := path.runtimeSession.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("inspect stale socket: %w", err)
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+	if info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("refusing non-socket artifact at %q", path.Socket)
 	}
-	if err := unix.Unlinkat(int(path.runtimeSession.Fd()), name, 0); err != nil {
+	if err := path.runtimeSession.Remove(name); err != nil {
 		return fmt.Errorf("remove stale socket: %w", err)
 	}
 	return nil
@@ -188,14 +190,18 @@ func removeStaleSocket(path *RolePath) error {
 // ReadAdvisory reads one bounded, strict advisory lockfile body. The result is
 // metadata only and never establishes ownership.
 func ReadAdvisory(path string) (Advisory, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	file, err := os.Open(path)
 	if err != nil {
 		return Advisory{}, err
 	}
-	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
-	if err := verifyPrivateArtifact(file, path); err != nil {
+	defer func() { _ = file.Close() }()
+	if err := verifyPrivateArtifact(file, path, "lockfile"); err != nil {
 		return Advisory{}, err
+	}
+	pathInfo, err := os.Lstat(path)
+	fileInfo, statErr := file.Stat()
+	if err != nil || statErr != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+		return Advisory{}, fmt.Errorf("lockfile %q was substituted", path)
 	}
 	payload, err := io.ReadAll(io.LimitReader(file, advisoryMaxBytes+1))
 	if err != nil {

@@ -20,6 +20,10 @@ func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	if got, want := production.State, "/Users/test/Library/Application Support/agentctl/state-v1"; got != want {
 		t.Fatalf("State = %q, want %q", got, want)
 	}
+	productionSocket := filepath.Join(production.Runtime, strings.Repeat("s", 32), strings.Repeat("r", 32)+".sock")
+	if got, want := len(productionSocket), 98; got != want {
+		t.Fatalf("worst-case production socket length = %d, want %d", got, want)
+	}
 
 	overridden, err := resolveNamespaceRoots(501, "/private/tmp/runtime", "/private/tmp/state", "/ignored")
 	if err != nil {
@@ -27,6 +31,67 @@ func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	}
 	if got, want := overridden, (namespaceRoots{Runtime: "/private/tmp/runtime", State: "/private/tmp/state"}); got != want {
 		t.Fatalf("roots = %#v, want %#v", got, want)
+	}
+}
+
+func TestNamespaceAcceptsExactRootCapAndUsesHOMEThroughUserConfigDir(t *testing.T) {
+	exactCap := "/" + strings.Repeat("r", RootPathMaxBytes-1)
+	if _, err := resolveNamespaceRoots(501, exactCap, "/tmp/state", "/tmp/config"); err != nil {
+		t.Fatalf("exact %d-byte root rejected: %v", RootPathMaxBytes, err)
+	}
+
+	parent := shortTempDir(t)
+	home := filepath.Join(parent, "home")
+	configRoot := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(configRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv(runtimeRootEnvironment, filepath.Join(parent, "runtime"))
+	stateValue, stateWasSet := os.LookupEnv(stateRootEnvironment)
+	if err := os.Unsetenv(stateRootEnvironment); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if stateWasSet {
+			_ = os.Setenv(stateRootEnvironment, stateValue)
+		} else {
+			_ = os.Unsetenv(stateRootEnvironment)
+		}
+	})
+
+	namespace, err := OpenNamespace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = namespace.Close() }()
+	if got, want := namespace.StateRoot, filepath.Join(configRoot, "agentctl", "state-v1"); got != want {
+		t.Fatalf("HOME-derived StateRoot = %q, want %q", got, want)
+	}
+}
+
+func TestNamespaceValidatesHOMEAsItsOwnDeclaredSurface(t *testing.T) {
+	parent := shortTempDir(t)
+	t.Setenv("HOME", "relative-home")
+	t.Setenv(runtimeRootEnvironment, filepath.Join(parent, "runtime"))
+	stateValue, stateWasSet := os.LookupEnv(stateRootEnvironment)
+	if err := os.Unsetenv(stateRootEnvironment); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if stateWasSet {
+			_ = os.Setenv(stateRootEnvironment, stateValue)
+		} else {
+			_ = os.Unsetenv(stateRootEnvironment)
+		}
+	})
+	_, err := OpenNamespace()
+	var invalid *InvalidRootError
+	if !errors.As(err, &invalid) || invalid.Kind != "home" {
+		t.Fatalf("error = %T %#v, want home *InvalidRootError", err, err)
 	}
 }
 
@@ -65,7 +130,7 @@ func TestNamespaceCreatesAndDescriptorVerifiesPrivateRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { namespace.Close() })
+	t.Cleanup(func() { _ = namespace.Close() })
 	for _, path := range []string{runtimeRoot, stateRoot} {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -76,7 +141,7 @@ func TestNamespaceCreatesAndDescriptorVerifiesPrivateRoots(t *testing.T) {
 		}
 	}
 
-	namespace.Close()
+	_ = namespace.Close()
 	namespace, err = openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: stateRoot})
 	if err != nil {
 		t.Fatalf("reopen safe roots: %v", err)
@@ -152,7 +217,7 @@ func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutatio
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { namespace.Close() })
+			t.Cleanup(func() { _ = namespace.Close() })
 			rolePath, err := namespace.RolePath("s", "r")
 			if socketBytes == 103 {
 				if err != nil {
@@ -161,7 +226,7 @@ func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutatio
 				if got := len(rolePath.Socket); got != 103 {
 					t.Fatalf("socket length = %d, want 103", got)
 				}
-				rolePath.Close()
+				_ = rolePath.Close()
 				return
 			}
 			var tooLong *SocketPathTooLongError
@@ -178,7 +243,7 @@ func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { namespace.Close() })
+	t.Cleanup(func() { _ = namespace.Close() })
 	if _, err := namespace.RolePath(strings.Repeat("s", 33), "r"); err == nil {
 		t.Fatal("33-byte session accepted")
 	}
@@ -194,7 +259,7 @@ func TestNamespaceRefusesDescriptorSubstitutionBeforeRoleMutation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { namespace.Close() })
+	t.Cleanup(func() { _ = namespace.Close() })
 
 	original := filepath.Join(parent, "runtime-original")
 	if err := os.Rename(runtimeRoot, original); err != nil {

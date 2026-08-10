@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -70,8 +70,8 @@ type Namespace struct {
 	RuntimeRoot string
 	StateRoot   string
 
-	runtime *os.File
-	state   *os.File
+	runtime *os.Root
+	state   *os.Root
 	mu      sync.Mutex
 }
 
@@ -86,8 +86,8 @@ type RolePath struct {
 	Socket      string
 	Record      string
 
-	runtimeSession *os.File
-	stateRoles     *os.File
+	runtimeSession *os.Root
+	stateRoles     *os.Root
 	mu             sync.Mutex
 }
 
@@ -105,6 +105,9 @@ func OpenNamespace() (*Namespace, error) {
 
 	configRoot := ""
 	if !stateSet {
+		if err := validateRootInput("home", os.Getenv("HOME")); err != nil {
+			return nil, err
+		}
 		var err error
 		configRoot, err = os.UserConfigDir()
 		if err != nil {
@@ -157,7 +160,7 @@ func validateRootInput(kind, path string) error {
 }
 
 func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride bool, userConfigRoot string) (*Namespace, error) {
-	var runtime *os.File
+	var runtime *os.Root
 	var err error
 	if runtimeOverride {
 		runtime, err = ensureExactPrivateRoot("runtime", roots.Runtime)
@@ -168,18 +171,18 @@ func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride 
 		return nil, err
 	}
 
-	var state *os.File
+	var state *os.Root
 	if stateOverride {
 		state, err = ensureExactPrivateRoot("state", roots.State)
 	} else {
 		if err := validateRootInput("user-config", userConfigRoot); err != nil {
-			runtime.Close()
+			_ = runtime.Close()
 			return nil, err
 		}
 		state, err = ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
 	}
 	if err != nil {
-		runtime.Close()
+		_ = runtime.Close()
 		return nil, err
 	}
 	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
@@ -215,22 +218,22 @@ func openProductionNamespaceAt(runtimeBase string, uid int, userConfigRoot strin
 	}
 	state, err := ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
 	if err != nil {
-		runtime.Close()
+		_ = runtime.Close()
 		return nil, err
 	}
 	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
 }
 
-func ensureExactPrivateRoot(kind, path string) (*os.File, error) {
+func ensureExactPrivateRoot(kind, path string) (*os.Root, error) {
 	parent, err := openNoSymlinkDirectory(filepath.Dir(path))
 	if err != nil {
 		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
 	}
-	defer parent.Close()
+	defer func() { _ = parent.Close() }()
 	return ensurePrivateChild(kind, path, parent, filepath.Base(path))
 }
 
-func ensurePrivateTree(kind, base string, components ...string) (*os.File, error) {
+func ensurePrivateTree(kind, base string, components ...string) (*os.Root, error) {
 	current, err := openNoSymlinkDirectory(base)
 	if err != nil {
 		return nil, &InvalidRootError{Kind: kind, Path: base, Reason: err.Error()}
@@ -239,7 +242,7 @@ func ensurePrivateTree(kind, base string, components ...string) (*os.File, error
 	for _, component := range components {
 		currentPath = filepath.Join(currentPath, component)
 		next, childErr := ensurePrivateChild(kind, currentPath, current, component)
-		current.Close()
+		_ = current.Close()
 		if childErr != nil {
 			return nil, childErr
 		}
@@ -248,35 +251,42 @@ func ensurePrivateTree(kind, base string, components ...string) (*os.File, error
 	return current, nil
 }
 
-func ensurePrivateChild(kind, fullPath string, parent *os.File, name string) (*os.File, error) {
-	if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+func ensurePrivateChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
 	}
-	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	pathInfo, err := parent.Lstat(name)
 	if err != nil {
 		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
 	}
-	file := os.NewFile(uintptr(fd), fullPath)
-	if err := verifyPrivateDirectory(kind, fullPath, file); err != nil {
-		file.Close()
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: "must not be a symbolic link"}
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	if err := verifyPrivateDirectory(kind, fullPath, root); err != nil {
+		_ = root.Close()
 		return nil, err
 	}
-	return file, nil
+	descriptorInfo, err := root.Stat(".")
+	if err != nil || !os.SameFile(pathInfo, descriptorInfo) {
+		_ = root.Close()
+		return nil, &RootSubstitutedError{Kind: kind, Path: fullPath}
+	}
+	return root, nil
 }
 
-func openNoSymlinkDirectory(path string) (*os.File, error) {
+func openNoSymlinkDirectory(path string) (*os.Root, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("path is not absolute")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
+	return os.OpenRoot(path)
 }
 
-func verifyPrivateDirectory(kind, path string, file *os.File) error {
-	info, err := file.Stat()
+func verifyPrivateDirectory(kind, path string, root *os.Root) error {
+	info, err := root.Stat(".")
 	if err != nil {
 		return &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
 	}
@@ -286,9 +296,9 @@ func verifyPrivateDirectory(kind, path string, file *os.File) error {
 	if info.Mode().Perm() != 0o700 {
 		return &InvalidRootError{Kind: kind, Path: path, Reason: fmt.Sprintf("mode is %04o; expected 0700", info.Mode().Perm())}
 	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
-		return &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: "descriptor stat has unexpected type"}
 	}
 	if int(stat.Uid) != os.Geteuid() {
 		return &InvalidRootError{Kind: kind, Path: path, Reason: fmt.Sprintf("owner uid is %d; expected %d", stat.Uid, os.Geteuid())}
@@ -296,8 +306,26 @@ func verifyPrivateDirectory(kind, path string, file *os.File) error {
 	return nil
 }
 
-func verifyRetainedRoot(kind, path string, file *os.File) error {
-	descriptorInfo, err := file.Stat()
+func verifyPrivateArtifact(file *os.File, path, kind string) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s %q descriptor is not a regular file", kind, path)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("%s %q mode is %04o; expected 0600", kind, path, info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s %q is not owned by uid %d", kind, path, os.Geteuid())
+	}
+	return nil
+}
+
+func verifyRetainedRoot(kind, path string, root *os.Root) error {
+	descriptorInfo, err := root.Stat(".")
 	if err != nil {
 		return &RootSubstitutedError{Kind: kind, Path: path}
 	}
@@ -341,19 +369,19 @@ func (n *Namespace) RolePath(session, role string) (*RolePath, error) {
 	}
 	stateSessions, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
 	if err != nil {
-		runtimeSession.Close()
+		_ = runtimeSession.Close()
 		return nil, err
 	}
 	stateSession, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
-	stateSessions.Close()
+	_ = stateSessions.Close()
 	if err != nil {
-		runtimeSession.Close()
+		_ = runtimeSession.Close()
 		return nil, err
 	}
 	stateRoles, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
-	stateSession.Close()
+	_ = stateSession.Close()
 	if err != nil {
-		runtimeSession.Close()
+		_ = runtimeSession.Close()
 		return nil, err
 	}
 	return &RolePath{

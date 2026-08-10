@@ -1,0 +1,210 @@
+package shim
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestRecordPersistsChildStartingThenAtomicallyUpgradesChildIdentity(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	starting := NewChildStartingRecord("session", "role", 4101, "nonce-4101")
+	if err := WriteRecord(rolePath, starting); err != nil {
+		t.Fatal(err)
+	}
+	readStarting, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readStarting.State != RecordStateChildStarting || readStarting.ChildPID != 0 || readStarting.ChildStartToken != nil {
+		t.Fatalf("starting record = %#v", readStarting)
+	}
+
+	token := StartToken{Sec: 1723300000, Usec: 123456}
+	upgraded, err := starting.WithChild(4202, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRecord(rolePath, upgraded); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != RecordStateChildRecorded || got.ChildPID != 4202 || got.ChildStartToken == nil || *got.ChildStartToken != token {
+		t.Fatalf("upgraded record = %#v, want child PID/token", got)
+	}
+	info, err := os.Stat(rolePath.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("record mode = %04o, want %04o", got, want)
+	}
+}
+
+func TestRecordFailedReplacementNeverExposesPartialJSON(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	original := NewChildStartingRecord("session", "role", 100, "original")
+	if err := WriteRecord(rolePath, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(rolePath.Record), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(rolePath.Record), 0o700) })
+	replacement := NewChildStartingRecord("session", "role", 200, "replacement")
+	if err := WriteRecord(rolePath, replacement); err == nil {
+		t.Fatal("WriteRecord succeeded without directory write permission")
+	}
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatalf("existing record became partial: %v", err)
+	}
+	if got != original {
+		t.Fatalf("record = %#v, want original %#v", got, original)
+	}
+}
+
+func TestRecordPartialTemporaryWriteNeverReplacesCompleteRecord(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	original := NewChildStartingRecord("session", "role", 100, "original")
+	if err := WriteRecord(rolePath, original); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("injected partial write")
+	payload := []byte(`{"version":1,"state":"child-starting","session":"session","role":"role","shim_pid":200,"nonce":"replacement"}` + "\n")
+	err := writeRecordAtomicWith(rolePath.stateRoles, "role.json", payload, func(file *os.File, payload []byte) error {
+		if _, err := file.Write(payload[:len(payload)/2]); err != nil {
+			return err
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("write error = %v, want injected partial-write error", err)
+	}
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatalf("existing record became partial: %v", err)
+	}
+	if got != original {
+		t.Fatalf("record = %#v, want original %#v", got, original)
+	}
+	entries, err := os.ReadDir(filepath.Dir(rolePath.Record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "role.json" {
+		t.Fatalf("record directory entries = %v, want only role.json", entries)
+	}
+}
+
+func TestRecordDirectorySyncFailureReportsCommitUncertain(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	original := NewChildStartingRecord("session", "role", 100, "original")
+	if err := WriteRecord(rolePath, original); err != nil {
+		t.Fatal(err)
+	}
+	replacement := NewChildStartingRecord("session", "role", 200, "replacement")
+	payload, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = append(payload, '\n')
+	wantErr := errors.New("injected directory sync failure")
+	err = writeRecordAtomicWithSync(rolePath.stateRoles, "role.json", payload, writeAllRecordPayload, func(*os.Root) error {
+		return wantErr
+	})
+	var uncertain *RecordCommitUncertainError
+	if !errors.As(err, &uncertain) || !errors.Is(err, wantErr) {
+		t.Fatalf("write error = %T %v, want commit-uncertain wrapping injected error", err, err)
+	}
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != replacement {
+		t.Fatalf("visible record = %#v, want replacement %#v", got, replacement)
+	}
+}
+
+func TestRecordSurvivesRuntimeTreeDeletionAndSimulatedRebootResidue(t *testing.T) {
+	parent := shortTempDir(t)
+	runtimeRoot := filepath.Join(parent, "runtime")
+	stateRoot := filepath.Join(parent, "state")
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolePath, err := namespace.RolePath("session", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := NewChildStartingRecord("session", "role", 300, "survivor")
+	if err := WriteRecord(rolePath, record); err != nil {
+		t.Fatal(err)
+	}
+	_ = rolePath.Close()
+	_ = namespace.Close()
+	if err := os.RemoveAll(runtimeRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	namespace, err = openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: stateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = namespace.Close() }()
+	rolePath, err = namespace.RolePath("session", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rolePath.Close() }()
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != record {
+		t.Fatalf("record after runtime deletion = %#v, want %#v", got, record)
+	}
+}
+
+func TestRecordRejectsMalformedAndInconsistentDurableData(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	if err := os.WriteFile(rolePath.Record, []byte(`{"version":1,"state":"child-recorded","session":"session"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRecord(rolePath); err == nil {
+		t.Fatal("ReadRecord accepted malformed/incomplete record")
+	}
+
+	invalid := NewChildStartingRecord("session", "role", 400, "nonce")
+	invalid.ChildPID = 401
+	if err := WriteRecord(rolePath, invalid); err == nil {
+		t.Fatal("WriteRecord accepted child-starting with a child PID")
+	}
+	malformedToken := StartToken{Sec: 1, Usec: 1_000_000}
+	if _, err := NewChildStartingRecord("session", "role", 400, "nonce").WithChild(401, malformedToken); err == nil {
+		t.Fatal("WithChild accepted malformed raw timeval")
+	}
+	invalid = NewChildStartingRecord("session", "role", 400, "nonce")
+	invalid.State = RecordStateChildRecorded
+	invalid.ChildPID = 401
+	invalid.ChildStartToken = &malformedToken
+	if err := WriteRecord(rolePath, invalid); err == nil {
+		t.Fatal("WriteRecord accepted malformed raw timeval")
+	}
+}
+
+func TestStartTokenUsesRawTimevalEquality(t *testing.T) {
+	first := StartToken{Sec: 1, Usec: 999999}
+	if !first.Equal(StartToken{Sec: 1, Usec: 999999}) {
+		t.Fatal("equal raw timevals compared unequal")
+	}
+	if first.Equal(StartToken{Sec: 2, Usec: 999999}) || first.Equal(StartToken{Sec: 1, Usec: 999998}) {
+		t.Fatal("different raw timeval components compared equal")
+	}
+}

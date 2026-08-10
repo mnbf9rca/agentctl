@@ -50,17 +50,17 @@ from template input at runtime. Template schemas remain an embedded, release-
 reviewed asset, so a template cannot choose code, a schema location, or a
 validator.
 
-Release archives reproduce the upstream license for
-`github.com/santhosh-tekuri/jsonschema/v6` and the upstream license and patent
-grant for `golang.org/x/text`, under paths that name each module unambiguously.
-CI inspects every snapshot archive and refuses one missing any of those
-materials.
+Release archives reproduce the upstream licenses for
+`github.com/santhosh-tekuri/jsonschema/v6` and `golang.org/x/sys`, plus the
+upstream license and patent grant for `golang.org/x/text`, under paths that name
+each module unambiguously. CI inspects every snapshot archive and refuses one
+missing any of those materials.
 
-The approved shim implementation will add `golang.org/x/sys/unix` only for the narrow Darwin `flock`,
-`LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` process-observation surface. PR 1 intentionally adds no module,
-checksum, license, or archive entry before a production importer exists. The importing PR must pin/review the version,
-run the existing dependency/vulnerability gates, and add its license to every release archive. The stdlib PTY lane
-does not import `x/sys`.
+The internal shim identity primitives pin `golang.org/x/sys` v0.47.0 and import
+`golang.org/x/sys/unix` only for Darwin `flock`, `LOCAL_PEERPID`, `kill(pid,0)`,
+and raw `kinfo_proc` process observation. The module checksum and upstream
+license are tracked and the existing dependency/vulnerability gates cover the
+importer. The separate stdlib PTY lane does not import `x/sys`.
 
 ## Known risks and accepted residuals
 
@@ -113,6 +113,12 @@ volatile mode-`0600` socket/lock artifacts live below descriptor-verified mode-`
 Declared overrides receive identical validation and never confer trust. No lifecycle path writes inside application
 repositories.
 
+The internal, not-yet-wired shim package now implements these private roots,
+held role claims, advisory lockfile records, atomic durable role records,
+version-first framing, `LOCAL_PEERPID`, and ESRCH-only process absence facts.
+This implementation status does not change the preceding shipped-path claim:
+the CLI cutover and lifecycle wiring remain owned by later issue-182 PRs.
+
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 
 **Synthesized Claude onboarding configuration.** A 2026-08-10 probe on Claude Code 2.1.226 showed that the Keychains link alone still led an interactive first start to request re-authentication, while the same link plus a mode-`0600` `.claude.json` containing only `{"hasCompletedOnboarding":true}` reached the authenticated ready state without re-login. On the consented-link path, Part C synthesizes exactly that non-secret onboarding configuration inside the temporary HOME. It is not an authentication mechanism: the Keychains link supplies credential access, and the verifier never reads or copies the operator's real `.claude.json`, account identifiers, project history, or MCP configuration. The isolated-keychain path receives no synthesized `.claude.json`; interactive sign-in remains its designed behavior. The synthesized file is removed with the temporary HOME on every cleanup path.
@@ -124,6 +130,10 @@ The Codex filename and Claude symlink are printed without credential contents an
 The [approved design §15](docs/superpowers/specs/2026-08-01-agentctl-design.md#15-approved-050-per-agent-shim-contract)
 supersedes the options paper and makes these ratified invariants. They bind every implementation PR. They do not claim
 the production cutover has shipped; each behavior PR updates shipped wording with its importer/wiring.
+
+PR 2 implements constraints 1–4, 6, 8, and 10 as internal primitives and live
+Darwin tests. It does not activate the shim lifecycle, retire tmux identity, or
+broaden the closed operation surface.
 
 Existing shipped claims are amended only at the listed cutover PR; until then their current-path wording remains true:
 
