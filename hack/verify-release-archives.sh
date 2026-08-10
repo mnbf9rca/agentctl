@@ -10,6 +10,7 @@ required_files=(
   LICENSE
   LICENSES/README.md
   LICENSES/github.com/santhosh-tekuri/jsonschema/v6/LICENSE
+  LICENSES/golang.org/x/sys/LICENSE
   LICENSES/golang.org/x/text/LICENSE
   LICENSES/golang.org/x/text/PATENTS
 )

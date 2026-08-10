@@ -1,0 +1,397 @@
+// Package shim owns the per-role runtime identity and wire boundary.
+package shim
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+
+	"github.com/mnbf9rca/agentctl/internal/config"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	// RootPathMaxBytes caps every declared runtime, state, and user-config root.
+	RootPathMaxBytes = 1024
+	// DarwinUnixSocketPathBytes is Darwin's sockaddr_un.sun_path capacity.
+	DarwinUnixSocketPathBytes = 104
+	// ShimProtocolVersion is the only supported shim wire protocol version.
+	ShimProtocolVersion = 1
+
+	runtimeRootEnvironment = "AGENTCTL_RUNTIME_ROOT"
+	stateRootEnvironment   = "AGENTCTL_STATE_ROOT"
+)
+
+type namespaceRoots struct {
+	Runtime string
+	State   string
+}
+
+// InvalidRootError reports a declared root that cannot be safely used.
+type InvalidRootError struct {
+	Kind   string
+	Path   string
+	Reason string
+}
+
+func (e *InvalidRootError) Error() string {
+	return fmt.Sprintf("invalid %s root %q: %s", e.Kind, e.Path, e.Reason)
+}
+
+// RootSubstitutedError reports that a verified root pathname no longer names
+// the directory descriptor retained by Namespace.
+type RootSubstitutedError struct {
+	Kind string
+	Path string
+}
+
+func (e *RootSubstitutedError) Error() string {
+	return fmt.Sprintf("%s root %q was substituted after descriptor verification", e.Kind, e.Path)
+}
+
+// SocketPathTooLongError reports a resolved socket path that Darwin cannot
+// represent, including its terminating NUL.
+type SocketPathTooLongError struct {
+	Path   string
+	Length int
+}
+
+func (e *SocketPathTooLongError) Error() string {
+	return fmt.Sprintf("socket path %q is %d bytes; Darwin requires fewer than %d", e.Path, e.Length, DarwinUnixSocketPathBytes)
+}
+
+// Namespace retains verified descriptors for the separately rooted volatile
+// and durable trees. Paths remain exported as facts for diagnostics; mutation
+// is descriptor-relative.
+type Namespace struct {
+	RuntimeRoot string
+	StateRoot   string
+
+	runtime *os.File
+	state   *os.File
+	mu      sync.Mutex
+}
+
+// RolePath is one validated per-role namespace. Its private descriptors keep
+// subsequent lock and record operations anchored to the verified directories.
+type RolePath struct {
+	Session     string
+	Role        string
+	RuntimeRoot string
+	StateRoot   string
+	Lock        string
+	Socket      string
+	Record      string
+
+	runtimeSession *os.File
+	stateRoles     *os.File
+	mu             sync.Mutex
+}
+
+// OpenNamespace resolves the declared environment surfaces and opens private,
+// descriptor-verified runtime and durable state roots.
+func OpenNamespace() (*Namespace, error) {
+	runtimeOverride, runtimeSet := os.LookupEnv(runtimeRootEnvironment)
+	stateOverride, stateSet := os.LookupEnv(stateRootEnvironment)
+	if runtimeSet && runtimeOverride == "" {
+		return nil, &InvalidRootError{Kind: "runtime", Path: runtimeOverride, Reason: runtimeRootEnvironment + " must not be empty"}
+	}
+	if stateSet && stateOverride == "" {
+		return nil, &InvalidRootError{Kind: "state", Path: stateOverride, Reason: stateRootEnvironment + " must not be empty"}
+	}
+
+	configRoot := ""
+	if !stateSet {
+		var err error
+		configRoot, err = os.UserConfigDir()
+		if err != nil {
+			return nil, &InvalidRootError{Kind: "user-config", Reason: err.Error()}
+		}
+	}
+	roots, err := resolveNamespaceRoots(os.Geteuid(), runtimeOverride, stateOverride, configRoot)
+	if err != nil {
+		return nil, err
+	}
+	return openResolvedNamespace(roots, runtimeSet, stateSet, configRoot)
+}
+
+func resolveNamespaceRoots(uid int, runtimeOverride, stateOverride, userConfigRoot string) (namespaceRoots, error) {
+	runtimeRoot := runtimeOverride
+	if runtimeRoot == "" {
+		runtimeRoot = filepath.Join("/tmp", "agentctl-"+strconv.Itoa(uid), "v1")
+	}
+	if err := validateRootInput("runtime", runtimeRoot); err != nil {
+		return namespaceRoots{}, err
+	}
+
+	stateRoot := stateOverride
+	if stateRoot == "" {
+		if err := validateRootInput("user-config", userConfigRoot); err != nil {
+			return namespaceRoots{}, err
+		}
+		stateRoot = filepath.Join(userConfigRoot, "agentctl", "state-v1")
+	}
+	if err := validateRootInput("state", stateRoot); err != nil {
+		return namespaceRoots{}, err
+	}
+	return namespaceRoots{Runtime: runtimeRoot, State: stateRoot}, nil
+}
+
+func validateRootInput(kind, path string) error {
+	if path == "" {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: "must not be empty"}
+	}
+	if !filepath.IsAbs(path) {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: "must be absolute"}
+	}
+	if len(path) > RootPathMaxBytes {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: fmt.Sprintf("must be at most %d bytes", RootPathMaxBytes)}
+	}
+	if filepath.Clean(path) != path {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: "must be clean"}
+	}
+	return nil
+}
+
+func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride bool, userConfigRoot string) (*Namespace, error) {
+	var runtime *os.File
+	var err error
+	if runtimeOverride {
+		runtime, err = ensureExactPrivateRoot("runtime", roots.Runtime)
+	} else {
+		runtime, err = ensurePrivateTree("runtime", filepath.Dir(filepath.Dir(roots.Runtime)), filepath.Base(filepath.Dir(roots.Runtime)), filepath.Base(roots.Runtime))
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var state *os.File
+	if stateOverride {
+		state, err = ensureExactPrivateRoot("state", roots.State)
+	} else {
+		if err := validateRootInput("user-config", userConfigRoot); err != nil {
+			runtime.Close()
+			return nil, err
+		}
+		state, err = ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
+	}
+	if err != nil {
+		runtime.Close()
+		return nil, err
+	}
+	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
+}
+
+func openNamespaceRoots(roots namespaceRoots) (*Namespace, error) {
+	if err := validateRootInput("runtime", roots.Runtime); err != nil {
+		return nil, err
+	}
+	if err := validateRootInput("state", roots.State); err != nil {
+		return nil, err
+	}
+	return openResolvedNamespace(roots, true, true, "")
+}
+
+func openProductionNamespaceAt(runtimeBase string, uid int, userConfigRoot string) (*Namespace, error) {
+	roots := namespaceRoots{
+		Runtime: filepath.Join(runtimeBase, "agentctl-"+strconv.Itoa(uid), "v1"),
+		State:   filepath.Join(userConfigRoot, "agentctl", "state-v1"),
+	}
+	if err := validateRootInput("runtime", roots.Runtime); err != nil {
+		return nil, err
+	}
+	if err := validateRootInput("user-config", userConfigRoot); err != nil {
+		return nil, err
+	}
+	if err := validateRootInput("state", roots.State); err != nil {
+		return nil, err
+	}
+	runtime, err := ensurePrivateTree("runtime", runtimeBase, "agentctl-"+strconv.Itoa(uid), "v1")
+	if err != nil {
+		return nil, err
+	}
+	state, err := ensurePrivateTree("state", userConfigRoot, "agentctl", "state-v1")
+	if err != nil {
+		runtime.Close()
+		return nil, err
+	}
+	return &Namespace{RuntimeRoot: roots.Runtime, StateRoot: roots.State, runtime: runtime, state: state}, nil
+}
+
+func ensureExactPrivateRoot(kind, path string) (*os.File, error) {
+	parent, err := openNoSymlinkDirectory(filepath.Dir(path))
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	defer parent.Close()
+	return ensurePrivateChild(kind, path, parent, filepath.Base(path))
+}
+
+func ensurePrivateTree(kind, base string, components ...string) (*os.File, error) {
+	current, err := openNoSymlinkDirectory(base)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: base, Reason: err.Error()}
+	}
+	currentPath := base
+	for _, component := range components {
+		currentPath = filepath.Join(currentPath, component)
+		next, childErr := ensurePrivateChild(kind, currentPath, current, component)
+		current.Close()
+		if childErr != nil {
+			return nil, childErr
+		}
+		current = next
+	}
+	return current, nil
+}
+
+func ensurePrivateChild(kind, fullPath string, parent *os.File, name string) (*os.File, error) {
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	file := os.NewFile(uintptr(fd), fullPath)
+	if err := verifyPrivateDirectory(kind, fullPath, file); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func openNoSymlinkDirectory(path string) (*os.File, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("path is not absolute")
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func verifyPrivateDirectory(kind, path string, file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	if !info.IsDir() {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: "descriptor is not a directory"}
+	}
+	if info.Mode().Perm() != 0o700 {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: fmt.Sprintf("mode is %04o; expected 0700", info.Mode().Perm())}
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		return &InvalidRootError{Kind: kind, Path: path, Reason: fmt.Sprintf("owner uid is %d; expected %d", stat.Uid, os.Geteuid())}
+	}
+	return nil
+}
+
+func verifyRetainedRoot(kind, path string, file *os.File) error {
+	descriptorInfo, err := file.Stat()
+	if err != nil {
+		return &RootSubstitutedError{Kind: kind, Path: path}
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(descriptorInfo, pathInfo) {
+		return &RootSubstitutedError{Kind: kind, Path: path}
+	}
+	return nil
+}
+
+// RolePath validates all inputs and the complete Darwin socket path before it
+// creates any per-session directory.
+func (n *Namespace) RolePath(session, role string) (*RolePath, error) {
+	if err := config.ValidateSessionName(session); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateRoleName(role); err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(n.RuntimeRoot, session, role+".lock")
+	socketPath := filepath.Join(n.RuntimeRoot, session, role+".sock")
+	recordPath := filepath.Join(n.StateRoot, "sessions", session, "roles", role+".json")
+	if len(socketPath) >= DarwinUnixSocketPathBytes {
+		return nil, &SocketPathTooLongError{Path: socketPath, Length: len(socketPath)}
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.runtime == nil || n.state == nil {
+		return nil, errors.New("namespace is closed")
+	}
+	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
+		return nil, err
+	}
+	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
+		return nil, err
+	}
+	runtimeSession, err := ensurePrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+	if err != nil {
+		return nil, err
+	}
+	stateSessions, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
+	if err != nil {
+		runtimeSession.Close()
+		return nil, err
+	}
+	stateSession, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
+	stateSessions.Close()
+	if err != nil {
+		runtimeSession.Close()
+		return nil, err
+	}
+	stateRoles, err := ensurePrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
+	stateSession.Close()
+	if err != nil {
+		runtimeSession.Close()
+		return nil, err
+	}
+	return &RolePath{
+		Session: session, Role: role,
+		RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
+		Lock: lockPath, Socket: socketPath, Record: recordPath,
+		runtimeSession: runtimeSession, stateRoles: stateRoles,
+	}, nil
+}
+
+// Close releases the namespace's retained directory descriptors.
+func (n *Namespace) Close() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var errs []error
+	if n.runtime != nil {
+		errs = append(errs, n.runtime.Close())
+		n.runtime = nil
+	}
+	if n.state != nil {
+		errs = append(errs, n.state.Close())
+		n.state = nil
+	}
+	return errors.Join(errs...)
+}
+
+// Close releases the role's retained directory descriptors.
+func (p *RolePath) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var errs []error
+	if p.runtimeSession != nil {
+		errs = append(errs, p.runtimeSession.Close())
+		p.runtimeSession = nil
+	}
+	if p.stateRoles != nil {
+		errs = append(errs, p.stateRoles.Close())
+		p.stateRoles = nil
+	}
+	return errors.Join(errs...)
+}

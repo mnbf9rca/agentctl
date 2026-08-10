@@ -1,0 +1,270 @@
+//go:build darwin
+
+package shim
+
+import (
+	"bufio"
+	"errors"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+)
+
+func TestClaimUsesKernelFlockAndPreservesContendedSocket(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	command := startClaimHolder(t, rolePath)
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()+1))
+	var contended *ClaimContendedError
+	if !errors.As(err, &contended) {
+		t.Fatalf("second AcquireClaim error = %T %v, want *ClaimContendedError", err, err)
+	}
+	if _, err := os.Lstat(rolePath.Socket); err != nil {
+		t.Fatalf("contender removed socket before ownership: %v", err)
+	}
+}
+
+func TestClaimAcquisitionRemovesOnlyAStaleSocketAfterOwnership(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { claim.Close() })
+	if _, err := os.Lstat(rolePath.Socket); !os.IsNotExist(err) {
+		t.Fatalf("stale socket remains after claim: %v", err)
+	}
+}
+
+func TestClaimRefusesUnsafeSocketAndLockArtifactsWithoutRepair(t *testing.T) {
+	t.Run("regular socket path", func(t *testing.T) {
+		rolePath := newTestRolePath(t)
+		if err := os.WriteFile(rolePath.Socket, []byte("not a socket"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+		if err == nil {
+			t.Fatal("AcquireClaim accepted regular file at socket path")
+		}
+		if data, readErr := os.ReadFile(rolePath.Socket); readErr != nil || string(data) != "not a socket" {
+			t.Fatalf("unsafe socket artifact was repaired: data=%q error=%v", data, readErr)
+		}
+	})
+
+	t.Run("symlink lock path", func(t *testing.T) {
+		rolePath := newTestRolePath(t)
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.WriteFile(target, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, rolePath.Lock); err != nil {
+			t.Fatal(err)
+		}
+		_, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+		if err == nil {
+			t.Fatal("AcquireClaim followed lock symlink")
+		}
+		if data, readErr := os.ReadFile(target); readErr != nil || string(data) != "sentinel" {
+			t.Fatalf("symlink target mutated: data=%q error=%v", data, readErr)
+		}
+	})
+}
+
+func TestClaimWritesAdvisoryIdentityAndDetectsStateRootDisagreement(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	want := testAdvisory(rolePath, os.Getpid())
+	claim, err := AcquireClaim(rolePath, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { claim.Close() })
+
+	got, err := ReadAdvisory(rolePath.Lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("advisory = %#v, want %#v", got, want)
+	}
+	if err := got.CompareStateRoot(rolePath.StateRoot); err != nil {
+		t.Fatalf("matching root: %v", err)
+	}
+	err = got.CompareStateRoot(rolePath.StateRoot + "-different")
+	var disagreement *StateRootDisagreementError
+	if !errors.As(err, &disagreement) {
+		t.Fatalf("different root error = %T %v, want *StateRootDisagreementError", err, err)
+	}
+	if disagreement.RecordedRoot != rolePath.StateRoot || disagreement.LocalRoot != rolePath.StateRoot+"-different" {
+		t.Fatalf("disagreement = %#v", disagreement)
+	}
+	info, err := os.Stat(rolePath.Lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("lock mode = %04o, want %04o", got, want)
+	}
+}
+
+// TestClaimSIGKILLReleasesKernelFlock is a live Darwin kernel probe. The child
+// cannot run cleanup after SIGKILL, so successful reacquisition proves the
+// kernel released the held flock independently of lockfile/socket residue.
+func TestClaimSIGKILLReleasesKernelFlock(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	command := startClaimHolder(t, rolePath)
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("SIGKILL helper exited successfully")
+	}
+
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if err != nil {
+		t.Fatalf("reacquire after SIGKILL: %v", err)
+	}
+	claim.Close()
+}
+
+func startClaimHolder(t *testing.T, rolePath *RolePath) *exec.Cmd {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestClaimHolderHelper$")
+	command.Env = append(os.Environ(),
+		"AGENTCTL_CLAIM_HELPER=1",
+		"AGENTCTL_RUNTIME_ROOT="+rolePath.RuntimeRoot,
+		"AGENTCTL_STATE_ROOT="+rolePath.StateRoot,
+	)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() || scanner.Text() != "claim-held" {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("helper readiness = %q, error = %v", scanner.Text(), scanner.Err())
+	}
+	return command
+}
+
+func TestClaimHolderHelper(t *testing.T) {
+	if os.Getenv("AGENTCTL_CLAIM_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	namespace, err := OpenNamespace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer namespace.Close()
+	rolePath, err := namespace.RolePath("session", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rolePath.Close()
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer claim.Close()
+	println("claim-held")
+	select {}
+}
+
+// TestLocalPeerPIDObservesConnectedAnswerer is a live Darwin kernel probe for
+// SOL_LOCAL/LOCAL_PEERPID on the accepted Unix socket descriptor.
+func TestLocalPeerPIDObservesConnectedAnswerer(t *testing.T) {
+	path := filepath.Join(shortTempDir(t), "peer.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan *net.UnixConn, 1)
+	errorsCh := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.AcceptUnix()
+		if acceptErr != nil {
+			errorsCh <- acceptErr
+			return
+		}
+		accepted <- connection
+	}()
+	client, err := net.DialUnix("unix", nil, listener.Addr().(*net.UnixAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case err := <-errorsCh:
+		t.Fatal(err)
+	case server := <-accepted:
+		defer server.Close()
+		pid, err := LocalPeerPID(server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := pid, os.Getpid(); got != want {
+			t.Fatalf("LOCAL_PEERPID = %d, want %d", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept timed out")
+	}
+}
+
+func newTestRolePath(t *testing.T) *RolePath {
+	t.Helper()
+	parent := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{
+		Runtime: filepath.Join(parent, "runtime"),
+		State:   filepath.Join(parent, "state"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { namespace.Close() })
+	rolePath, err := namespace.RolePath("session", "role")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rolePath.Close() })
+	return rolePath
+}
+
+func testAdvisory(rolePath *RolePath, pid int) Advisory {
+	return Advisory{
+		Version:   ShimProtocolVersion,
+		ShimPID:   pid,
+		Nonce:     "nonce-" + strconv.Itoa(pid),
+		StateRoot: rolePath.StateRoot,
+	}
+}

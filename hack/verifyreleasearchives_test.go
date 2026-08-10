@@ -15,6 +15,7 @@ var requiredReleaseArchiveFiles = []string{
 	"LICENSE",
 	"LICENSES/README.md",
 	"LICENSES/github.com/santhosh-tekuri/jsonschema/v6/LICENSE",
+	"LICENSES/golang.org/x/sys/LICENSE",
 	"LICENSES/golang.org/x/text/LICENSE",
 	"LICENSES/golang.org/x/text/PATENTS",
 }
@@ -41,6 +42,26 @@ func TestVerifyReleaseArchivesRefusesAnArchiveMissingOneRequiredLicense(t *testi
 		t.Fatalf("verify-release-archives.sh error = %v, output = %s; want exit 1", err, output)
 	}
 	want := "archive " + archive + ": missing required file LICENSES/golang.org/x/text/PATENTS\n"
+	if got := string(output); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyReleaseArchivesRefusesArchiveMissingXSysLicense(t *testing.T) {
+	files := make([]string, 0, len(requiredReleaseArchiveFiles)-1)
+	for _, name := range requiredReleaseArchiveFiles {
+		if name != "LICENSES/golang.org/x/sys/LICENSE" {
+			files = append(files, name)
+		}
+	}
+	archive := writeReleaseArchive(t, files)
+	command := exec.Command("./verify-release-archives.sh", archive)
+	output, err := command.CombinedOutput()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatalf("verify-release-archives.sh error = %v, output = %s; want exit 1", err, output)
+	}
+	want := "archive " + archive + ": missing required file LICENSES/golang.org/x/sys/LICENSE\n"
 	if got := string(output); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}

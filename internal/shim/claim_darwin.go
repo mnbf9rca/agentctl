@@ -1,0 +1,253 @@
+//go:build darwin
+
+package shim
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"golang.org/x/sys/unix"
+)
+
+const advisoryMaxBytes = 4096
+
+// Advisory is the lockfile's same-user-editable identity record. The held
+// flock, not this body, owns the role.
+type Advisory struct {
+	Version   int    `json:"version"`
+	ShimPID   int    `json:"shim_pid"`
+	Nonce     string `json:"nonce"`
+	StateRoot string `json:"state_root"`
+}
+
+// StateRootDisagreementError preserves both independently resolved roots.
+type StateRootDisagreementError struct {
+	LocalRoot    string
+	RecordedRoot string
+}
+
+func (e *StateRootDisagreementError) Error() string {
+	return fmt.Sprintf("resolved state root %q differs from lockfile-recorded state root %q", e.LocalRoot, e.RecordedRoot)
+}
+
+// CompareStateRoot compares advisory metadata with an independently resolved
+// state root before any durable-tree enumeration.
+func (a Advisory) CompareStateRoot(local string) error {
+	if local == a.StateRoot {
+		return nil
+	}
+	return &StateRootDisagreementError{LocalRoot: local, RecordedRoot: a.StateRoot}
+}
+
+// ClaimContendedError reports kernel-arbitrated flock contention.
+type ClaimContendedError struct {
+	Path string
+}
+
+func (e *ClaimContendedError) Error() string {
+	return fmt.Sprintf("flock on %q returned EWOULDBLOCK", e.Path)
+}
+
+// Claim holds the exclusive role flock until Close.
+type Claim struct {
+	path *RolePath
+	file *os.File
+	mu   sync.Mutex
+}
+
+// AcquireClaim acquires the sole ownership primitive, writes the advisory
+// body, then removes a stale socket. No socket mutation occurs before flock.
+func AcquireClaim(path *RolePath, advisory Advisory) (*Claim, error) {
+	if err := validateAdvisory(advisory, path.StateRoot); err != nil {
+		return nil, err
+	}
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.runtimeSession == nil {
+		return nil, errors.New("role path is closed")
+	}
+	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
+		return nil, err
+	}
+	lockName := path.Role + ".lock"
+	fd, err := unix.Openat(int(path.runtimeSession.Fd()), lockName, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open role lock: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path.Lock)
+	if err := verifyPrivateArtifact(file, path.Lock); err != nil {
+		file.Close()
+		return nil, err
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		file.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, &ClaimContendedError{Path: path.Lock}
+		}
+		return nil, fmt.Errorf("flock role lock: %w", err)
+	}
+	claim := &Claim{path: path, file: file}
+	if err := writeAdvisory(file, advisory); err != nil {
+		claim.Close()
+		return nil, err
+	}
+	if err := removeStaleSocket(path); err != nil {
+		claim.Close()
+		return nil, err
+	}
+	return claim, nil
+}
+
+func validateAdvisory(advisory Advisory, stateRoot string) error {
+	if advisory.Version != ShimProtocolVersion {
+		return fmt.Errorf("advisory protocol version is %d; expected %d", advisory.Version, ShimProtocolVersion)
+	}
+	if advisory.ShimPID <= 0 {
+		return errors.New("advisory shim PID must be positive")
+	}
+	if advisory.Nonce == "" {
+		return errors.New("advisory nonce must not be empty")
+	}
+	if err := validateRootInput("state", advisory.StateRoot); err != nil {
+		return err
+	}
+	if advisory.StateRoot != stateRoot {
+		return &StateRootDisagreementError{LocalRoot: stateRoot, RecordedRoot: advisory.StateRoot}
+	}
+	return nil
+}
+
+func verifyPrivateArtifact(file *os.File, path string) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("lockfile %q descriptor is not a regular file", path)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("lockfile %q mode is %04o; expected 0600", path, info.Mode().Perm())
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return err
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("lockfile %q is not owned by uid %d", path, os.Geteuid())
+	}
+	return nil
+}
+
+func writeAdvisory(file *os.File, advisory Advisory) error {
+	payload, err := json.Marshal(advisory)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("truncate advisory lockfile: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek advisory lockfile: %w", err)
+	}
+	if _, err := file.Write(payload); err != nil {
+		return fmt.Errorf("write advisory lockfile: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync advisory lockfile: %w", err)
+	}
+	return nil
+}
+
+func removeStaleSocket(path *RolePath) error {
+	var stat unix.Stat_t
+	name := path.Role + ".sock"
+	err := unix.Fstatat(int(path.runtimeSession.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect stale socket: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return fmt.Errorf("refusing non-socket artifact at %q", path.Socket)
+	}
+	if err := unix.Unlinkat(int(path.runtimeSession.Fd()), name, 0); err != nil {
+		return fmt.Errorf("remove stale socket: %w", err)
+	}
+	return nil
+}
+
+// ReadAdvisory reads one bounded, strict advisory lockfile body. The result is
+// metadata only and never establishes ownership.
+func ReadAdvisory(path string) (Advisory, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return Advisory{}, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	if err := verifyPrivateArtifact(file, path); err != nil {
+		return Advisory{}, err
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, advisoryMaxBytes+1))
+	if err != nil {
+		return Advisory{}, err
+	}
+	if len(payload) > advisoryMaxBytes {
+		return Advisory{}, errors.New("advisory lockfile exceeds 4096 bytes")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var advisory Advisory
+	if err := decoder.Decode(&advisory); err != nil {
+		return Advisory{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return Advisory{}, errors.New("advisory lockfile has trailing JSON")
+	}
+	if err := validateAdvisory(advisory, advisory.StateRoot); err != nil {
+		return Advisory{}, err
+	}
+	return advisory, nil
+}
+
+// Close releases the role claim. Closing an unrelated descriptor cannot
+// release this flock; only this held open file description does.
+func (c *Claim) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return nil
+	}
+	err := c.file.Close()
+	c.file = nil
+	return err
+}
+
+// LocalPeerPID returns Darwin's kernel-observed answerer identity for a
+// connected Unix socket.
+func LocalPeerPID(connection *net.UnixConn) (int, error) {
+	raw, err := connection.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var pid int
+	var socketErr error
+	if err := raw.Control(func(fd uintptr) {
+		pid, socketErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+	}); err != nil {
+		return 0, err
+	}
+	if socketErr != nil {
+		return 0, socketErr
+	}
+	return pid, nil
+}
