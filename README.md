@@ -226,6 +226,8 @@ Templates are strict, read-only JSON inputs. After `agentctl skill install`, the
 the repository copy is [`references/fleet-template.schema.json`](skills/agentctl/references/fleet-template.schema.json).
 The binary applies that schema automatically. A schema-valid template can still be refused at launch because value
 rules apply to the merged template-and-flag union.
+Before schema validation, agentctl enforces the 1 MiB file-size limit and refuses duplicate JSON object keys or
+trailing content.
 
 For editor assistance, configure a file-match mapping rather than putting `$schema` in a template. For example, this
 VS Code setting maps an operator-chosen `agentctl-templates` glob to the Codex-installed skill path:
