@@ -26,6 +26,9 @@ var ErrOperationHasNoPayload = errors.New("operation has no PTY payload")
 
 type requestHandler struct {
 	mu           sync.RWMutex
+	operationMu  sync.Mutex
+	phaseMu      sync.RWMutex
+	phase        shimOperationPhase
 	session      string
 	role         string
 	shimPID      int
@@ -35,6 +38,55 @@ type requestHandler struct {
 	observe      func() Response
 	stop         func(context.Context) (Response, error)
 	stopComplete func()
+}
+
+type shimOperationPhase string
+
+const (
+	shimOperationActive   shimOperationPhase = "active"
+	shimOperationStopping shimOperationPhase = "stopping"
+	shimOperationStopped  shimOperationPhase = "stopped"
+)
+
+func (h *requestHandler) operationPhase() shimOperationPhase {
+	h.phaseMu.RLock()
+	defer h.phaseMu.RUnlock()
+	if h.phase == "" {
+		return shimOperationActive
+	}
+	return h.phase
+}
+
+func (h *requestHandler) beginStop() (shimOperationPhase, bool) {
+	h.phaseMu.Lock()
+	defer h.phaseMu.Unlock()
+	if h.phase == "" || h.phase == shimOperationActive {
+		h.phase = shimOperationStopping
+		return shimOperationStopping, true
+	}
+	return h.phase, false
+}
+
+func (h *requestHandler) setOperationPhase(phase shimOperationPhase) {
+	h.phaseMu.Lock()
+	h.phase = phase
+	h.phaseMu.Unlock()
+}
+
+func (h *requestHandler) operationPhaseResponse(outcome Outcome, phase shimOperationPhase) Response {
+	state := string(phase)
+	shimPID, childPID := h.shimPID, h.childPID
+	return Response{
+		Version: ShimProtocolVersion, Outcome: outcome, State: &state,
+		ShimPID: &shimPID, ChildPID: &childPID,
+	}
+}
+
+func (h *requestHandler) alreadyStoppingResponse(phase shimOperationPhase) Response {
+	response := h.operationPhaseResponse(OutcomeStopAlreadyStopping, phase)
+	attempted := false
+	response.SignalAttempted = &attempted
+	return response
 }
 
 func (h *requestHandler) setReady() {
@@ -107,19 +159,42 @@ func (h *requestHandler) handleConnection(ctx context.Context, connection net.Co
 			if h.observe == nil {
 				return errors.New("shim observe handler is unavailable")
 			}
+			switch phase := h.operationPhase(); phase {
+			case shimOperationStopping:
+				return writeHandlerResponse(connection, h.operationPhaseResponse(OutcomeStopping, phase))
+			case shimOperationStopped:
+				return writeHandlerResponse(connection, h.operationPhaseResponse(OutcomeStopped, phase))
+			}
 			return writeHandlerResponse(connection, h.observe())
 		case "stop":
 			if h.stop == nil {
 				return errors.New("shim stop handler is unavailable")
 			}
+			phase, admitted := h.beginStop()
+			if !admitted {
+				return writeHandlerResponse(connection, h.alreadyStoppingResponse(phase))
+			}
+			h.operationMu.Lock()
+			defer h.operationMu.Unlock()
 			response, err := h.stop(requestCtx)
 			if err != nil && response.Outcome == "" {
+				h.setOperationPhase(shimOperationActive)
 				return err
 			}
+			childExited := response.Outcome == OutcomeStopChildExited
+			if childExited {
+				h.setOperationPhase(shimOperationStopped)
+			}
 			if writeErr := writeHandlerResponse(connection, response); writeErr != nil {
+				if !childExited {
+					h.setOperationPhase(shimOperationActive)
+				}
 				return writeErr
 			}
-			if response.Outcome == OutcomeStopChildExited && h.stopComplete != nil {
+			if !childExited {
+				h.setOperationPhase(shimOperationActive)
+			}
+			if childExited && h.stopComplete != nil {
 				h.stopComplete()
 			}
 			return nil
@@ -133,6 +208,14 @@ func (h *requestHandler) handleConnection(ctx context.Context, connection net.Co
 			Version: ShimProtocolVersion, Outcome: OutcomeStarting, State: &state,
 			ShimPID: &h.shimPID, ChildPID: &h.childPID,
 		})
+	}
+	if phase := h.operationPhase(); phase != shimOperationActive {
+		return writeHandlerResponse(connection, h.operationPhaseResponse(OutcomeShimStopping, phase))
+	}
+	h.operationMu.Lock()
+	defer h.operationMu.Unlock()
+	if phase := h.operationPhase(); phase != shimOperationActive {
+		return writeHandlerResponse(connection, h.operationPhaseResponse(OutcomeShimStopping, phase))
 	}
 	response, err := h.operations.Deliver(requestCtx, request.Operation)
 	if err != nil && response.Outcome == "" {

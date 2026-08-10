@@ -1439,7 +1439,13 @@ One epic, five sequential waves; issues within a wave are parallelizable across 
 
 Authoritative answers to implementation questions raised during Wave 1. These bind all packages and reviews.
 
-1. **Window-command assembly site.** Exactly one place assembles the window command: `internal/fleet`, as the string `"exec " + shellq.Join(harness.AgentArgv(...))`. `harness` returns argv (starting at `amq`); `shellq` quotes and joins; `fleet` prepends the unquoted `exec` shell keyword and passes the string to `tmuxx`. No other package may compose shell-interpreted strings.
+1. **Window-command assembly site.** Assembly remains confined to `internal/fleet` as the string
+   `"exec " + shellq.Join(argv)`: `shellq` quotes and joins, `fleet` prepends the unquoted `exec` shell keyword, and
+   the result is passed to `tmuxx`. During PR 5's pre-cutover compatibility stage, the complete authorized set is
+   exactly `internal/fleet/fleet.go:agentCommand` for the shipped direct-harness argv and
+   `internal/fleet/shim.go:shimWindowCommand` for the hidden-shim argv. The structural guard pins both named sites and
+   rejects a third, indirection, or a move/rename. PR 7 removes the legacy site at the atomic cutover and restores the
+   one-site invariant. No other package may compose shell-interpreted strings.
 2. **`shellq.Quote` is total.** Safe for arbitrary bytes with no validated-input precondition (defense in depth, independent of `internal/config`). Sole documented exclusion: NUL, which cannot exist in an argv element; the fuzz round-trip property skips inputs containing `\x00`.
 3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
 4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
@@ -1798,6 +1804,46 @@ records the shim PID, nonce, fully resolved state root, and protocol metadata as
 that root and compares it with its independently resolved root. A mismatch is `state-root-disagreement`; it never
 enumerates the alternate tree or reports `missing`.
 
+Launch owns a separate session-level durable fleet record; it does not extend the per-role record above. Its path is
+exactly:
+
+```text
+<resolved-state-root>/sessions/<session>/fleet.json
+```
+
+Its version-1 JSON schema is exactly:
+
+```json
+{"version":1,"session":"SESSION","directory":"DIRECTORY","roster":["ROLE"],"roles":{"ROLE":{"harness":"HARNESS","model":"MODEL","effort":"EFFORT"}}}
+```
+
+`roster` is the nonempty declaration-order list. `roles` is an object keyed by role, contains exactly the roster keys,
+and each value requires exactly `harness`, `model`, and `effort`; empty model and effort strings retain their existing
+default semantics. `session`, every roster entry and role key, harness, model, effort, and the absolute directory pass
+their existing validators. The stored session must equal the session selected by the path. The top-level writer order
+is `version`, `session`, `directory`, `roster`, `roles`; role-object keys encode in lexical order and their field order
+is `harness`, `model`, `effort`. A trailing newline is written. The complete file including that newline is at most
+65536 bytes. The decoder performs a version-only pre-pass before interpreting any other field, then rejects duplicate,
+unknown, missing, wrongly typed, inconsistent, or trailing data at the top level and inside every role object. The file
+is a nonsymlink, same-user, mode-`0600` regular file beneath retained mode-`0700` session directories.
+
+Creating `<session>` with one exclusive `mkdir` serializes concurrent fleet launches: one caller creates and commits
+the complete record; an `EEXIST` contender is `fleet-config-exists` and mutates nothing. The fleet record uses a
+same-directory mode-`0600` temporary file, complete write, file sync, close, rename to `fleet.json`, session-directory
+sync, and `sessions`-directory sync. A failure before rename removes only that invocation's empty session reservation
+and synchronizes `sessions`; no role start has been attempted. A failure after rename or either following directory
+sync is `RecordCommitUncertainError`: the visible record is retained, no role starts, and no retry or absence inference
+is permitted.
+
+An overriding `relaunch` changes this record only after the replacement shim has answered ready with the created shim
+PID. It acquires `flock(LOCK_EX|LOCK_NB)` on the retained session directory only for a version-checked read/modify/write,
+preserves version/session/roster, and replaces the directory and selected role configuration atomically. Contention or
+a record differing from the caller's prior read is `fleet-mutation-conflict`; it never overwrites the peer value.
+A definite replacement failure writes no fleet change and enters the owned-role rollback rules below. A post-rename
+sync failure is `RecordCommitUncertainError` with phase `fleet-config`: the ready role, presentation, and visible fleet
+record are retained, with no retry or cleanup. This session mutation flock is not role ownership; only the role
+lockfile's lifetime flock establishes role ownership.
+
 ### 15.3 Ownership instant and complete failure/rollback rules
 
 Role ownership begins at exactly one instant: successful `flock(LOCK_EX)` on the role lockfile. The lock is held for
@@ -1857,6 +1903,15 @@ orphan/indeterminate/cleanup fact. If child start succeeded but PID/token upgrad
 Listener, readiness, relay, cancellation, and cleanup failures after child start follow the same rule. Fleet rollback
 removes only roles/sessions created by that invocation, in child-before-shim order; it never destroys a peer or calls
 an uncertain child absent.
+
+The launch-owned fleet record precedes every presentation command and role start. A presentation creation result that
+does not return valid typed owner IDs cannot prove whether the command started a shim: launch retains the fleet record,
+every presentation, and every prior ready role, and attempts no stop or removal. Once typed created IDs exist, a later
+readiness/start failure stops this invocation's roles in reverse roster order. Only a response carrying all three
+separate facts `signal_attempted=true`, `signal=SIGHUP`, and `child_exit_observed=true` permits exact owned
+presentation removal followed by fleet-record removal. Any stop error, survivor, absent signal-attempt fact, absent
+exit-observation fact, presentation cleanup error, record uncertainty, or remaining durable role artifact retains the
+fleet record; no rollback may delete it while any role child might live.
 
 Every lifecycle start first reads the durable role path and refuses an existing record before claim or fork; only the
 later relaunch/absence path may remove one after §15.4 returns ESRCH. Atomic record writes rename a complete temporary
@@ -1918,14 +1973,24 @@ payload encoded by version 1 is exactly `{"version":1}`. The request schema cont
 |---|---|---|---|
 | `clear` | payload | closed clear bytes, registered `/clear` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
 | `compact` | payload | closed clear bytes, registered `/compact` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
-| `observe` | control | none; it never calls the PTY writer | one applicable §15.6 state outcome with its required recorded/process facts |
-| `stop` | control | none; it never calls the PTY writer | `stop-child-exited` or `stop-child-retained` |
+| `observe` | control | none; it never calls the PTY writer | one applicable §15.6 state outcome with its required recorded/process facts, plus `stopping` or `stopped` during serialized stop |
+| `stop` | control | none; it never calls the PTY writer | `stop-child-exited`, `stop-child-retained`, or `stop-already-stopping` |
 
 `observe` applies the §15.4 kill/token oracle and returns advisory-record, child, answerer, and confidence facts only
 at their specified provenance. `stop` attempts the closed `SIGHUP` process-group signal and reports
 `signal_attempted` separately from `child_exit_observed`; a signal attempt is never exit evidence, and a survivor is
 retained. A non-wire signal/file side channel is inadmissible because it cannot return those §1.1 observations. The
 versioned socket round trip is the one control channel for all four operations.
+
+Payload delivery and stop share one serialization gate that remains held through their response write. Stop first
+changes the closed phase from `active` to `stopping`, then waits for any already-admitted payload operation to finish
+and report its response; only after that response write releases the gate may stop attempt SIGHUP. A `clear` or
+`compact` arriving in phase `stopping` or `stopped` returns `shim-stopping` with `state`, `shim_pid`, and `child_pid`
+and writes no PTY byte. `observe` bypasses this mutation gate and remains admitted: it returns `stopping` while stop is
+pending, or `stopped` after child exit has been observed and before owned teardown finishes, with the same three facts.
+A second stop in either phase returns `stop-already-stopping` with `signal_attempted=false`; it attempts no second
+signal and makes no PTY write. A stop survivor remains `stopping` through its response write, then returns to `active`;
+an observed child exit changes to `stopped` before its response write and never returns to `active`.
 
 The response schema contains only `version`,
 `outcome`, and the following typed objective fields: `state`, `shim_pid`, `child_pid`, `bytes_written`,
@@ -1979,6 +2044,12 @@ recorded state root and owner observations. Durable records enumerated without a
 carry `"confidence":"anchored"`. Tmux presentation is `present`, `gone`, or `unavailable` and never changes runtime
 identity.
 
+Fleet-record harness/model/effort and directory values are operator-claim provenance. The shim response, role record,
+answerer, process observation, and readiness are shim-runtime provenance. Status joins those sources without replacing
+one with the other: a fleet value never becomes runtime evidence, and a live shim observation never silently rewrites
+the fleet claim. The anchored/unanchored vocabulary continues to describe the runtime/durable identity join, not the
+trustworthiness of an operator-selected fleet value.
+
 Within one role, first match wins:
 
 | Order | State | Observation |
@@ -1990,6 +2061,8 @@ Within one role, first match wins:
 | 5 | `cleanup-failed` | prior owned cleanup durably recorded incomplete |
 | 6 | `concurrent-contender` | claim/record observations identify competing owner decision |
 | 7 | `starting` | live claimed shim plus `child-starting`, or child recorded but not ready |
+| 7a | `stopping` | live claimed shim has begun serialized stop and has not yet reported its stop response |
+| 7b | `stopped` | live claimed shim observed child exit and owned teardown is pending |
 | 8 | `indeterminate-child-starting` | dead shim plus `child-starting` |
 | 9 | `running` | live shim, matching child/answerer, ready protocol |
 | 10 | `orphan` | dead shim and child `present-match` |
@@ -2022,6 +2095,11 @@ Tmux launch uses the single §12.1 shell site to start the hidden shim; foregrou
 `relaunch` requires §15.4 absence permission and never starts beside orphan, indeterminate, disagreement, or
 could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
 cleanup remains reported.
+
+Optional presentation lookup treats only tmux 3.7b's exact single-line `no server running on PATH` and
+`error connecting to PATH (No such file or directory)` diagnostics as presentation `gone`; any prefix, suffix,
+additional line, different exit diagnostic, or runner failure remains an error. This classification never implies
+runtime-role or fleet absence.
 
 The only delivery instruction at the control boundary is the operation name after version, answerer, ancestry, child
 identity, and readiness pass. The request's other permitted values are the protocol version and validated
@@ -2062,6 +2140,7 @@ sole successful status output and therefore add no diagnostic line.
 | `invalid-request` | 2 | `agentctl: invalid shim request for session SESSION role ROLE: RULE; no role was mutated` |
 | `session-missing` | 3 | `agentctl: session SESSION was not found` |
 | `fleet-config-missing` | 3 | `agentctl: session SESSION has no durable fleet configuration` |
+| `fleet-config-exists` | 3 | `agentctl: refusing to launch session SESSION; durable fleet configuration already exists (fleet-config-exists)` |
 | `protocol-skew-shim-absent` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was absent; expected 1 (protocol-skew)` |
 | `protocol-skew-shim-observed` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was OBSERVED; expected 1 (protocol-skew)` |
 | `protocol-skew-client-absent` | 3 | `agentctl: refusing client request; client request protocol version was absent; expected 1 (protocol-skew)` |
@@ -2082,6 +2161,8 @@ sole successful status output and therefore add no diagnostic line.
 | `state-root-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; resolved state root LOCAL_ROOT differs from lockfile-recorded state root RECORDED_ROOT (state-root-disagreement)` |
 | `present-token-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; child PID CHILD start token OBSERVED_TOKEN differs from recorded token RECORDED_TOKEN (present-token-disagreement)` |
 | `present-not-ours` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; kill(CHILD, 0) returned EPERM (present-not-ours)` |
+| `shim-stopping` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM state is STATE for child PID CHILD; no PTY input was written (shim-stopping)` |
+| `stop-already-stopping` | 5 | `agentctl: stop for role ROLE in session SESSION found shim PID SHIM state STATE for child PID CHILD; no second signal was attempted and no PTY input was written (stop-already-stopping)` |
 | `delivery-cancelled-clean` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled before any payload byte was written (delivery-cancelled)` |
 | `delivery-cancelled-with-residue` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled after BYTES payload bytes were written but before submit; terminal input may contain residue (delivery-cancelled-with-residue)` |
 | `ancestry-undetermined` | 6 | `agentctl: refusing to OP role ROLE in session SESSION; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
@@ -2110,7 +2191,10 @@ environment. `REMAINING` is a comma-separated list in the fixed order `child, so
 are not named. `OBSERVATION` is exactly one of `present-match`, `present-token-disagreement`, `present-not-ours`, or
 `could-not-observe`; it is never `missing` unless `kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup
 row applies. Observed self-target and ancestry-undetermined deliberately remain different facts, codes, and literals.
-`PHASE` is exactly `child-starting` or `child-recorded`. `stop-child-exited` and `stop-child-retained` always carry
+`PHASE` is exactly `child-starting`, `child-recorded`, or `fleet-config`. For `shim-stopping` and
+`stop-already-stopping`, `STATE` is exactly `stopping` or `stopped`; the former outcome applies only to payload
+operations `clear` and `compact`. `stop-already-stopping` carries `signal_attempted=false` and omits `signal` and
+`child_exit_observed` because the second request performs neither action. `stop-child-exited` and `stop-child-retained` always carry
 `signal_attempted=true`, `signal=SIGHUP`, and respectively `child_exit_observed=true` or `false`; those fields remain
 separate even when the selected outcome makes both facts readable.
 

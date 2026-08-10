@@ -174,6 +174,169 @@ func TestShimServerControlOperationsUseNoPTYPath(t *testing.T) {
 	}
 }
 
+func TestShimStopWaitsForInflightPayloadReportAndRefusesLaterMutatingOperationsWithoutSecondSignal(t *testing.T) {
+	spec, _ := harness.Lookup("codex")
+	writer := &recordingOperationWriter{}
+	payloadStarted := make(chan struct{})
+	releasePayload := make(chan struct{})
+	stopCalled := make(chan struct{}, 1)
+	childPID := 456
+	attempted, exited := true, true
+	signalName := "SIGHUP"
+	handler := &requestHandler{
+		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
+		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+			close(payloadStarted)
+			<-releasePayload
+			return nil
+		}),
+		observe: func() Response {
+			state := "running"
+			shimPID := 123
+			return Response{Version: 1, Outcome: OutcomeRunning, State: &state, ShimPID: &shimPID, ChildPID: &childPID}
+		},
+		stop: func(context.Context) (Response, error) {
+			stopCalled <- struct{}{}
+			return Response{
+				Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID,
+				SignalAttempted: &attempted, Signal: &signalName, ChildExitObserved: &exited,
+			}, nil
+		},
+	}
+
+	payloadClient, payloadDone := beginHandlerRequest(t, handler, "clear")
+	<-payloadStarted
+	stopClient, stopDone := beginHandlerRequest(t, handler, "stop")
+	waitForShimOperationPhase(t, handler, shimOperationStopping)
+
+	refusedPayload := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"fleet","role":"planner","operation":"compact"}`))
+	if refusedPayload.Outcome != OutcomeShimStopping || refusedPayload.State == nil || *refusedPayload.State != "stopping" {
+		t.Fatalf("payload during stop = %#v, want shim-stopping/stopping refusal", refusedPayload)
+	}
+	observed := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"fleet","role":"planner","operation":"observe"}`))
+	if observed.Outcome != OutcomeStopping || observed.State == nil || *observed.State != "stopping" {
+		t.Fatalf("observe during stop = %#v, want admitted stopping fact", observed)
+	}
+	secondStop := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"fleet","role":"planner","operation":"stop"}`))
+	if secondStop.Outcome != OutcomeStopAlreadyStopping || secondStop.SignalAttempted == nil || *secondStop.SignalAttempted {
+		t.Fatalf("second stop = %#v, want already-stopping with signal_attempted=false", secondStop)
+	}
+
+	close(releasePayload)
+	select {
+	case <-stopCalled:
+		t.Fatal("stop signaled before the in-flight payload response was read")
+	case <-time.After(50 * time.Millisecond):
+	}
+	payloadResponse := readHandlerResponse(t, payloadClient, payloadDone)
+	if payloadResponse.Outcome != OutcomeDeliverySubmitted {
+		t.Fatalf("in-flight payload response = %#v, want delivery-submitted", payloadResponse)
+	}
+	select {
+	case <-stopCalled:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not signal after in-flight payload reported")
+	}
+	stopResponse := readHandlerResponse(t, stopClient, stopDone)
+	if stopResponse.Outcome != OutcomeStopChildExited {
+		t.Fatalf("primary stop response = %#v, want stop-child-exited", stopResponse)
+	}
+	stopped := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"fleet","role":"planner","operation":"observe"}`))
+	if stopped.Outcome != OutcomeStopped || stopped.State == nil || *stopped.State != "stopped" {
+		t.Fatalf("observe after stop = %#v, want admitted stopped fact", stopped)
+	}
+
+	writer.mu.Lock()
+	writes := append([][]byte(nil), writer.calls...)
+	writer.mu.Unlock()
+	if want := [][]byte{{0x15}, []byte("/clear"), {'\r'}}; !reflect.DeepEqual(writes, want) {
+		t.Fatalf("PTY writes = %#v, want only the admitted in-flight payload %#v", writes, want)
+	}
+}
+
+func TestShimRetainedStopStaysStoppingUntilItsResponseIsReported(t *testing.T) {
+	childPID := 456
+	attempted, exited := true, false
+	signalName := "SIGHUP"
+	state := string(ProcessPresentMatch)
+	stopReturned := make(chan struct{})
+	handler := &requestHandler{
+		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
+		stop: func(context.Context) (Response, error) {
+			close(stopReturned)
+			return Response{
+				Version: 1, Outcome: OutcomeStopChildRetained, ChildPID: &childPID,
+				SignalAttempted: &attempted, Signal: &signalName, ChildExitObserved: &exited, State: &state,
+			}, nil
+		},
+	}
+
+	stopClient, stopDone := beginHandlerRequest(t, handler, "stop")
+	<-stopReturned
+	time.Sleep(25 * time.Millisecond)
+	if got := handler.operationPhase(); got != shimOperationStopping {
+		t.Fatalf("operation phase before retained stop response read = %q, want stopping", got)
+	}
+	response := readHandlerResponse(t, stopClient, stopDone)
+	if response.Outcome != OutcomeStopChildRetained {
+		t.Fatalf("retained stop response = %#v", response)
+	}
+	if got := handler.operationPhase(); got != shimOperationActive {
+		t.Fatalf("operation phase after retained stop response = %q, want active", got)
+	}
+}
+
+func beginHandlerRequest(t *testing.T, handler *requestHandler, operation string) (net.Conn, <-chan error) {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	done := make(chan error, 1)
+	go func() { done <- handler.handleConnection(context.Background(), server) }()
+	hello, err := ReadFrame(client)
+	if err != nil {
+		t.Fatalf("ReadFrame(hello) error = %v", err)
+	}
+	if err := DecodeHello(hello); err != nil {
+		t.Fatalf("DecodeHello() error = %v", err)
+	}
+	request, err := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: operation})
+	if err != nil {
+		t.Fatalf("EncodeRequest(%q) error = %v", operation, err)
+	}
+	if _, err := WriteFrame(client, request); err != nil {
+		t.Fatalf("WriteFrame(%q request) error = %v", operation, err)
+	}
+	return client, done
+}
+
+func readHandlerResponse(t *testing.T, client net.Conn, done <-chan error) Response {
+	t.Helper()
+	payload, err := ReadFrame(client)
+	if err != nil {
+		t.Fatalf("ReadFrame(response) error = %v", err)
+	}
+	response, err := DecodeResponse(payload)
+	if err != nil {
+		t.Fatalf("DecodeResponse() error = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("handleConnection() error = %v", err)
+	}
+	return response
+}
+
+func waitForShimOperationPhase(t *testing.T, handler *requestHandler, want shimOperationPhase) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if handler.operationPhase() == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("operation phase = %q, want %q", handler.operationPhase(), want)
+}
+
 func TestShimServerVersionAndRegistryRefusalsPrecedeMutation(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}

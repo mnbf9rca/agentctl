@@ -64,6 +64,11 @@ func TestProtocolStopResponsesKeepSignalAttemptAndObservedExitSeparate(t *testin
 			ChildPID: intPointer(123), SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"),
 			ChildExitObserved: boolPointer(false), State: stringPointer("present-match"),
 		},
+		{
+			Version: ShimProtocolVersion, Outcome: OutcomeStopAlreadyStopping,
+			State: stringPointer("stopping"), ShimPID: intPointer(122), ChildPID: intPointer(123),
+			SignalAttempted: boolPointer(false),
+		},
 	}
 	for _, response := range tests {
 		encoded, err := EncodeResponse(response)
@@ -74,7 +79,7 @@ func TestProtocolStopResponsesKeepSignalAttemptAndObservedExitSeparate(t *testin
 		if err != nil {
 			t.Fatalf("DecodeResponse(%q) error = %v", response.Outcome, err)
 		}
-		if decoded.SignalAttempted == nil || decoded.ChildExitObserved == nil {
+		if decoded.SignalAttempted == nil || (decoded.Outcome != OutcomeStopAlreadyStopping && decoded.ChildExitObserved == nil) {
 			t.Fatalf("DecodeResponse(%q) omitted signal/exit facts: %#v", response.Outcome, decoded)
 		}
 	}
@@ -409,12 +414,16 @@ func TestProtocolResponseRejectsFactuallyImpossibleValues(t *testing.T) {
 		{Version: 1, Outcome: OutcomeDeliveryCancelledWithResidue, BytesWritten: uint64Pointer(0)},
 		{Version: 1, Outcome: OutcomeRunning, State: stringPointer("child-starting"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
 		{Version: 1, Outcome: OutcomeStarting, State: stringPointer("arbitrary"), ShimPID: intPointer(10)},
+		{Version: 1, Outcome: OutcomeStopping, State: stringPointer("stopped"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeStopped, State: stringPointer("stopping"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeShimStopping, State: stringPointer("running"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
 		{Version: 1, Outcome: OutcomeIndeterminateChildStarting, State: stringPointer("child-recorded"), ShimPID: intPointer(10), RecordPath: stringPointer("/record")},
 		{Version: 1, Outcome: OutcomeStateRootDisagreement, LocalRoot: stringPointer("/same"), RecordedRoot: stringPointer("/same")},
 		{Version: 1, Outcome: OutcomeOrphan, ShimPID: intPointer(10), ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &otherToken},
 		{Version: 1, Outcome: OutcomePresentTokenDisagreement, ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &token},
 		{Version: 1, Outcome: OutcomeStopChildExited, ChildPID: intPointer(11), SignalAttempted: boolPointer(false), Signal: stringPointer("SIGHUP"), ChildExitObserved: boolPointer(true)},
 		{Version: 1, Outcome: OutcomeStopChildRetained, ChildPID: intPointer(11), SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"), ChildExitObserved: boolPointer(true), State: stringPointer("present-match")},
+		{Version: 1, Outcome: OutcomeStopAlreadyStopping, State: stringPointer("stopping"), ShimPID: intPointer(10), ChildPID: intPointer(11), SignalAttempted: boolPointer(true)},
 	}
 	for _, response := range tests {
 		if _, err := EncodeResponse(response); err == nil {
@@ -429,6 +438,11 @@ func TestProtocolResponseAcceptsClosedStateValues(t *testing.T) {
 		{Version: 1, Outcome: OutcomeStarting, State: stringPointer("child-recorded"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
 		{Version: 1, Outcome: OutcomeIndeterminateChildStarting, State: stringPointer("child-starting"), ShimPID: intPointer(10), RecordPath: stringPointer("/record")},
 		{Version: 1, Outcome: OutcomeRunning, State: stringPointer("running"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeStopping, State: stringPointer("stopping"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeStopped, State: stringPointer("stopped"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeShimStopping, State: stringPointer("stopping"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeShimStopping, State: stringPointer("stopped"), ShimPID: intPointer(10), ChildPID: intPointer(11)},
+		{Version: 1, Outcome: OutcomeStopAlreadyStopping, State: stringPointer("stopping"), ShimPID: intPointer(10), ChildPID: intPointer(11), SignalAttempted: boolPointer(false)},
 	} {
 		if _, err := EncodeResponse(response); err != nil {
 			t.Fatalf("EncodeResponse rejected valid state response %#v: %v", response, err)
@@ -470,6 +484,7 @@ func TestProtocolResponseSchemaSingleSourceCoversEveryOutcome(t *testing.T) {
 		OutcomeMissing, OutcomeCleanupFailed, OutcomeConcurrentContender, OutcomeObservedSelfTarget,
 		OutcomeAncestryUndetermined, OutcomeReadinessTimeout, OutcomeReadinessObservationFailed,
 		OutcomeChildExitedBeforeReady, OutcomeStopChildExited, OutcomeStopChildRetained,
+		OutcomeStopping, OutcomeStopped, OutcomeShimStopping, OutcomeStopAlreadyStopping,
 	}
 	if len(responseSchemas) != len(outcomes) {
 		t.Fatalf("responseSchemas has %d outcomes, want %d", len(responseSchemas), len(outcomes))
