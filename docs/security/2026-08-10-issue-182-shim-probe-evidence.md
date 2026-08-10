@@ -82,6 +82,9 @@ matches; the warning is not mistaken for the pinned version.
 
 `go test ./hack -run TestProbeShimSIGHUP -count=1` covers closed harness-name refusal, existing-output refusal,
 multi-line version parsing, transient pre-PTY topology observation, realistic nonempty command fields, required output
-keys, owned child cleanup, and an unrelated sentinel process remaining alive. A dedicated intermediate fixture puts a
-PTY-bearing bridge between the shim and selected harness and requires factual refusal plus cleanup of both owned
-processes. The fake PATH includes a `tmux` canary and fails if the probe invokes it.
+keys, owned child cleanup, and an unrelated sentinel answering a bounded `SIGUSR1` liveness handshake after probe
+cleanup. A dedicated boundary fixture refuses an exited/zombie sentinel even where `kill(pid, 0)` still reports the
+PID present. A dedicated intermediate fixture puts a PTY-bearing bridge between the shim and selected harness and
+requires factual refusal plus cleanup of both owned processes. If that fixture omits its grandchild PID record, fake
+`ps` returns no row immediately so the probe's 100×50ms observation loop owns the deadline; the bounded refusal still
+cleans the owned bridge and grandchild. The fake PATH includes a `tmux` canary and fails if the probe invokes it.
