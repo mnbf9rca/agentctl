@@ -26,19 +26,6 @@ const (
 	HarnessCodex  Harness = "codex"
 )
 
-// effortLevels lists the effort levels each harness accepts, in increasing
-// order. Unlike models, efforts are a closed set: the value names a harness
-// mode rather than an opaque identifier, and the codex rendering embeds it in a
-// configuration expression the harness parses. Levels verified 2026-08-03
-// against Claude Code 2.1.220 (`--effort <level>`: low, medium, high, xhigh,
-// max) and codex-cli 0.146.0 (`model_reasoning_effort`, whose enum also carries
-// none, minimal and ultra — not exposed here because agentctl accepts only
-// levels verified on both harnesses).
-var effortLevels = map[Harness][]string{
-	HarnessClaude: {"low", "medium", "high", "xhigh", "max"},
-	HarnessCodex:  {"low", "medium", "high", "xhigh", "max"},
-}
-
 // RoleConfig is the validated configuration for one fleet role.
 type RoleConfig struct {
 	Name    string
@@ -47,27 +34,16 @@ type RoleConfig struct {
 	Effort  string
 }
 
-// EffortLevels returns the effort levels a harness accepts, in increasing
-// order, or nil for an unsupported harness.
-func EffortLevels(harness Harness) []string {
-	levels, ok := effortLevels[harness]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), levels...)
-}
-
-// ValidateEffort checks one effort against the harness's closed set.
-func ValidateEffort(harness Harness, effort string) error {
-	if supportsEffort(harness, effort) {
+// ValidateEffort checks one opaque harness effort against the safe charset.
+func ValidateEffort(effort string) error {
+	if modelExpression.MatchString(effort) {
 		return nil
 	}
 	return &ValidationError{
 		Option:     "effort",
 		Value:      effort,
 		EntryIndex: -1,
-		Reason: fmt.Sprintf("harness %q does not support effort %q; supported levels are %s",
-			harness, effort, strings.Join(effortLevels[harness], ", ")),
+		Reason:     fmt.Sprintf("effort %q must match %s", effort, modelPattern),
 	}
 }
 
@@ -334,8 +310,7 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 		if !defined {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
-		harness := fleet.Roles[roleIndex].Harness
-		if err := ValidateEffort(harness, effort); err != nil {
+		if err := ValidateEffort(effort); err != nil {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err))
 		}
 
@@ -344,15 +319,6 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 	}
 
 	return fleet, nil
-}
-
-func supportsEffort(harness Harness, effort string) bool {
-	for _, level := range effortLevels[harness] {
-		if level == effort {
-			return true
-		}
-	}
-	return false
 }
 
 func validationReason(err error) string {
