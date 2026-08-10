@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -362,6 +363,11 @@ func startClaimHolder(t *testing.T, rolePath *RolePath, bindSocket bool) *exec.C
 	if err != nil {
 		t.Fatal(err)
 	}
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdin.Close() })
 	command.Stderr = command.Stdout
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -403,7 +409,9 @@ func TestClaimHolderHelper(t *testing.T) {
 		defer func() { _ = listener.Close() }()
 	}
 	println("claim-held")
-	select {}
+	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestLocalPeerPIDObservesConnectedAnswerer is a live Darwin kernel probe for
