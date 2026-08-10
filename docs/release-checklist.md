@@ -197,18 +197,24 @@ fails closed after teardown is attempted.
 
 The verifier creates a separate stub fleet on a named throwaway tmux socket,
 an empty temporary project, and a mode-`0700` temporary `HOME`. The macOS probe
-proved `~/.codex/auth.json` sufficient for codex file-based seeding. A separate
-Claude Code 2.1.226 probe proved an exact
-`$REAL_HOME/Library/Keychains -> $TEMP_HOME/Library/Keychains` symlink
-sufficient for headless authentication. The verifier never offers or copies a
-Claude credential file.
+proved `~/.codex/auth.json` sufficient for codex file-based seeding. Separate
+Claude Code 2.1.226 probes proved that an exact
+`$REAL_HOME/Library/Keychains -> $TEMP_HOME/Library/Keychains` symlink makes
+the existing credential available, but an interactive first start still asks
+for re-authentication unless the temporary HOME also contains a synthesized
+mode-`0600` `.claude.json` with exactly
+`{"hasCompletedOnboarding":true}`. The verifier never offers or copies a
+Claude credential file or the operator's real Claude configuration.
 If the proven Codex file exists, the verifier prints that exact filename and
 asks once for consent before copying it with mode `0600`; its contents are never
 printed. Independently, the verifier prints the exact Claude Keychains source
 and destination and asks for separate consent, stating that both probe
 harnesses can reach the operator's login keychain through the link (per-item
-ACLs still apply). The link copies no secret; refresh writes reach the real
-login keychain as they do for the operator's daily harnesses.
+ACLs still apply). Under that same consent, it states the fixed temporary
+`.claude.json` destination and synthesizes only the minimal onboarding boolean.
+That file is configuration, not credentials: the link copies no secret, and
+refresh writes reach the real login keychain as they do for the operator's
+daily harnesses. Declining the link also declines the synthesized file.
 
 The Part C wrapper's current authentication, consent, launch, and cleanup legs
 introduced for #148 were executed in the [#178 audit and final
@@ -230,12 +236,14 @@ For a manual run where Keychain access is locked, such as SSH or launchd, use
 `claude setup-token` as the documented fallback rather than exporting that
 environment variable.
 
-- [ ] At checkpoint C.C1, answer `y` only if both harnesses reached
-      authenticated ready prompts. With both consented seeds, verify both
-      harnesses started authenticated with zero manual pane interaction. On the
-      isolated-keychain path, complete Claude onboarding/sign-in and verify it
-      minted a fresh token; complete Codex sign-in only if its independent file
-      copy was declined or unavailable
+- [ ] At checkpoint C.C1, answer `y` only for the authentication claim the
+      verifier prints for the selected paths. With the Claude link consented,
+      verify Claude started without requiring re-authentication; when the Codex
+      seed was also consented, verify neither harness required re-authentication.
+      Theme or workspace-trust prompts do not contradict that narrow claim. On
+      the isolated-keychain path, complete Claude onboarding/sign-in and verify
+      it minted a fresh token; complete Codex sign-in only if its independent
+      file copy was declined or unavailable
 - [ ] At checkpoint C.C2, in the
       Claude Code tab, type `/skills`, press Enter, find `agentctl` in the
       displayed inventory, and press `esc` to close it. Repeat those exact
@@ -249,7 +257,8 @@ environment variable.
       post-detach report. The verifier tears down only its named probe fleet and
       socket before removing the exact Keychains link, restores `HOME` and
       `PATH`, removes only the link and never its target, then removes the
-      credential-bearing temporary `HOME` on every successful cleanup path.
+      credential-bearing temporary `HOME` and synthesized onboarding file on
+      every successful cleanup path.
       If consent aborts before that named server is created, tmux's exact
       single-line connect-ENOENT response for that wrapper-owned socket is
       observed as socket absence so credential-HOME cleanup still completes.
