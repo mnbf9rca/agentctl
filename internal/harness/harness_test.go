@@ -199,6 +199,21 @@ func TestLookupReturnsIndependentInputClearKeys(t *testing.T) {
 	}
 }
 
+func TestPTYControlBytesAreClosedHarnessConstants(t *testing.T) {
+	for _, name := range []string{"claude", "codex"} {
+		spec, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("Lookup(%q) = false", name)
+		}
+		if got, want := spec.InputClearBytes(), []byte{0x15}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s InputClearBytes() = %v, want %v", name, got, want)
+		}
+		if got, want := spec.SubmitBytes(), []byte{'\r'}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s SubmitBytes() = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestUnknownHarness(t *testing.T) {
 	t.Parallel()
 

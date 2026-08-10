@@ -1737,6 +1737,17 @@ role without tmux. The internal shim entrypoint is hidden from public help, `com
 agent-facing inventories. No migration or dual dialect is supported; PR 7 switches production paths atomically and
 protocol version skew fails closed.
 
+The hidden argv is exactly:
+
+```text
+agentctl __shim --session SESSION --role ROLE --harness HARNESS [--model MODEL] [--effort EFFORT]
+```
+
+It accepts no positional child command, payload, raw key, environment override, directory, or arbitrary argument.
+The handler validates every supplied value, reconstructs the unchanged child argv through `harness.AgentArgv`, and
+inherits its already-selected working directory and environment. This route exists only so later fleet wiring can
+start the current executable; it is not a public lifecycle command and does not appear in any command inventory.
+
 | Package | Approved responsibility |
 |---|---|
 | `internal/shim` | namespace roots; lifetime `flock`; advisory lockfile; durable role records; version-first codec; `LOCAL_PEERPID`; raw process observation; server/client boundary |
@@ -1847,6 +1858,16 @@ Listener, readiness, relay, cancellation, and cleanup failures after child start
 removes only roles/sessions created by that invocation, in child-before-shim order; it never destroys a peer or calls
 an uncertain child absent.
 
+Every lifecycle start first reads the durable role path and refuses an existing record before claim or fork; only the
+later relaunch/absence path may remove one after §15.4 returns ESRCH. Atomic record writes rename a complete temporary
+file and then synchronize the containing directory. If rename succeeded but directory synchronization failed,
+`RecordCommitUncertainError` reports that the replacement is visible while crash durability is unproved. Its first
+consumer must stop that lifecycle phase, retain the visible record, and refuse to infer whether the prior or
+replacement record survives a crash. For `child-starting`, no fork follows. For `child-recorded`, teardown still uses
+§15.4, but the uncertain record is not silently overwritten or described as absent. The exact CLI-visible result is
+`record-commit-uncertain` in §15.8. Provenance: the standing PR-2 reviewer gate rider, carried at its first consumer in
+PR 4 and confirmed by the planner's 2026-08-10 R16 response.
+
 A dead shim plus `child-starting` has no timeout and never self-resolves. For manual recovery, read
 `<recorded-state-root>` from the lockfile body—not the current environment—and, only after independently verifying no
 child remains, manually remove:
@@ -1890,10 +1911,27 @@ from 1 through 4096 are accepted; zero, a value above 4096, EOF in either header
 bytes inside a single JSON value, and a non-object top level are `protocol-frame-read-invalid`. A connection carries,
 in order, exactly one server hello, one client request, and one server response, then the server closes it. The hello
 payload encoded by version 1 is exactly `{"version":1}`. The request schema contains only `version`, `session`,
-`role`, and `operation`; `operation` is one closed registry name. The response schema contains only `version`,
+`role`, and `operation`; `operation` is one closed registry name. Ruling R16 (planner answer to the PR-4 builder,
+2026-08-10, reviewer-gated in PR 4) divides that registry into the following exact, argument-free kinds:
+
+| Operation | Kind | PTY effect | Exact response outcomes |
+|---|---|---|---|
+| `clear` | payload | closed clear bytes, registered `/clear` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
+| `compact` | payload | closed clear bytes, registered `/compact` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
+| `observe` | control | none; it never calls the PTY writer | one applicable §15.6 state outcome with its required recorded/process facts |
+| `stop` | control | none; it never calls the PTY writer | `stop-child-exited` or `stop-child-retained` |
+
+`observe` applies the §15.4 kill/token oracle and returns advisory-record, child, answerer, and confidence facts only
+at their specified provenance. `stop` attempts the closed `SIGHUP` process-group signal and reports
+`signal_attempted` separately from `child_exit_observed`; a signal attempt is never exit evidence, and a survivor is
+retained. A non-wire signal/file side channel is inadmissible because it cannot return those §1.1 observations. The
+versioned socket round trip is the one control channel for all four operations.
+
+The response schema contains only `version`,
 `outcome`, and the following typed objective fields: `state`, `shim_pid`, `child_pid`, `bytes_written`,
 `submit_observed`, `cause`, `cleanup`, `record_path`, `local_root`, `recorded_root`, `recorded_token`, `observed_token`,
-`caller_pid`, `target_pid`, `final_icanon`, and `final_echo`. Each outcome's strict decoder admits only its defined
+`caller_pid`, `target_pid`, `final_icanon`, `final_echo`, `signal_attempted`, `signal`, and
+`child_exit_observed`. `signal` is the closed literal `SIGHUP`; it is not caller text. Each outcome's strict decoder admits only its defined
 subset; an irrelevant otherwise-known field is rejected. Neither schema has an extension map or arbitrary
 input/payload field.
 
@@ -2001,7 +2039,7 @@ Every diagnostic is one line on stderr with the `agentctl: ` prefix and trailing
 uppercase words are typed substitutions, not discretionary prose. `SESSION`, `ROLE`, every path/root/executable/flag,
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
-`EXPECTED_TYPE`, `REMAINING`, and boolean literals are closed canonical tokens rendered without quotes. A raw start
+`EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes. A raw start
 token renders as `{sec:SEC,usec:USEC}`. A command must select one typed row and its literal template. It may not
 paraphrase, append a generic category, or borrow another row's exit code. `status` table and JSON documents are the
 sole successful status output and therefore add no diagnostic line.
@@ -2013,6 +2051,7 @@ sole successful status output and therefore add no diagnostic line.
 | `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
 | `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
 | `delivery-submitted` | 0 | `agentctl: OP for role ROLE in session SESSION wrote BYTES bytes and observed submit` |
+| `stop-child-exited` | 0 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP and observed child PID CHILD exit; no PTY input was written` |
 | `unclassified` | 1 | `agentctl: OP failed for session SESSION: CAUSE (unclassified)` |
 | `run-child-failed` | 1 | `agentctl: foreground role ROLE in session SESSION exited with status STATUS (child-exit)` |
 | `run-child-signaled` | 1 | `agentctl: foreground role ROLE in session SESSION terminated by signal SIGNAL (child-signal)` |
@@ -2061,6 +2100,8 @@ sole successful status output and therefore add no diagnostic line.
 | `owned-rollback-incomplete` | 8 | `agentctl: OP failed for role ROLE in session SESSION: CAUSE; cleanup left REMAINING: CLEANUP_CAUSE (owned-rollback-incomplete)` |
 | `readiness-timeout-retained` | 9 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; child PID CHILD was not observed absent, so ownership and the durable record were retained (readiness-timeout)` |
 | `ownership-retained` | 9 | `agentctl: role ROLE in session SESSION failed after child PID CHILD started: CAUSE; cleanup observation was OBSERVATION, so ownership and the durable record were retained (ownership-retained)` |
+| `stop-child-retained` | 9 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP but did not observe child PID CHILD exit; child observation was OBSERVATION; ownership and the durable record were retained (stop-child-retained)` |
+| `record-commit-uncertain` | 9 | `agentctl: role ROLE in session SESSION has an uncertain durable PHASE record commit: CAUSE; the record was retained and the role was not reported absent (record-commit-uncertain)` |
 
 `protocol-skew-shim-observed` and `protocol-skew-client-observed` substitute `OBSERVED` with `duplicate`, the `%q`
 raw JSON token for a non-integer, or the decimal foreign integer according to §15.5. `RECORD_PATH` is always the
@@ -2069,6 +2110,9 @@ environment. `REMAINING` is a comma-separated list in the fixed order `child, so
 are not named. `OBSERVATION` is exactly one of `present-match`, `present-token-disagreement`, `present-not-ours`, or
 `could-not-observe`; it is never `missing` unless `kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup
 row applies. Observed self-target and ancestry-undetermined deliberately remain different facts, codes, and literals.
+`PHASE` is exactly `child-starting` or `child-recorded`. `stop-child-exited` and `stop-child-retained` always carry
+`signal_attempted=true`, `signal=SIGHUP`, and respectively `child_exit_observed=true` or `false`; those fields remain
+separate even when the selected outcome makes both facts readable.
 
 For `protocol-read-from-shim-invalid` and `protocol-read-from-client-invalid`, `CAUSE` is exactly one of
 `zero payload length`, `payload length N exceeds 4096`, `EOF after N of 4 header bytes`, `EOF after N of LENGTH payload

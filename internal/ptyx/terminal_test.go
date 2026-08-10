@@ -66,8 +66,12 @@ func TestTerminalObserverDistinguishesCookedEchoFromSettledWithoutReadingContent
 	if !cooked.Canonical() || !cooked.Echo() || cooked.Settled() {
 		t.Fatalf("cooked state = canonical:%t echo:%t settled:%t", cooked.Canonical(), cooked.Echo(), cooked.Settled())
 	}
-	if got, want := cooked.WindowSize(), (WindowSize{Rows: 24, Cols: 80}); got != want {
-		t.Fatalf("WindowSize() = %#v, want %#v", got, want)
+	gotSize, err := cooked.WindowSize()
+	if err != nil {
+		t.Fatalf("WindowSize() error = %v", err)
+	}
+	if want := (WindowSize{Rows: 24, Cols: 80}); gotSize != want {
+		t.Fatalf("WindowSize() = %#v, want %#v", gotSize, want)
 	}
 
 	system.termiosByFD[fd] = syscall.Termios{Lflag: syscall.ISIG}
@@ -94,6 +98,32 @@ func TestUnobservedZeroTerminalStateIsNotSettled(t *testing.T) {
 	state := TerminalState{}
 	if state.Settled() {
 		t.Fatal("zero TerminalState reports settled, want unobserved state to refuse readiness")
+	}
+	if got, err := state.WindowSize(); !errors.Is(err, ErrTerminalWindowSizeUnobserved) || got != (WindowSize{}) {
+		t.Fatalf("zero TerminalState WindowSize() = %#v, %v; want zero and ErrTerminalWindowSizeUnobserved", got, err)
+	}
+}
+
+func TestReadinessObservationCannotBeUsedAsWindowSizeEvidence(t *testing.T) {
+	clock := newFakeReadinessClock()
+	terminal := darwinTerminal{
+		system: &scriptedReadinessSystem{
+			clock: clock,
+			steps: []readinessStep{{termios: syscall.Termios{Lflag: syscall.ISIG}}},
+		},
+		clock: clock,
+	}
+	file := newTestFile(t, "readiness-size-provenance")
+
+	state, err := terminal.WaitReady(context.Background(), file)
+	if err != nil {
+		t.Fatalf("WaitReady() error = %v", err)
+	}
+	if !state.Settled() {
+		t.Fatal("WaitReady() state was not settled")
+	}
+	if got, err := state.WindowSize(); !errors.Is(err, ErrTerminalWindowSizeUnobserved) || got != (WindowSize{}) {
+		t.Fatalf("WaitReady() WindowSize() = %#v, %v; want zero and ErrTerminalWindowSizeUnobserved", got, err)
 	}
 }
 
@@ -508,7 +538,11 @@ func TestTerminalObserverSeesRealChildRawModeTransition(t *testing.T) {
 	if !state.Settled() || state.Canonical() || state.Echo() {
 		t.Fatalf("child state = canonical:%t echo:%t settled:%t", state.Canonical(), state.Echo(), state.Settled())
 	}
-	if got, want := state.WindowSize(), (WindowSize{Rows: 33, Cols: 101}); got != want {
-		t.Fatalf("WindowSize() = %#v, want %#v", got, want)
+	gotSize, err := state.WindowSize()
+	if err != nil {
+		t.Fatalf("WindowSize() error = %v", err)
+	}
+	if want := (WindowSize{Rows: 33, Cols: 101}); gotSize != want {
+		t.Fatalf("WindowSize() = %#v, want %#v", gotSize, want)
 	}
 }

@@ -33,6 +33,53 @@ func TestProtocolPublicRequestCannotRepresentCallerPayloadText(t *testing.T) {
 	}
 }
 
+func TestProtocolAdmitsClosedControlOperationsWithoutPayloadFields(t *testing.T) {
+	for _, operation := range []string{"observe", "stop"} {
+		encoded, err := EncodeRequest(Request{Version: ShimProtocolVersion, Session: "fleet", Role: "planner", Operation: operation})
+		if err != nil {
+			t.Fatalf("EncodeRequest(%q) error = %v", operation, err)
+		}
+		if bytes.Contains(encoded, []byte("payload")) {
+			t.Fatalf("EncodeRequest(%q) = %s, unexpectedly contains a payload field", operation, encoded)
+		}
+		decoded, err := DecodeRequest(encoded)
+		if err != nil {
+			t.Fatalf("DecodeRequest(%q) error = %v", operation, err)
+		}
+		if decoded.Operation != operation {
+			t.Fatalf("DecodeRequest(%q).Operation = %q", operation, decoded.Operation)
+		}
+	}
+}
+
+func TestProtocolStopResponsesKeepSignalAttemptAndObservedExitSeparate(t *testing.T) {
+	tests := []Response{
+		{
+			Version: ShimProtocolVersion, Outcome: OutcomeStopChildExited,
+			ChildPID: intPointer(123), SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"),
+			ChildExitObserved: boolPointer(true),
+		},
+		{
+			Version: ShimProtocolVersion, Outcome: OutcomeStopChildRetained,
+			ChildPID: intPointer(123), SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"),
+			ChildExitObserved: boolPointer(false), State: stringPointer("present-match"),
+		},
+	}
+	for _, response := range tests {
+		encoded, err := EncodeResponse(response)
+		if err != nil {
+			t.Fatalf("EncodeResponse(%q) error = %v", response.Outcome, err)
+		}
+		decoded, err := DecodeResponse(encoded)
+		if err != nil {
+			t.Fatalf("DecodeResponse(%q) error = %v", response.Outcome, err)
+		}
+		if decoded.SignalAttempted == nil || decoded.ChildExitObserved == nil {
+			t.Fatalf("DecodeResponse(%q) omitted signal/exit facts: %#v", response.Outcome, decoded)
+		}
+	}
+}
+
 func TestProtocolRequestVersionPrepassWinsBeforeSchemaAndOperation(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -366,6 +413,8 @@ func TestProtocolResponseRejectsFactuallyImpossibleValues(t *testing.T) {
 		{Version: 1, Outcome: OutcomeStateRootDisagreement, LocalRoot: stringPointer("/same"), RecordedRoot: stringPointer("/same")},
 		{Version: 1, Outcome: OutcomeOrphan, ShimPID: intPointer(10), ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &otherToken},
 		{Version: 1, Outcome: OutcomePresentTokenDisagreement, ChildPID: intPointer(11), RecordedToken: &token, ObservedToken: &token},
+		{Version: 1, Outcome: OutcomeStopChildExited, ChildPID: intPointer(11), SignalAttempted: boolPointer(false), Signal: stringPointer("SIGHUP"), ChildExitObserved: boolPointer(true)},
+		{Version: 1, Outcome: OutcomeStopChildRetained, ChildPID: intPointer(11), SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"), ChildExitObserved: boolPointer(true), State: stringPointer("present-match")},
 	}
 	for _, response := range tests {
 		if _, err := EncodeResponse(response); err == nil {
@@ -387,6 +436,17 @@ func TestProtocolResponseAcceptsClosedStateValues(t *testing.T) {
 	}
 }
 
+func TestProtocolStopChildExitedCanReportSignalErrorSeparatelyFromObservedExit(t *testing.T) {
+	response := Response{
+		Version: ShimProtocolVersion, Outcome: OutcomeStopChildExited, ChildPID: intPointer(11),
+		SignalAttempted: boolPointer(true), Signal: stringPointer("SIGHUP"), ChildExitObserved: boolPointer(true),
+		Cause: stringPointer("signal process group: operation not permitted"),
+	}
+	if _, err := EncodeResponse(response); err != nil {
+		t.Fatalf("EncodeResponse() error = %v, want separate signal error and child-exit facts", err)
+	}
+}
+
 func TestProtocolResponseRequiresEveryOutcomeFact(t *testing.T) {
 	tests := []string{
 		`{"version":1,"outcome":"delivery-cancelled-with-residue"}`,
@@ -403,12 +463,13 @@ func TestProtocolResponseRequiresEveryOutcomeFact(t *testing.T) {
 func TestProtocolResponseSchemaSingleSourceCoversEveryOutcome(t *testing.T) {
 	outcomes := []Outcome{
 		OutcomeDeliverySubmitted, OutcomeDeliveryCancelledClean, OutcomeDeliveryCancelledWithResidue,
+		OutcomeInvalidRequest, OutcomeProtocolSchemaInvalid,
 		OutcomeInvalidRecord, OutcomeStateRootDisagreement, OutcomeProtocolSkew, OutcomeAnswererDisagreement,
 		OutcomeStarting, OutcomeIndeterminateChildStarting, OutcomeRunning, OutcomeOrphan,
 		OutcomePresentTokenDisagreement, OutcomePresentNotOurs, OutcomeCouldNotObserve, OutcomeStaleRecord,
 		OutcomeMissing, OutcomeCleanupFailed, OutcomeConcurrentContender, OutcomeObservedSelfTarget,
 		OutcomeAncestryUndetermined, OutcomeReadinessTimeout, OutcomeReadinessObservationFailed,
-		OutcomeChildExitedBeforeReady,
+		OutcomeChildExitedBeforeReady, OutcomeStopChildExited, OutcomeStopChildRetained,
 	}
 	if len(responseSchemas) != len(outcomes) {
 		t.Fatalf("responseSchemas has %d outcomes, want %d", len(responseSchemas), len(outcomes))

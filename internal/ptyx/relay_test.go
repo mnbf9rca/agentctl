@@ -164,7 +164,7 @@ func TestRelayOperatorAndControlWritesUseOneSerializationPoint(t *testing.T) {
 	}
 	target := newOverlapDetectingEndpoint()
 	relay := NewRelay(operatorInput, &bufferWriter{}, target)
-	if err := relay.MarkReady(TerminalState{observed: true, termios: syscall.Termios{Lflag: syscall.ISIG}}); err != nil {
+	if err := relay.MarkReady(TerminalState{termiosObserved: true, termios: syscall.Termios{Lflag: syscall.ISIG}}); err != nil {
 		t.Fatalf("MarkReady() error = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -212,14 +212,14 @@ func TestRelayRefusesControlWritesUntilSettledTerminalWasObserved(t *testing.T) 
 	if got := target.written(); len(got) != 0 {
 		t.Fatalf("early control wrote %x, want no bytes", got)
 	}
-	if err := relay.MarkReady(TerminalState{observed: true, termios: syscall.Termios{Lflag: syscall.ICANON | syscall.ECHO}}); !errors.Is(err, ErrTerminalNotSettled) {
+	if err := relay.MarkReady(TerminalState{termiosObserved: true, termios: syscall.Termios{Lflag: syscall.ICANON | syscall.ECHO}}); !errors.Is(err, ErrTerminalNotSettled) {
 		t.Fatalf("MarkReady(cooked) error = %v, want ErrTerminalNotSettled", err)
 	}
 	if _, err := relay.Writer().Write(context.Background(), []byte("/compact\n")); !errors.Is(err, ErrControlBeforeReady) {
 		t.Fatalf("cooked control Write() error = %v, want ErrControlBeforeReady", err)
 	}
 
-	if err := relay.MarkReady(TerminalState{observed: true, termios: syscall.Termios{Lflag: syscall.ISIG}}); err != nil {
+	if err := relay.MarkReady(TerminalState{termiosObserved: true, termios: syscall.Termios{Lflag: syscall.ISIG}}); err != nil {
 		t.Fatalf("MarkReady(settled) error = %v", err)
 	}
 	if _, err := relay.Writer().Write(context.Background(), []byte("/clear\n")); err != nil {

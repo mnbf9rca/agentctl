@@ -39,6 +39,8 @@ const (
 	OutcomeDeliverySubmitted            Outcome = "delivery-submitted"
 	OutcomeDeliveryCancelledClean       Outcome = "delivery-cancelled-clean"
 	OutcomeDeliveryCancelledWithResidue Outcome = "delivery-cancelled-with-residue"
+	OutcomeInvalidRequest               Outcome = "invalid-request"
+	OutcomeProtocolSchemaInvalid        Outcome = "protocol-schema-invalid"
 	OutcomeInvalidRecord                Outcome = "invalid-record"
 	OutcomeStateRootDisagreement        Outcome = "state-root-disagreement"
 	OutcomeProtocolSkew                 Outcome = "protocol-skew"
@@ -59,29 +61,34 @@ const (
 	OutcomeReadinessTimeout             Outcome = "readiness-timeout"
 	OutcomeReadinessObservationFailed   Outcome = "readiness-observation-failed"
 	OutcomeChildExitedBeforeReady       Outcome = "child-exited-before-ready"
+	OutcomeStopChildExited              Outcome = "stop-child-exited"
+	OutcomeStopChildRetained            Outcome = "stop-child-retained"
 )
 
 // Response contains only the typed objective fields ratified by protocol v1.
 // Pointer fields preserve the distinction between omitted and observed zero.
 type Response struct {
-	Version        int         `json:"version"`
-	Outcome        Outcome     `json:"outcome"`
-	State          *string     `json:"state,omitempty"`
-	ShimPID        *int        `json:"shim_pid,omitempty"`
-	ChildPID       *int        `json:"child_pid,omitempty"`
-	BytesWritten   *uint64     `json:"bytes_written,omitempty"`
-	SubmitObserved *bool       `json:"submit_observed,omitempty"`
-	Cause          *string     `json:"cause,omitempty"`
-	Cleanup        *string     `json:"cleanup,omitempty"`
-	RecordPath     *string     `json:"record_path,omitempty"`
-	LocalRoot      *string     `json:"local_root,omitempty"`
-	RecordedRoot   *string     `json:"recorded_root,omitempty"`
-	RecordedToken  *StartToken `json:"recorded_token,omitempty"`
-	ObservedToken  *StartToken `json:"observed_token,omitempty"`
-	CallerPID      *int        `json:"caller_pid,omitempty"`
-	TargetPID      *int        `json:"target_pid,omitempty"`
-	FinalICANON    *bool       `json:"final_icanon,omitempty"`
-	FinalECHO      *bool       `json:"final_echo,omitempty"`
+	Version           int         `json:"version"`
+	Outcome           Outcome     `json:"outcome"`
+	State             *string     `json:"state,omitempty"`
+	ShimPID           *int        `json:"shim_pid,omitempty"`
+	ChildPID          *int        `json:"child_pid,omitempty"`
+	BytesWritten      *uint64     `json:"bytes_written,omitempty"`
+	SubmitObserved    *bool       `json:"submit_observed,omitempty"`
+	Cause             *string     `json:"cause,omitempty"`
+	Cleanup           *string     `json:"cleanup,omitempty"`
+	RecordPath        *string     `json:"record_path,omitempty"`
+	LocalRoot         *string     `json:"local_root,omitempty"`
+	RecordedRoot      *string     `json:"recorded_root,omitempty"`
+	RecordedToken     *StartToken `json:"recorded_token,omitempty"`
+	ObservedToken     *StartToken `json:"observed_token,omitempty"`
+	CallerPID         *int        `json:"caller_pid,omitempty"`
+	TargetPID         *int        `json:"target_pid,omitempty"`
+	FinalICANON       *bool       `json:"final_icanon,omitempty"`
+	FinalECHO         *bool       `json:"final_echo,omitempty"`
+	SignalAttempted   *bool       `json:"signal_attempted,omitempty"`
+	Signal            *string     `json:"signal,omitempty"`
+	ChildExitObserved *bool       `json:"child_exit_observed,omitempty"`
 }
 
 type hello struct {
@@ -340,6 +347,7 @@ func DecodeResponse(payload []byte) (Response, error) {
 		"bytes_written": true, "submit_observed": true, "cause": true, "cleanup": true,
 		"record_path": true, "local_root": true, "recorded_root": true, "recorded_token": true,
 		"observed_token": true, "caller_pid": true, "target_pid": true, "final_icanon": true, "final_echo": true,
+		"signal_attempted": true, "signal": true, "child_exit_observed": true,
 	}
 	if err := requireFields(fields, allowed, []string{"version", "outcome"}); err != nil {
 		return Response{}, asProtocolError(err)
@@ -350,6 +358,7 @@ func DecodeResponse(payload []byte) (Response, error) {
 		"cause": "string", "cleanup": "string", "record_path": "string", "local_root": "string",
 		"recorded_root": "string", "recorded_token": "object", "observed_token": "object",
 		"caller_pid": "integer", "target_pid": "integer", "final_icanon": "boolean", "final_echo": "boolean",
+		"signal_attempted": "boolean", "signal": "string", "child_exit_observed": "boolean",
 	}); err != nil {
 		return Response{}, asProtocolError(err)
 	}
@@ -396,6 +405,8 @@ var responseSchemas = map[Outcome]responseSchema{
 	OutcomeDeliverySubmitted:            newResponseSchema([]string{"bytes_written", "submit_observed"}),
 	OutcomeDeliveryCancelledClean:       newResponseSchema(nil),
 	OutcomeDeliveryCancelledWithResidue: newResponseSchema([]string{"bytes_written"}),
+	OutcomeInvalidRequest:               newResponseSchema([]string{"cause"}),
+	OutcomeProtocolSchemaInvalid:        newResponseSchema([]string{"cause"}),
 	OutcomeInvalidRecord:                newResponseSchema([]string{"cause", "record_path"}),
 	OutcomeStateRootDisagreement:        newResponseSchema([]string{"local_root", "recorded_root"}),
 	OutcomeProtocolSkew:                 newResponseSchema([]string{"cause"}),
@@ -416,6 +427,12 @@ var responseSchemas = map[Outcome]responseSchema{
 	OutcomeReadinessTimeout:             newResponseSchema([]string{"child_pid", "final_icanon", "final_echo", "cleanup"}),
 	OutcomeReadinessObservationFailed:   newResponseSchema([]string{"child_pid", "cause", "cleanup"}),
 	OutcomeChildExitedBeforeReady:       newResponseSchema([]string{"child_pid", "cleanup"}),
+	OutcomeStopChildExited: newResponseSchema([]string{
+		"child_pid", "signal_attempted", "signal", "child_exit_observed",
+	}, "cause"),
+	OutcomeStopChildRetained: newResponseSchema([]string{
+		"child_pid", "signal_attempted", "signal", "child_exit_observed", "state",
+	}, "cause"),
 }
 
 func validateResponse(response Response) error {
@@ -485,6 +502,31 @@ func validateResponse(response Response) error {
 		if response.RecordedToken.Equal(*response.ObservedToken) {
 			return &ProtocolValueError{Field: "observed_token", Reason: "must differ from recorded_token for present-token-disagreement"}
 		}
+	case OutcomeStopChildExited:
+		if !*response.SignalAttempted {
+			return &ProtocolValueError{Field: "signal_attempted", Reason: `must be true for outcome "stop-child-exited"`}
+		}
+		if *response.Signal != "SIGHUP" {
+			return &ProtocolValueError{Field: "signal", Reason: `must be "SIGHUP" for outcome "stop-child-exited"`}
+		}
+		if !*response.ChildExitObserved {
+			return &ProtocolValueError{Field: "child_exit_observed", Reason: `must be true for outcome "stop-child-exited"`}
+		}
+	case OutcomeStopChildRetained:
+		if !*response.SignalAttempted {
+			return &ProtocolValueError{Field: "signal_attempted", Reason: `must be true for outcome "stop-child-retained"`}
+		}
+		if *response.Signal != "SIGHUP" {
+			return &ProtocolValueError{Field: "signal", Reason: `must be "SIGHUP" for outcome "stop-child-retained"`}
+		}
+		if *response.ChildExitObserved {
+			return &ProtocolValueError{Field: "child_exit_observed", Reason: `must be false for outcome "stop-child-retained"`}
+		}
+		switch ProcessObservation(*response.State) {
+		case ProcessPresentMatch, ProcessPresentTokenDisagreement, ProcessPresentNotOurs, ProcessCouldNotObserve:
+		default:
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
 	}
 	return nil
 }
@@ -502,6 +544,8 @@ func responsePresentFields(response Response) map[string]bool {
 		{"recorded_token", response.RecordedToken != nil}, {"observed_token", response.ObservedToken != nil},
 		{"caller_pid", response.CallerPID != nil}, {"target_pid", response.TargetPID != nil},
 		{"final_icanon", response.FinalICANON != nil}, {"final_echo", response.FinalECHO != nil},
+		{"signal_attempted", response.SignalAttempted != nil}, {"signal", response.Signal != nil},
+		{"child_exit_observed", response.ChildExitObserved != nil},
 	}
 	for _, value := range values {
 		if value.present {

@@ -5,10 +5,12 @@ import "fmt"
 
 // Spec describes one supported agent harness.
 type Spec struct {
-	Executable     string
-	InputClearKeys []string
-	modelArgs      func(string) []string
-	effortArgs     func(string) []string
+	Executable      string
+	InputClearKeys  []string
+	inputClearBytes []byte
+	submitBytes     []byte
+	modelArgs       func(string) []string
+	effortArgs      func(string) []string
 }
 
 // Options are the optional per-role harness settings. An empty value renders no
@@ -20,16 +22,20 @@ type Options struct {
 
 var registry = map[string]Spec{
 	"claude": {
-		Executable:     "claude",
-		InputClearKeys: []string{"C-u"},
-		modelArgs:      longModelArgs,
-		effortArgs:     claudeEffortArgs,
+		Executable:      "claude",
+		InputClearKeys:  []string{"C-u"},
+		inputClearBytes: []byte{0x15},
+		submitBytes:     []byte{'\r'},
+		modelArgs:       longModelArgs,
+		effortArgs:      claudeEffortArgs,
 	},
 	"codex": {
-		Executable:     "codex",
-		InputClearKeys: []string{"C-u"},
-		modelArgs:      longModelArgs,
-		effortArgs:     codexEffortArgs,
+		Executable:      "codex",
+		InputClearKeys:  []string{"C-u"},
+		inputClearBytes: []byte{0x15},
+		submitBytes:     []byte{'\r'},
+		modelArgs:       longModelArgs,
+		effortArgs:      codexEffortArgs,
 	},
 }
 
@@ -38,8 +44,21 @@ func Lookup(name string) (Spec, bool) {
 	spec, ok := registry[name]
 	if ok {
 		spec.InputClearKeys = append([]string(nil), spec.InputClearKeys...)
+		spec.inputClearBytes = append([]byte(nil), spec.inputClearBytes...)
+		spec.submitBytes = append([]byte(nil), spec.submitBytes...)
 	}
 	return spec, ok
+}
+
+// InputClearBytes returns the closed harness-specific PTY sequence that clears
+// pending input. No caller value participates in this sequence.
+func (s Spec) InputClearBytes() []byte {
+	return append([]byte(nil), s.inputClearBytes...)
+}
+
+// SubmitBytes returns the closed harness-specific PTY submit sequence.
+func (s Spec) SubmitBytes() []byte {
+	return append([]byte(nil), s.submitBytes...)
 }
 
 // ModelArgs renders model as harness-specific command-line arguments.

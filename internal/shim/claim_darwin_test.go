@@ -63,6 +63,29 @@ func TestClaimAcquisitionRemovesOnlyAStaleSocketAfterOwnership(t *testing.T) {
 	}
 }
 
+func TestClaimCloseAndRemoveDeletesOnlyItsVerifiedLockAndSocket(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, testAdvisory(path, os.Getpid()))
+	if err != nil {
+		t.Fatalf("AcquireClaim() error = %v", err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatalf("listener.Close() error = %v", err)
+	}
+	if err := claim.CloseAndRemove(); err != nil {
+		t.Fatalf("CloseAndRemove() error = %v", err)
+	}
+	for _, artifact := range []string{path.Lock, path.Socket} {
+		if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Lstat(%q) error = %v, want os.ErrNotExist", artifact, err)
+		}
+	}
+}
+
 func TestClaimRefusesUnsafeSocketAndLockArtifactsWithoutRepair(t *testing.T) {
 	t.Run("regular socket path", func(t *testing.T) {
 		rolePath := newTestRolePath(t)
