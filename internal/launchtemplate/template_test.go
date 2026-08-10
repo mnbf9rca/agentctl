@@ -7,10 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
 
 type stubFile struct {
@@ -270,6 +274,195 @@ func TestDecoderFixtureErrorsPinStrictnessOrderAndMessageShape(t *testing.T) {
 	}
 }
 
+func TestDecoderSchemaFailuresKeepAgentctlDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "relative directory",
+			contents: `{"version":1,"dir":"relative/work"}`,
+			want:     `template /fleet.json: dir: path "relative/work" must be absolute; omit dir and supply --dir at invocation`,
+		},
+		{
+			name:     "invalid role name",
+			contents: `{"version":1,"roles":[{"role":"Planner"}]}`,
+			want:     `template /fleet.json: roles[0].role: value "Planner" must match ^[a-z0-9][a-z0-9_-]*$`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+		})
+	}
+}
+
+func TestDecoderRejectsSchemaKeywordBeforeGenericUnknownFieldHandling(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1,"$schema":"https://example.invalid/fleet-template.schema.json"}`),
+		`template /fleet.json: "$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`,
+	)
+}
+
+func TestDecoderKeepsVersionOneLexicallyExact(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1.0}`),
+		`template /fleet.json: version: must be exactly 1, got 1.0`,
+	)
+}
+
+func TestDecoderTreatsMalformedTrailingContentAsAnotherDocument(t *testing.T) {
+	t.Parallel()
+
+	assertTemplateError(t,
+		decodeTemplateContents(t, `{"version":1} trailing`),
+		`template /fleet.json: must contain exactly one JSON document`,
+	)
+}
+
+func TestDecoderSelectsMixedSchemaFailuresInLegacyOrder(t *testing.T) {
+	t.Parallel()
+
+	const contents = `{"version":1,"dir":7,"roles":[{"role":"Planner","model":8}]}`
+	const want = `template /fleet.json: dir: must be a string`
+	for range 400 {
+		assertTemplateError(t, decodeTemplateContents(t, contents), want)
+	}
+}
+
+func TestSchemaFailureIndexIndexesEachLeafOnceByInstanceLocation(t *testing.T) {
+	t.Parallel()
+
+	const failureCount = 20_000
+	leaves := make([]*jsonschema.ValidationError, failureCount)
+	for index := range leaves {
+		leaves[index] = &jsonschema.ValidationError{
+			InstanceLocation: []string{"roles", strconv.Itoa(index), "role"},
+			ErrorKind:        &kind.Pattern{Got: "Planner", Want: `^[a-z0-9][a-z0-9_-]*$`},
+		}
+	}
+	indexed := indexSchemaFailures(&jsonschema.ValidationError{Causes: leaves})
+
+	if got := len(indexed); got != failureCount {
+		t.Fatalf("indexed locations = %d, want %d", got, failureCount)
+	}
+	indexedFailures := 0
+	for _, failures := range indexed {
+		indexedFailures += len(failures)
+	}
+	if indexedFailures != failureCount {
+		t.Fatalf("indexed failures = %d, want each of %d leaves exactly once", indexedFailures, failureCount)
+	}
+	last := indexed.at([]string{"roles", strconv.Itoa(failureCount - 1), "role"})
+	if len(last) != 1 || last[0] != leaves[failureCount-1] {
+		t.Fatalf("last location bucket = %#v, want only leaf %p", last, leaves[failureCount-1])
+	}
+}
+
+func TestDecoderPreservesStrictnessPrecedenceAroundSchemaValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "root unknown before trailing document",
+			contents: `{"version":1,"efort":"low"} {}`,
+			want:     `template /fleet.json: unknown field "efort"`,
+		},
+		{
+			name:     "root unknown before session refusal",
+			contents: `{"version":1,"efort":"low","session":"fleet"}`,
+			want:     `template /fleet.json: unknown field "efort"`,
+		},
+		{
+			name:     "directory before role unknown",
+			contents: `{"version":1,"dir":7,"roles":[{"role":"planner","efort":"low"}]}`,
+			want:     `template /fleet.json: dir: must be a string`,
+		},
+		{
+			name:     "root unknown before schema refusal",
+			contents: `{"version":1,"$schema":"ignored","efort":"low"}`,
+			want:     `template /fleet.json: unknown field "efort"`,
+		},
+		{
+			name:     "duplicate role before later optional field",
+			contents: `{"version":1,"roles":[{"role":"planner"},{"role":"planner","model":8}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "planner"`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for range 100 {
+				assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+			}
+		})
+	}
+}
+
+func TestDecoderPreservesLegacyStagesForNestedSpecialsAndSchemaValueRules(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{
+			name:     "nested session remains unknown",
+			contents: `{"version":1,"roles":[{"role":"planner","session":"fleet"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "session"`,
+		},
+		{
+			name:     "nested schema remains unknown",
+			contents: `{"version":1,"roles":[{"role":"planner","$schema":"ignored"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "$schema"`,
+		},
+		{
+			name:     "role unknown before missing required name",
+			contents: `{"version":1,"roles":[{"efort":"low"}]}`,
+			want:     `template /fleet.json: roles[0]: unknown field "efort"`,
+		},
+		{
+			name:     "duplicate before nonempty relative directory pattern",
+			contents: `{"version":1,"dir":"relative","roles":[{"role":"planner"},{"role":"planner"}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "planner"`,
+		},
+		{
+			name:     "duplicate before nonempty role pattern",
+			contents: `{"version":1,"roles":[{"role":"Planner"},{"role":"Planner"}]}`,
+			want:     `template /fleet.json: roles[1]: duplicate role "Planner"`,
+		},
+		{
+			name:     "optional structural failure before nonempty role pattern",
+			contents: `{"version":1,"roles":[{"role":"Planner","model":8}]}`,
+			want:     `template /fleet.json: roles[0].model: must be a string`,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for range 100 {
+				assertTemplateError(t, decodeTemplateContents(t, test.contents), test.want)
+			}
+		})
+	}
+}
+
 func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testing.T) {
 	t.Parallel()
 
@@ -279,10 +472,10 @@ func TestDecoderReturnsPartialSourceWithoutDefaultingOrValidatingValues(t *testi
 	}
 	want := Document{
 		Path:      filepath.Join("testdata", "valid-partial.json"),
-		Directory: stringPointer("relative-is-validated-by-config"),
+		Directory: stringPointer("/schema-valid-directory"),
 		Roles: []Role{
 			{Name: "planner"},
-			{Name: "Reviewer", Harness: stringPointer("future-harness"), Model: stringPointer("bad model"), Effort: stringPointer("extreme")},
+			{Name: "reviewer", Harness: stringPointer("future-harness"), Model: stringPointer("bad model"), Effort: stringPointer("extreme")},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -320,3 +513,20 @@ func assertTemplateError(t *testing.T, err error, want string) {
 }
 
 func stringPointer(value string) *string { return &value }
+
+func decodeTemplateContents(t *testing.T, contents string) error {
+	t.Helper()
+
+	var events []string
+	_, err := (Decoder{Open: func(path string) (File, error) {
+		if path != "/fleet.json" {
+			t.Fatalf("Open path = %q, want /fleet.json", path)
+		}
+		return &stubFile{
+			reader: strings.NewReader(contents),
+			info:   stubFileInfo{mode: 0o600},
+			events: &events,
+		}, nil
+	}}).Decode("/fleet.json")
+	return err
+}

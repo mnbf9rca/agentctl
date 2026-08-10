@@ -3,7 +3,6 @@ package config
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -26,19 +25,6 @@ const (
 	HarnessCodex  Harness = "codex"
 )
 
-// effortLevels lists the effort levels each harness accepts, in increasing
-// order. Unlike models, efforts are a closed set: the value names a harness
-// mode rather than an opaque identifier, and the codex rendering embeds it in a
-// configuration expression the harness parses. Levels verified 2026-08-03
-// against Claude Code 2.1.220 (`--effort <level>`: low, medium, high, xhigh,
-// max) and codex-cli 0.146.0 (`model_reasoning_effort`, whose enum also carries
-// none, minimal and ultra — not exposed here because agentctl accepts only
-// levels verified on both harnesses).
-var effortLevels = map[Harness][]string{
-	HarnessClaude: {"low", "medium", "high", "xhigh", "max"},
-	HarnessCodex:  {"low", "medium", "high", "xhigh", "max"},
-}
-
 // RoleConfig is the validated configuration for one fleet role.
 type RoleConfig struct {
 	Name    string
@@ -47,27 +33,18 @@ type RoleConfig struct {
 	Effort  string
 }
 
-// EffortLevels returns the effort levels a harness accepts, in increasing
-// order, or nil for an unsupported harness.
-func EffortLevels(harness Harness) []string {
-	levels, ok := effortLevels[harness]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), levels...)
-}
-
-// ValidateEffort checks one effort against the harness's closed set.
-func ValidateEffort(harness Harness, effort string) error {
-	if supportsEffort(harness, effort) {
+// ValidateEffort checks one opaque harness effort against the safe charset.
+func ValidateEffort(effort string) error {
+	if modelExpression.MatchString(effort) {
 		return nil
 	}
 	return &ValidationError{
-		Option:     "effort",
-		Value:      effort,
-		EntryIndex: -1,
-		Reason: fmt.Sprintf("harness %q does not support effort %q; supported levels are %s",
-			harness, effort, strings.Join(effortLevels[harness], ", ")),
+		Option:          "effort",
+		Value:           effort,
+		EntryIndex:      -1,
+		Reason:          "must match " + modelPattern,
+		DirectSubject:   "effort",
+		TemplateSubject: "effort",
 	}
 }
 
@@ -84,6 +61,10 @@ type ValidationError struct {
 	EntryIndex int
 	Entry      string
 	Reason     string
+	// DirectSubject and TemplateSubject name the rejected value when a caller
+	// needs it rendered alongside Reason. An empty subject renders Reason alone.
+	DirectSubject   string
+	TemplateSubject string
 }
 
 func (e *ValidationError) Error() string {
@@ -96,7 +77,16 @@ func (e *ValidationError) Error() string {
 	if e.EntryIndex >= 1 {
 		return fmt.Sprintf("invalid --%s entry %d %q: %s", e.Option, e.EntryIndex, e.Entry, e.Reason)
 	}
-	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, e.Reason)
+	return fmt.Sprintf("invalid --%s value %q: %s", e.Option, e.Value, e.FormatReason(e.DirectSubject))
+}
+
+// FormatReason renders Reason with Value under a caller-selected declarative
+// subject. An empty subject leaves Reason unchanged.
+func (e *ValidationError) FormatReason(subject string) string {
+	if subject == "" {
+		return e.Reason
+	}
+	return fmt.Sprintf("%s %q %s", subject, e.Value, e.Reason)
 }
 
 // ValidateSessionName validates a tmux session name accepted by agentctl.
@@ -116,10 +106,11 @@ func ValidateSessionName(name string) error {
 func ValidateRoleName(role string) error {
 	if !nameExpression.MatchString(role) {
 		return &ValidationError{
-			Option:     "role",
-			Value:      role,
-			EntryIndex: -1,
-			Reason:     "must match " + namePattern,
+			Option:          "role",
+			Value:           role,
+			EntryIndex:      -1,
+			Reason:          "must match " + namePattern,
+			TemplateSubject: "value",
 		}
 	}
 	return nil
@@ -131,10 +122,11 @@ func ValidateRoleName(role string) error {
 func ValidateModelName(model string) error {
 	if !modelExpression.MatchString(model) {
 		return &ValidationError{
-			Option:     "model",
-			Value:      model,
-			EntryIndex: -1,
-			Reason:     "must match " + modelPattern,
+			Option:          "model",
+			Value:           model,
+			EntryIndex:      -1,
+			Reason:          "must match " + modelPattern,
+			TemplateSubject: "value",
 		}
 	}
 	return nil
@@ -149,25 +141,11 @@ func ParseHarness(name string) (Harness, error) {
 		return HarnessCodex, nil
 	}
 	return "", &ValidationError{
-		Option:     "harness",
-		Value:      name,
-		EntryIndex: -1,
-		Reason:     "must be claude or codex",
-	}
-}
-
-// ValidateTemplateDirectory requires a template-sourced directory to carry
-// its own absolute meaning. Directory existence remains a point-of-use check
-// in internal/fleet.
-func ValidateTemplateDirectory(path string) error {
-	if filepath.IsAbs(path) {
-		return nil
-	}
-	return &ValidationError{
-		Option:     "dir",
-		Value:      path,
-		EntryIndex: -1,
-		Reason:     "template path must be absolute; omit dir and supply --dir at invocation",
+		Option:          "harness",
+		Value:           name,
+		EntryIndex:      -1,
+		Reason:          "must be claude or codex",
+		TemplateSubject: "value",
 	}
 }
 
@@ -179,6 +157,15 @@ func ParseFleet(roles string, models, efforts *string) (FleetConfig, error) {
 	if err != nil {
 		return FleetConfig{}, err
 	}
+	return ParseFleetRoles(fleet.Roles, models, efforts)
+}
+
+// ParseFleetRoles applies optional model and effort assignments to ordered,
+// validated role declarations. The roles slice is copied before assignments are
+// applied.
+func ParseFleetRoles(roles []RoleConfig, models, efforts *string) (FleetConfig, error) {
+	fleet := FleetConfig{Roles: append([]RoleConfig(nil), roles...)}
+	var err error
 	if models != nil {
 		if *models == "" {
 			return FleetConfig{}, &ValidationError{
@@ -237,7 +224,7 @@ func parseRoles(roles string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, "harness is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("roles", roles, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 
 		harness, err := ParseHarness(harnessName)
@@ -281,10 +268,10 @@ func applyModels(fleet FleetConfig, models string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, "model is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 		if err := ValidateModelName(model); err != nil {
-			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("model %q %s", model, validationReason(err)))
+			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, validationReason(err, "model"))
 		}
 		if _, duplicate := modelRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("models", models, entryIndex, entry, fmt.Sprintf("duplicate model entry for role %q", role))
@@ -325,7 +312,7 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, "effort is empty")
 		}
 		if err := ValidateRoleName(role); err != nil {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err)))
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("role %q %s", role, validationReason(err, "")))
 		}
 		if _, duplicate := effortRoles[role]; duplicate {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("duplicate effort entry for role %q", role))
@@ -334,9 +321,8 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 		if !defined {
 			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, fmt.Sprintf("effort references undefined role %q", role))
 		}
-		harness := fleet.Roles[roleIndex].Harness
-		if err := ValidateEffort(harness, effort); err != nil {
-			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err))
+		if err := ValidateEffort(effort); err != nil {
+			return FleetConfig{}, listEntryError("efforts", efforts, entryIndex, entry, validationReason(err, "effort"))
 		}
 
 		effortRoles[role] = struct{}{}
@@ -346,21 +332,12 @@ func applyEfforts(fleet FleetConfig, efforts string) (FleetConfig, error) {
 	return fleet, nil
 }
 
-func supportsEffort(harness Harness, effort string) bool {
-	for _, level := range effortLevels[harness] {
-		if level == effort {
-			return true
-		}
-	}
-	return false
-}
-
-func validationReason(err error) string {
+func validationReason(err error, subject string) string {
 	validation, ok := err.(*ValidationError)
 	if !ok {
 		return err.Error()
 	}
-	return validation.Reason
+	return validation.FormatReason(subject)
 }
 
 func listEntryError(option, value string, entryIndex int, entry, reason string) *ValidationError {

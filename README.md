@@ -221,24 +221,30 @@ harnesses are `claude` and `codex`; `--models` and `--efforts` may name any role
 overrides the template or invocation working directory and must name an existing directory. Launch fails rather than
 adopting an existing session.
 
-Templates are strict, read-only JSON inputs with this shape:
+Templates are strict, read-only JSON inputs. After `agentctl skill install`, their complete shape is at
+`$HOME/.agents/skills/agentctl/references/fleet-template.schema.json` for Codex (or the matching Claude skill path);
+the repository copy is [`references/fleet-template.schema.json`](skills/agentctl/references/fleet-template.schema.json).
+The binary applies that schema automatically. A schema-valid template can still be refused at launch because value
+rules apply to the merged template-and-flag union.
+Before schema validation, agentctl enforces the 1 MiB file-size limit and refuses duplicate JSON object keys or
+trailing content.
+
+For editor assistance, configure a file-match mapping rather than putting `$schema` in a template. For example, this
+VS Code setting maps an operator-chosen `agentctl-templates` glob to the Codex-installed skill path:
 
 ```json
 {
-  "version": 1,
-  "dir": "/srv/work",
-  "roles": [
-    { "role": "planner", "harness": "claude", "model": "opus-4-1", "effort": "high" },
-    { "role": "worker", "harness": "codex" }
+  "json.schemas": [
+    {
+      "fileMatch": ["**/agentctl-templates/*.json"],
+      "url": "/Users/your-name/.agents/skills/agentctl/references/fleet-template.schema.json"
+    }
   ]
 }
 ```
 
-The file never contains a session name. `version` is required; `dir` and `roles` may be omitted, and a role's harness
-may be supplied later by a matching `--roles` entry. Unknown or duplicate fields, duplicate roles, `null`, empty
-strings, trailing JSON documents, non-regular files, and files over 1 MiB are refused. A template
-`dir` must be absolute; omit it and use `--dir` when the invocation should choose a relative or machine-specific path.
-Every effective role and field passes the same validators used by flags before launch continues.
+Replace both example values for your machine and template location. Never put `$schema` in a template: it is a schema-
+document keyword, and agentctl always applies its embedded schema.
 
 When a template is used, launch prints one provenance line per effective role before the observed status table. It
 labels fields as `template`, `flag override`, or `flags`; a template-supplied directory gets its own line. These lines
@@ -256,12 +262,14 @@ resolves it; other roles continue launching and keep their own independently obs
 
 #### Effort levels
 
-`--efforts` accepts `low`, `medium`, `high`, `xhigh`, and `max` for both harnesses. The level is validated before
-anything is created: an unknown level, a level for an undefined role, a duplicate role entry, or an explicitly empty
-`--efforts=` is a usage error (exit 2) and no tmux command runs. A role with no effort entry is launched with **no**
-effort argument at all, leaving the harness on its own default.
+`--efforts` accepts opaque harness-specific mode names matching the same charset as model identifiers:
+`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. A value outside that charset, a value for an undefined role, a duplicate role entry,
+or an explicitly empty `--efforts=` is a usage error (exit 2) before any tmux command runs. A well-formed name agentctl
+does not recognize is forwarded unchanged; the selected harness owns the acceptance decision, so an unsupported name
+surfaces as a harness startup failure rather than a pre-launch agentctl refusal. A role with no effort entry is launched
+with **no** effort argument at all, leaving the harness on its own default.
 
-Each harness receives the level in its own syntax, assembled only from these validated levels:
+Each harness receives the exact validated value in its own syntax:
 
 | Harness | Rendered arguments | Verified against |
 | --- | --- | --- |
@@ -269,9 +277,8 @@ Each harness receives the level in its own syntax, assembled only from these val
 | `codex` | `--config 'model_reasoning_effort="LEVEL"'` | codex-cli 0.146.0 |
 
 The main codex CLI has no `--effort` flag, so the level is supplied as a configuration override; the `--effort` flag
-that exists for the separate Codex Security CLI is not used. codex's own reasoning-effort enum also carries `none`,
-`minimal`, and `ultra`, which agentctl deliberately does not expose: the accepted set is restricted to the levels
-verified on both harnesses, and anything outside it is rejected rather than forwarded.
+that exists for the separate Codex Security CLI is not used. Names such as codex's `none`, `minimal`, and `ultra` pass
+the charset and are forwarded; agentctl does not maintain a catalogue of harness capabilities.
 
 The selected level is recorded in window metadata (`@agentctl_effort`) and reported by `status`.
 

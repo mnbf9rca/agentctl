@@ -19,7 +19,7 @@ func TestBuildManifestHashesEveryEmbeddedFile(t *testing.T) {
 	if manifest.Version != "0.3.0" {
 		t.Fatalf("Version = %q, want 0.3.0", manifest.Version)
 	}
-	if got, want := len(manifest.Files), 3; got != want {
+	if got, want := len(manifest.Files), 4; got != want {
 		t.Fatalf("len(Files) = %d, want %d; files = %#v", got, want, manifest.Files)
 	}
 	content, err := skills.Tree.ReadFile("agentctl/SKILL.md")
@@ -33,6 +33,7 @@ func TestBuildManifestHashesEveryEmbeddedFile(t *testing.T) {
 	for _, path := range []string{
 		"SKILL.md",
 		"references/exit-codes.md",
+		"references/fleet-template.schema.json",
 		"references/status-states.md",
 	} {
 		if _, ok := manifest.Files[path]; !ok {

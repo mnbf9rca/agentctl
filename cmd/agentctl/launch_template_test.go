@@ -138,13 +138,6 @@ func TestMergeLaunchTemplateUnionFailuresNameTheirSourceAndRule(t *testing.T) {
 			want:     `template /fleet.json: effective fleet: must contain at least one role`,
 		},
 		{
-			name: "invalid merge key",
-			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
-				Name: "Planner", Harness: stringPointerForTemplate("claude"),
-			}}},
-			want: `template /fleet.json: roles[0].role: value "Planner" must match ^[a-z0-9][a-z0-9_-]*$`,
-		},
-		{
 			name: "missing effective harness",
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
 				Name: "planner",
@@ -168,14 +161,9 @@ func TestMergeLaunchTemplateUnionFailuresNameTheirSourceAndRule(t *testing.T) {
 		{
 			name: "invalid effective effort",
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
-				Name: "planner", Harness: stringPointerForTemplate("codex"), Effort: stringPointerForTemplate("extreme"),
+				Name: "planner", Harness: stringPointerForTemplate("codex"), Effort: stringPointerForTemplate("bad effort"),
 			}}},
-			want: `template /fleet.json: roles[0].effort: harness "codex" does not support effort "extreme"; supported levels are low, medium, high, xhigh, max`,
-		},
-		{
-			name:     "relative template directory",
-			document: launchtemplate.Document{Path: "/fleet.json", Directory: stringPointerForTemplate("relative/work")},
-			want:     `template /fleet.json: dir: path "relative/work" must be absolute; omit dir and supply --dir at invocation`,
+			want: `template /fleet.json: roles[0].effort: effort "bad effort" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
 		},
 		{
 			name:     "explicit empty flag roles",

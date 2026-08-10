@@ -30,6 +30,30 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-10
+
+- agentctl: `agentctl 25fe900`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.226 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.lYjPVN/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 attach narration: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Checkpoint B.C10 detach: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
+- Teardown check: PASS
+
 ### 2026-08-09
 
 - agentctl: `agentctl 72be6fc`
@@ -53,6 +77,29 @@ part of verification the suite is structurally unable to perform.
 - Checkpoint C.C3 status meaning: operator confirmed: y
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS
+
+**Operator/planner note on the 2026-08-09 block (corrected — the first
+version of this note stated a false cause, see PR #192's gate):** the
+`Part B pre-check:` / `Part B keeper:` lines are absent because this run
+invoked `hack/release-verify.sh` directly rather than through Part A's
+isolated `TMUX_TMPDIR` subshell, so the default socket was the operator's
+live one and the connect-ENOENT branch (#147) did not fire. The branch is
+NOT incapable of firing on a machine with a live server — relocating the
+socket so that it does is the isolated leg's entire purpose, demonstrated
+on this machine during PR #162's gate. The branch's execution evidence for
+this release is PR #162's gate (executed live, trap exercised) and the
+#177/#178 audit, which ran the wrapper as written against an absent inner
+server; the #177 standing rule is satisfied by those executions rather
+than by this run. This note is authored by the planner, outside the
+machine-written block above.
+
+The C.C1 `y` in the same machine-written block predates #188's narrower
+evidence question. Its `(keychain-linked, codex-seeded)` label correctly
+records the selected authentication mechanisms, but Claude's first temporary-
+HOME start still required manual re-login. Issue #188 changes future C.C1
+evidence to ask whether startup required re-authentication; the recorded `y`
+above is intentionally unchanged. This annotation is authored by the planner,
+outside the machine-written block.
 
 ### 2026-08-08
 

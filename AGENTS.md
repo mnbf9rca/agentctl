@@ -1,8 +1,8 @@
 # Working on agentctl
 
 This file is the repository-wide instruction source for agents changing
-`agentctl`. `CLAUDE.md` is a symlink to this file so Codex and Claude Code read
-the same rules.
+`agentctl`. `CLAUDE.md` contains only the import line `@AGENTS.md` so Codex
+and Claude Code read the same rules from this one file.
 
 This file is about working **on** agentctl. The agent-facing skill tracked in
 [#78](https://github.com/mnbf9rca/agentctl/issues/78) is about **using** agentctl
@@ -27,8 +27,9 @@ to operate a fleet. Keep those concerns separate.
 
 ## Hard constraints
 
-- Keep the Go module on the standard library. Do not add third-party Go
-  dependencies.
+- Keep the Go module standard-library-first. Add a third-party Go dependency
+  only when it clearly reduces complexity, and justify each addition in the
+  governing spec and PR.
 - Production external-command execution goes through an interface. tmux and
   process calls use `internal/tmuxx.Runner`; tests use fakes that record exact
   executable and argv elements.

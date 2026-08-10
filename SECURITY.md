@@ -6,8 +6,8 @@
 
 ### Threat model — what agentctl defends against
 
-- **Command injection through its own inputs.** Session and role names are validated against `^[a-z0-9][a-z0-9_-]*$`; model identifiers against `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`; effort levels against a closed per-harness set (`low`, `medium`, `high`, `xhigh`, `max`), so no caller-supplied text reaches the codex `--config 'model_reasoning_effort="…"'` expression, whose value portion codex parses as TOML. The only shell-interpreted string in the system (the window command tmux runs) is assembled by a dedicated, fuzz-tested quoting layer from tokens that have already passed these checks. agentctl itself never invokes a shell; all tmux calls are argv arrays.
-- **Flag smuggling into agent processes.** Model identifiers must start with an alphanumeric character, so a value like `--dangerously-bypass-approvals-and-sandbox` cannot be passed through the model slot into a harness's argv. Effort levels are matched against an allowlist rather than a charset, so the effort slot cannot carry a flag, a quote, or a newline at all.
+- **Command injection through its own inputs.** Session and role names are validated against `^[a-z0-9][a-z0-9_-]*$`; model and effort identifiers against `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, so only ASCII letters, digits, dots, underscores and hyphens can reach the codex `--config 'model_reasoning_effort="…"'` expression, whose value portion codex parses as TOML. The only shell-interpreted string in the system (the window command tmux runs) is assembled by a dedicated, fuzz-tested quoting layer from tokens that have already passed these checks. agentctl itself never invokes a shell; all tmux calls are argv arrays.
+- **Flag smuggling into agent processes.** Model and effort identifiers must start with an alphanumeric character, so a value like `--dangerously-bypass-approvals-and-sandbox` cannot be passed through either slot into a harness's argv. Their shared charset cannot carry a leading flag, a quote, a backslash, whitespace, a newline, `=`, or `:`.
 - **Arbitrary keystroke injection.** The control surface is a hardcoded registry of predefined commands (`clear → /clear`, `compact → /compact` in v1). Every payload is a complete constant: the registry may grow, but commands that carry caller-supplied text (e.g. `/rename NAME`) are permanently inadmissible. There is no option, environment variable, or stdin path by which caller-supplied text can reach `tmux send-keys`. Payloads are sent in tmux literal mode with Enter as a separate event.
 - **Controlling the wrong terminal.** Control commands run a fail-closed validation chain: ROLE charset validated before any command runs → session resolved by exact comparison and addressed by tmux ID → session is agentctl-managed at the expected version → window resolved by exact comparison and addressed by tmux ID, with more than one match refused → stored `@agentctl_role` exactly equals the requested role → exactly one pane → pane alive → the pane's root-process executable exactly equals the identity recorded at launch (`@agentctl_process`) → the target pane is not the caller's own pane. Delivery targets the resolved pane ID. `@agentctl_role` is window-scoped by construction: agentctl writes it only during window stamping and never during session stamping, so a handmade same-name window cannot inherit ownership evidence. `TestStampSessionNeverWritesWindowOwnershipMarker` is the named unit invariant for that write boundary, and `TestIntegrationHandmadeRosterWindowIsNeverControlledOrReplaced` pins it against real tmux.
 - **Accidental self-lobotomy.** When agentctl is invoked from inside tmux, a control command targeting the caller's own pane (`$TMUX_PANE`) is refused, so an agent — or a confused planner — cannot wipe its own context through agentctl. This is an accident guard: `TMUX_PANE` is ordinary environment and can be unset, and nothing stops an agent typing `/clear` into its own TUI directly; that is the harness's domain.
@@ -21,6 +21,34 @@
 - **Multi-user scenarios.** agentctl has no cross-account hardening; the tmux socket's own `0700` permissions are the boundary.
 - **Filesystem namespace manipulation** (bind mounts, pre-existing device files, privileged tricks) — as in AMQ's policy, these require system-level hardening.
 - **The agents themselves.** What an agent does after receiving `/clear` or `/compact` — or what it does at all — is governed by the harness's own permission model, not by agentctl.
+
+## Third-party build dependencies
+
+agentctl is standard-library-first, but its build graph deliberately includes
+`github.com/santhosh-tekuri/jsonschema/v6` to compile and validate the embedded
+launch-template schema. Its indirect `golang.org/x/text` dependency is recorded
+in `go.mod`; `go.sum` records the module checksums. The compiler replaces a
+larger bespoke structural validator, so the dependency reduces security-
+critical complexity rather than adding a general extension mechanism.
+
+This changes the supply-chain boundary: a compromised dependency or checksum
+verification bypass could affect a built binary. Review every dependency change
+with its version, `go mod graph`, and `go.sum`; do not add dependencies merely
+for convenience. CI runs the pinned govulncheck scanner on every pull request
+and daily on `main`, covering dependencies introduced by a change and advisories
+published after merge. Dependabot opens grouped monthly version-update pull
+requests for Go modules and GitHub Actions, plus advisory-triggered security-
+update pull requests; both pass the required CI and govulncheck checks.
+Dependencies are compiled into release artifacts and are not fetched or selected
+from template input at runtime. Template schemas remain an embedded, release-
+reviewed asset, so a template cannot choose code, a schema location, or a
+validator.
+
+Release archives reproduce the upstream license for
+`github.com/santhosh-tekuri/jsonschema/v6` and the upstream license and patent
+grant for `golang.org/x/text`, under paths that name each module unambiguously.
+CI inspects every snapshot archive and refuses one missing any of those
+materials.
 
 ## Known risks and accepted residuals
 
@@ -48,7 +76,7 @@
 
    When the poll reaches its deadline without accepting a pair, `launch` records **no** baseline for that role, leaves the window in place, and exits 9 rather than destroying the fleet. The role is then inert rather than contained by force: verification requires exact equality with a stored value, and an unset baseline can never satisfy it, so control refuses at exit 5 and `status` reports `no-baseline` — a state deliberately distinct from `unexpected-process`, because "never proved" and "proved, then changed" call for different responses. `relaunch` may recover such a window by destroying it and creating a replacement — but only when the window also carries `@agentctl_unproven=1`, the record `launch` stamps when it abandons a role at the poll deadline. Recoverability is a positive observation rather than an absence, because during the poll a window is fully stamped with an empty baseline and is indistinguishable from an abandoned one; acting on the absence would let a concurrent `relaunch` destroy a window mid-launch, and if that landed between the stable pair and the baseline stamp the resulting non-timeout failure would roll back the whole session. The marker is advisory like every other `@agentctl_*` option (residual 4): forging one lets a same-user process get a window killed, which that process could do directly, so it adds no capability. It is also not recoverable when it is the session's only window — killing that destroys the session, so the case is refused and the operator is given the managed `kill` plus `launch` remedy instead. That is **not** heal-on-verify: no recorded baseline is ever replaced, the pane is destroyed and a new process observed from scratch, and a window whose *recorded* baseline mismatches the live process is never recoverable this way — it stays refused, because it is the one case where the pane is evidence of an unexplained event.
 3. **Environment staleness.** tmux windows inherit the tmux server's environment, which may predate the current shell. Credentials or configuration exported after the server started may not reach agents. Documented behavior; not solved by agentctl.
-4. **Metadata is advisory.** `@agentctl_*` tmux options are readable and writable by any same-user process. They gate agentctl's own actions and support status reporting; they are not tamper-proof. `relaunch` reads stored per-role configuration out of `@agentctl_fleet` and `@agentctl_dir` and feeds it into a launched process, so it re-applies the same validation that `launch` applies to harnesses, models and effort levels and requires a stored directory to be absolute: an unknown harness, a model that could smuggle a flag, an unknown effort, or a relative stored directory is refused rather than executed. That closes the accident and the trivially-tampered case; it does not make the metadata a trust boundary, and a same-user process able to rewrite it can already run the harness directly.
+4. **Metadata is advisory.** `@agentctl_*` tmux options are readable and writable by any same-user process. They gate agentctl's own actions and support status reporting; they are not tamper-proof. `relaunch` reads stored per-role configuration out of `@agentctl_fleet` and `@agentctl_dir` and feeds it into a launched process, so it re-applies the same validation that `launch` applies to harnesses and the shared model/effort charset, and requires a stored directory to be absolute: an unknown harness, a model or effort that could smuggle a flag, or a relative stored directory is refused rather than executed. That closes the accident and the trivially-tampered case; it does not make the metadata a trust boundary, and a same-user process able to rewrite it can already run the harness directly.
 5. **Launched-window identity variables are informational.** Every window `launch` or `relaunch` creates carries `AGENTCTL_SESSION`, `AGENTCTL_ROLE` and `AGENTCTL_MANAGED=1`, passed as separate tmux `-e NAME=value` argv elements from values that already passed the identifier validation above; no shell-interpreted string is built from them. After the first launch window is stamped, agentctl removes the session-environment copies so windows created later by hand do not inherit stale identity; failure is reported but does not roll back the fleet. The managed windows themselves are unaffected. Any same-user process can export the same names, so they carry the same weight as the advisory metadata in residual 4: agentctl never reads them back when validating a control, `kill`, or `status` target, which continues to rest on `@agentctl_*` and the fail-closed chain. `AGENTCTL_SESSION` remains a session-*selection* source (§4.1 of the design spec), which names a candidate session; every check that follows is unchanged.
 6. **Concurrency is unsynchronized.** There is no locking anywhere in agentctl. Ownership and safety gates are check-then-act, so concurrent invocations can interleave even though the observed outcomes below remain bounded:
 
@@ -97,14 +125,28 @@ from agentctl's production file-writing surface. For its isolated live harness
 check on macOS, it may copy only the existing fixed path
 `~/.codex/auth.json` from the operator's captured real HOME. A 2026-08-06 probe
 proved that file sufficient for codex-cli 0.146.1. A 2026-08-08 probe proved
-Claude Code 2.1.226 authenticated from a fresh HOME containing only the exact
-symlink from `$REAL_HOME/Library/Keychains` to
+Claude Code 2.1.226 could read the existing authentication from a fresh HOME
+containing the exact symlink from `$REAL_HOME/Library/Keychains` to
 `$TEMP_HOME/Library/Keychains`. The verifier offers that fixed link separately
 and states before consent that the probe fleet's harnesses can reach the
 operator's login keychain through it; per-item ACLs continue to apply. It
 copies no Claude secret or Keychain data, but token refresh writes through the
 link reach the real login keychain as they would from the operator's daily
 harnesses.
+
+**Synthesized Claude onboarding configuration.** A 2026-08-10 probe on Claude
+Code 2.1.226 showed that the Keychains link alone still led an interactive
+first start to request re-authentication, while the same link plus a
+mode-`0600` `.claude.json` containing only
+`{"hasCompletedOnboarding":true}` reached the authenticated ready state
+without re-login. On the consented-link path, Part C synthesizes exactly that
+non-secret onboarding configuration inside the temporary HOME. It is not an
+authentication mechanism: the Keychains link supplies credential access, and
+the verifier never reads or copies the operator's real `.claude.json`, account
+identifiers, project history, or MCP configuration. The isolated-keychain path
+receives no synthesized `.claude.json`; interactive sign-in remains its
+designed behavior. The synthesized file is removed with the temporary HOME on
+every cleanup path.
 
 The Codex filename and Claude symlink are printed without credential contents
 and each requires its own explicit `y`. Declining the Claude link offers guided
@@ -116,9 +158,10 @@ silently delete the real Keychain credential on exit
 (anthropics/claude-code#37512); `claude setup-token` is documented only as a
 manual fallback for Keychain-locked contexts such as SSH or launchd.
 
-The temporary HOME and credential-parent directories are `0700`, the copied
-Codex file is `0600`, and no credential contents are written to output or
-evidence. On success, failure, refusal, interrupt, and abort, teardown first
+The temporary HOME and credential-parent directories are `0700`; the copied
+Codex file and synthesized Claude onboarding file are `0600`; and no credential
+contents are written to output or evidence. On success, failure, refusal,
+interrupt, and abort, teardown first
 ends the owned fleet and named tmux server so no harness can still use the
 link, then removes and observes absence of only the exact owned symlink, and
 only then removes the credential-bearing HOME. The target directory is never
@@ -128,8 +171,8 @@ server is created, tmux's exact single-line connect-ENOENT response for that
 wrapper-owned socket is accepted as factual socket absence so teardown can
 continue to the credential-bearing HOME;
 fixture tests retain a sentinel in the fake target on every exit path,
-including abort, while unseeded Claude lookalike files never cross the launch
-boundary.
+including abort, while unseeded Claude credential lookalikes never cross the
+launch boundary.
 
 ## Reporting a vulnerability
 

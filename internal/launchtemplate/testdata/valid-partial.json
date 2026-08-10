@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "dir": "relative-is-validated-by-config",
+  "dir": "/schema-valid-directory",
   "roles": [
     {"role": "planner"},
-    {"role": "Reviewer", "harness": "future-harness", "model": "bad model", "effort": "extreme"}
+    {"role": "reviewer", "harness": "future-harness", "model": "bad model", "effort": "extreme"}
   ]
 }

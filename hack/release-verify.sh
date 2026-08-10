@@ -184,6 +184,8 @@ PART_C_KEYCHAIN_LINK_OWNED=0
 # with only .codex/auth.json copied into that empty HOME. On 2026-08-08, Claude
 # Code 2.1.226 authenticated from a fresh HOME containing only an exact symlink
 # from its Library/Keychains path to the operator's Library/Keychains directory.
+# On 2026-08-10, that link plus a synthesized .claude.json containing only
+# hasCompletedOnboarding=true started Claude without requiring re-authentication.
 part_c_has_seedable_auth() {
   [ -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ]
 }
@@ -208,6 +210,13 @@ part_c_link_keychains() {
   fi
   PART_C_KEYCHAIN_LINK_OWNED=1
   [ -L "$PART_C_KEYCHAIN_LINK" ]
+}
+
+part_c_seed_claude_onboarding() {
+  (
+    umask 077
+    printf '%s\n' '{"hasCompletedOnboarding":true}' >"$PART_C_HOME/.claude.json"
+  )
 }
 
 part_c_create_isolated_keychain() {
@@ -1297,13 +1306,20 @@ EOF
       printf '  %s -> %s\n' "$PART_C_KEYCHAIN_SOURCE" "$PART_C_KEYCHAIN_LINK"
       printf "Both probe harnesses can reach the operator's login keychain through this link; per-item ACLs still apply.\n"
       printf 'No Claude credential is copied into the temporary HOME.\n'
-      if ask "Create exactly this Claude Keychains symlink: $PART_C_KEYCHAIN_SOURCE -> $PART_C_KEYCHAIN_LINK?"; then
+      printf 'Part C will synthesize this minimal Claude onboarding configuration:\n'
+      printf '  %s\n' "$PART_C_HOME/.claude.json"
+      printf "It contains onboarding state only, not credentials, and does not copy the operator's Claude configuration.\n"
+      if ask "Create exactly this Claude Keychains symlink and synthesized onboarding configuration: $PART_C_KEYCHAIN_SOURCE -> $PART_C_KEYCHAIN_LINK?"; then
         if ! part_c_link_keychains; then
           step_fail C.2 'Claude Keychains link creation failed'
           part_c_abort 'Part C Claude Keychains link creation failed'
         fi
+        if ! part_c_seed_claude_onboarding; then
+          step_fail C.2 'Claude onboarding configuration seeding failed'
+          part_c_abort 'Part C Claude onboarding configuration seeding failed'
+        fi
         PART_C_CLAUDE_AUTH_MODE=keychain-linked
-        step_pass C.2 'operator consented and the exact Claude Keychains symlink was created'
+        step_pass C.2 'operator consented and the exact Claude Keychains symlink plus synthesized onboarding configuration were created'
       else
         case "$ASK_RESULT" in
           n) PART_C_CLAUDE_AUTH_MODE=isolated-keychain ;;
@@ -1393,16 +1409,16 @@ for the authenticated ready prompt; do not enter credentials.
 EOF
     elif [ "$PART_C_AUTH_MODE" = manual ]; then
       cat <<'EOF'
-The Claude Keychains symlink was created with your consent. Claude Code should
-reach an authenticated ready prompt without manual interaction. In the codex tab,
-complete sign-in until a ready prompt appears.
+The Claude Keychains symlink and synthesized onboarding configuration were created
+with your consent. Claude Code should start without requiring re-authentication.
+In the codex tab, complete sign-in until a ready prompt appears.
 
 EOF
     else
       cat <<'EOF'
-The proven Codex auth.json and the Claude Keychains symlink were created with
-your consent. Both harnesses should reach authenticated ready prompts without
-manual pane interaction; do not enter credentials.
+The proven Codex auth.json, Claude Keychains symlink, and synthesized onboarding
+configuration were created with your consent. Neither harness should require
+re-authentication; do not enter credentials.
 
 EOF
     fi
@@ -1439,8 +1455,8 @@ EOF
       auth_expected='Claude Code started authenticated through the consented Keychains symlink, and codex completed manual sign-in.'
       auth_prompt='Did Claude Code start authenticated through the consented Keychains symlink and did codex complete manual sign-in?'
     else
-      auth_expected='both harnesses started authenticated from the consented seeds without manual pane interaction.'
-      auth_prompt='Did both harnesses start authenticated from the consented seeds without manual pane interaction?'
+      auth_expected='both harnesses started without requiring re-authentication.'
+      auth_prompt='Did both harnesses start without requiring re-authentication?'
     fi
     if checkpoint C.C1 'harness authentication ready' "$auth_expected" "$auth_prompt"; then
       PART_C_AUTH_ATTESTATION=$ASK_ANSWER
