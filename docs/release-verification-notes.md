@@ -32,6 +32,20 @@ part of verification the suite is structurally unable to perform.
 
 ### 2026-08-10
 
+Issue #182 pre-cutover evidence (separate from the release-verifier block below):
+
+- `hack/probe-shim-sighup.sh` used isolated mode-`0700` homes and nested `/usr/bin/script` PTYs; it invoked no tmux
+  command and signaled only each invocation's recorded shim PID.
+- Claude Code `2.1.226 (Claude Code)`: shim PID 3892, direct child PID 3896 on `ttys006`; child observed terminated
+  after shim SIGHUP.
+- codex-cli `0.147.0`: shim PID 11979, direct child PID 11983 on `ttys006`; child observed terminated after shim
+  SIGHUP.
+- Full records and safety boundary:
+  [`docs/security/2026-08-10-issue-182-shim-probe-evidence.md`](security/2026-08-10-issue-182-shim-probe-evidence.md).
+  These observations inform teardown but do not replace `kill(pid,0)` ESRCH-only absence.
+- The committed incident replay was byte-identical to build2's full report, SHA-256
+  `d9c14f10df03ec7e7de36adcdd9225b26946c64b9d7f26ec50777b41182f7a01`.
+
 - agentctl: `agentctl 25fe900`
 - tmux: `tmux 3.7b`
 - Claude Code: `2.1.226 (Claude Code)`
