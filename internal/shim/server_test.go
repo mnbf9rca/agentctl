@@ -254,6 +254,68 @@ func TestShimStopWaitsForInflightPayloadReportAndRefusesLaterMutatingOperationsW
 	}
 }
 
+func TestShimPayloadParkedBeforeStopRefusesAfterStopBeginsWithoutPTYWrite(t *testing.T) {
+	spec, _ := harness.Lookup("codex")
+	writer := &recordingOperationWriter{}
+	firstPayloadStarted := make(chan struct{})
+	releaseFirstPayload := make(chan struct{})
+	var firstPayload sync.Once
+	childPID := 456
+	attempted, exited := true, true
+	signalName := "SIGHUP"
+	handler := &requestHandler{
+		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
+		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+			firstPayload.Do(func() { close(firstPayloadStarted) })
+			<-releaseFirstPayload
+			return nil
+		}),
+		stop: func(context.Context) (Response, error) {
+			return Response{
+				Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID,
+				SignalAttempted: &attempted, Signal: &signalName, ChildExitObserved: &exited,
+			}, nil
+		},
+	}
+
+	activeClient, activeDone := beginHandlerRequest(t, handler, "clear")
+	<-firstPayloadStarted
+	parkedClient, parkedDone := beginHandlerRequest(t, handler, "compact")
+	if err := parkedClient.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline(parked payload) error = %v", err)
+	}
+	var unexpected [1]byte
+	if _, err := parkedClient.Read(unexpected[:]); err == nil {
+		t.Fatal("parked payload completed while the active payload held the operation gate")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("read parked payload response error = %v, want timeout while parked", err)
+	}
+	if err := parkedClient.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear parked payload read deadline: %v", err)
+	}
+
+	stopClient, stopDone := beginHandlerRequest(t, handler, "stop")
+	waitForShimOperationPhase(t, handler, shimOperationStopping)
+	close(releaseFirstPayload)
+	if response := readHandlerResponse(t, activeClient, activeDone); response.Outcome != OutcomeDeliverySubmitted {
+		t.Fatalf("active payload response = %#v, want delivery-submitted", response)
+	}
+	parkedResponse := readHandlerResponse(t, parkedClient, parkedDone)
+	if parkedResponse.Outcome != OutcomeShimStopping || parkedResponse.State == nil || *parkedResponse.State != "stopping" {
+		t.Fatalf("parked payload response = %#v, want shim-stopping/stopping refusal", parkedResponse)
+	}
+	if response := readHandlerResponse(t, stopClient, stopDone); response.Outcome != OutcomeStopChildExited {
+		t.Fatalf("stop response = %#v, want stop-child-exited", response)
+	}
+
+	writer.mu.Lock()
+	writes := append([][]byte(nil), writer.calls...)
+	writer.mu.Unlock()
+	if want := [][]byte{{0x15}, []byte("/clear"), {'\r'}}; !reflect.DeepEqual(writes, want) {
+		t.Fatalf("PTY writes = %#v, want only the active payload %#v", writes, want)
+	}
+}
+
 func TestShimRetainedStopStaysStoppingUntilItsResponseIsReported(t *testing.T) {
 	childPID := 456
 	attempted, exited := true, false
