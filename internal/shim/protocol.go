@@ -46,6 +46,8 @@ const (
 	OutcomeProtocolSkew                 Outcome = "protocol-skew"
 	OutcomeAnswererDisagreement         Outcome = "answerer-disagreement"
 	OutcomeStarting                     Outcome = "starting"
+	OutcomeStopping                     Outcome = "stopping"
+	OutcomeStopped                      Outcome = "stopped"
 	OutcomeIndeterminateChildStarting   Outcome = "indeterminate-child-starting"
 	OutcomeRunning                      Outcome = "running"
 	OutcomeOrphan                       Outcome = "orphan"
@@ -63,6 +65,8 @@ const (
 	OutcomeChildExitedBeforeReady       Outcome = "child-exited-before-ready"
 	OutcomeStopChildExited              Outcome = "stop-child-exited"
 	OutcomeStopChildRetained            Outcome = "stop-child-retained"
+	OutcomeShimStopping                 Outcome = "shim-stopping"
+	OutcomeStopAlreadyStopping          Outcome = "stop-already-stopping"
 )
 
 // Response contains only the typed objective fields ratified by protocol v1.
@@ -412,6 +416,9 @@ var responseSchemas = map[Outcome]responseSchema{
 	OutcomeProtocolSkew:                 newResponseSchema([]string{"cause"}),
 	OutcomeAnswererDisagreement:         newResponseSchema([]string{"shim_pid", "target_pid", "cause"}),
 	OutcomeStarting:                     newResponseSchema([]string{"state", "shim_pid"}, "child_pid"),
+	OutcomeStopping:                     newResponseSchema([]string{"state", "shim_pid", "child_pid"}),
+	OutcomeStopped:                      newResponseSchema([]string{"state", "shim_pid", "child_pid"}),
+	OutcomeShimStopping:                 newResponseSchema([]string{"state", "shim_pid", "child_pid"}),
 	OutcomeIndeterminateChildStarting:   newResponseSchema([]string{"state", "shim_pid", "record_path"}),
 	OutcomeRunning:                      newResponseSchema([]string{"state", "shim_pid", "child_pid"}),
 	OutcomeOrphan:                       newResponseSchema([]string{"shim_pid", "child_pid", "recorded_token", "observed_token"}),
@@ -433,6 +440,9 @@ var responseSchemas = map[Outcome]responseSchema{
 	OutcomeStopChildRetained: newResponseSchema([]string{
 		"child_pid", "signal_attempted", "signal", "child_exit_observed", "state",
 	}, "cause"),
+	OutcomeStopAlreadyStopping: newResponseSchema([]string{
+		"state", "shim_pid", "child_pid", "signal_attempted",
+	}),
 }
 
 func validateResponse(response Response) error {
@@ -482,6 +492,18 @@ func validateResponse(response Response) error {
 		if *response.State != string(RecordStateChildStarting) && *response.State != string(RecordStateChildRecorded) {
 			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
 		}
+	case OutcomeStopping:
+		if *response.State != string(OutcomeStopping) {
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
+	case OutcomeStopped:
+		if *response.State != string(OutcomeStopped) {
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
+	case OutcomeShimStopping:
+		if *response.State != string(OutcomeStopping) && *response.State != string(OutcomeStopped) {
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
 	case OutcomeIndeterminateChildStarting:
 		if *response.State != string(RecordStateChildStarting) {
 			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
@@ -526,6 +548,13 @@ func validateResponse(response Response) error {
 		case ProcessPresentMatch, ProcessPresentTokenDisagreement, ProcessPresentNotOurs, ProcessCouldNotObserve:
 		default:
 			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
+	case OutcomeStopAlreadyStopping:
+		if *response.State != string(OutcomeStopping) && *response.State != string(OutcomeStopped) {
+			return &ProtocolValueError{Field: "state", Reason: fmt.Sprintf("has invalid value %q for outcome %q", *response.State, response.Outcome)}
+		}
+		if *response.SignalAttempted {
+			return &ProtocolValueError{Field: "signal_attempted", Reason: `must be false for outcome "stop-already-stopping"`}
 		}
 	}
 	return nil

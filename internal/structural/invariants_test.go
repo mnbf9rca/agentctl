@@ -22,9 +22,11 @@ type sourceFile struct {
 }
 
 // This syntactic guard catches direct calls through normal, aliased, and dot
-// imports. Function-value indirection is deliberately outside its boundary:
-// evading the repository's own tests is excluded by the same-user threat model.
-func TestExactlyOneProductionShellqJoinCall(t *testing.T) {
+// imports. The second named site is the transitional shim compatibility path;
+// PR 7 removes the legacy site and restores the one-site invariant.
+// Function-value indirection is deliberately outside its boundary: evading
+// the repository's own tests is excluded by the same-user threat model.
+func TestProductionShellqJoinCallsStayAtTransitionalAuthorizedSites(t *testing.T) {
 	root := repositoryRoot(t)
 	var sites []string
 
@@ -63,16 +65,30 @@ func TestExactlyOneProductionShellqJoinCall(t *testing.T) {
 				matched = dotImport && fun.Name == "Join"
 			}
 			if matched {
-				sites = append(sites, sourceSite(src, call.Pos()))
+				sites = append(sites, src.rel+":"+enclosingFunctionName(src.file, call.Pos()))
 			}
 			return true
 		})
 	}
 
 	sort.Strings(sites)
-	if len(sites) != 1 {
-		t.Fatalf("shellq.Join production call sites = %d, want 1; found: %s", len(sites), strings.Join(sites, ", "))
+	want := []string{
+		"internal/fleet/fleet.go:agentCommand",
+		"internal/fleet/shim.go:shimWindowCommand",
 	}
+	if strings.Join(sites, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("shellq.Join production call sites = %q, want exact transitional sites %q", sites, want)
+	}
+}
+
+func enclosingFunctionName(file *ast.File, position token.Pos) string {
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Pos() <= position && position < function.End() {
+			return function.Name.Name
+		}
+	}
+	return "<package>"
 }
 
 // This syntactic guard catches quoted and raw send-keys literals at every

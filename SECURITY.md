@@ -96,7 +96,7 @@ lane does not import `x/sys`.
 
    Recovery classification reads advisory metadata then kills by the classified ID; a same-user process can arrange a window's destruction that way, but could destroy it directly — no added capability. Delivery has one bounded TOCTOU: identity reads the pane PID and runs `ps`, then delivery targets the pane ID; pane IDs are not reused, but `respawn-pane -k` can swap the process in the same pane between the two. Same-user action; accepted.
 7. **`launch --from-template` reads a caller-named path** — the first caller-supplied read path on a command that drives tmux. The file is opened `O_RDONLY|O_NONBLOCK` and the **descriptor** is verified — never stat-then-read, so no check/use gap. Only regular files are accepted: directories, devices, and sockets are refused, and a FIFO is refused because under the non-blocking open it reads as empty or partial — malformed, or worse, a valid prefix describing a fleet the caller never wrote (the non-blocking flag is what makes that refusal reachable: a plain open of a writerless FIFO blocks inside `open(2)`; the flag is inert for accepted regular files). `-` is not special; stdin is not accepted. Input is bounded at 1 MiB and oversize is **refused, not truncated** — a truncated-but-parsing template would launch a different fleet than the file. Symlinks are followed with every rule binding on the target: a same-user process that can plant a symlink can plant the file. Template-sourced values confer no trust and skip no gate: they traverse exactly the harness-argv/`shellq` path and §7 predicates flag values do, and nothing from a template reaches `send-keys`, the registry, or a `-t` target.
-8. **Approved shim-plane residuals.** Same-user unlink/rebind or lockfile/record edits remain out of scope; the detection
+8. **Approved shim-plane residuals.** Same-user unlink/rebind or lockfile/role-record/fleet-record edits remain out of scope; the detection
    contract compares the advisory recorded shim PID with kernel `LOCAL_PEERPID` and reports disagreement without
    calling either side authentication. `$HOME`, `os.UserConfigDir()`, `AGENTCTL_RUNTIME_ROOT`, and
    `AGENTCTL_STATE_ROOT` are declared, capped, validated, same-user-selectable inputs, not trust anchors. Predictable
@@ -115,8 +115,9 @@ The shipped pre-0.5 lifecycle writes files only through skill installation under
 checked). No shipped launch/control/status/kill path writes lifecycle state yet. At the approved 0.5.0 cutover,
 volatile mode-`0600` socket/lock artifacts live below descriptor-verified mode-`0700`
 `/tmp/agentctl-<uid>/v1`; durable mode-`0600` reservation/child/config records live below descriptor-verified
-`os.UserConfigDir()/agentctl/state-v1`. The exact record path is
-`<resolved-state-root>/sessions/<session>/roles/<role>.json`; the lockfile records the fully resolved durable root.
+`os.UserConfigDir()/agentctl/state-v1`. The exact role-record path is
+`<resolved-state-root>/sessions/<session>/roles/<role>.json`; the separate exact launch-owned fleet-record path is
+`<resolved-state-root>/sessions/<session>/fleet.json`. The lockfile records the fully resolved durable root.
 Declared overrides receive identical validation and never confer trust. No lifecycle path writes inside application
 repositories.
 
@@ -126,6 +127,18 @@ framing, `LOCAL_PEERPID`, ESRCH-only process absence facts, the nested PTY
 lifecycle, and the closed operation server. No public lifecycle command invokes
 that route yet, so this implementation status does not change the preceding
 shipped-path claim; the public CLI cutover remains owned by later issue-182 PRs.
+
+The explicitly named shim-backed fleet compatibility path now persists the complete versioned session roster/config
+before starting a role, uses typed tmux IDs only as optional presentation/cleanup facts, and treats the role claim and
+socket response as runtime identity. Session-record creation is atomic and one-winner; override replacement uses a
+short-held session-directory mutation flock and version-checked replacement. Neither flock is conflated with the
+lifetime role-ownership flock. A pre-rename failure removes and synchronizes only the empty reservation. Any visible
+commit uncertainty retains the record, and no launch/relaunch rollback removes the fleet record while an unobserved
+role child may live. Kill attempts a previously observed typed presentation ID exactly once only after child cleanup.
+If tmux auto-removes the last shim window first, only one exact post-failure observation of presentation `gone` permits
+fleet-record removal; a still-present or unavailable presentation retains the fleet record. An already-gone
+presentation is never reported as removed. This path and the isolated integration fixture are invoked directly by
+tests only until PR 7.
 
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 
@@ -143,6 +156,9 @@ PR 2 implements constraints 1–4, 6, 8, and 10 as internal primitives and live
 Darwin tests. It does not activate the shim lifecycle, retire tmux identity, or
 broaden the closed operation surface.
 
+PR 5 implements the separate durable fleet record, explicitly named shim-backed launch/relaunch/kill compatibility
+paths, and stop/payload serialization behind direct tests. It does not cut over a public lifecycle command.
+
 Existing shipped claims are amended only at the listed cutover PR; until then their current-path wording remains true:
 
 | Existing shipped claim | Approved Option S amendment | Shipped-wording owner |
@@ -152,6 +168,7 @@ Existing shipped claims are amended only at the listed cutover PR; until then th
 | No launch/control/status/kill lifecycle path writes persistent state. | Durable role/config records use the descriptor-verified state root and volatile claim/socket artifacts use the runtime root. | PRs 2 and 5 implement; PR 7 cuts over |
 | The lifecycle is unsynchronized and bounded by check-then-act races. | A lifetime `flock` serializes ownership; residual same-user edits and refusal outcomes remain. | PRs 2 and 5 implement; PR 7 cuts over |
 | Fixed control payloads reach tmux through `send-keys`. | The client's only delivery instruction is a closed operation name; framing/version, validated session/role identity, and typed response facts remain permitted by the exact wire schema. The shim is the sole PTY writer. Non-transactional TUI-delivery residual 1 remains. | PRs 4 and 6 implement; PR 7 cuts over |
+| The one shell-interpreted string (the window command) is assembled at a single `shellq` site from already-validated tokens. | PR 5 adds a transitional second site in compiled-but-CLI-unreached shim compatibility code; PR 7 removes the legacy site and restores the single-site invariant at cutover. | PR 5 specifies; PR 7 marks shipped |
 | `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, `AGENTCTL_MANAGED`, and `TMUX_PANE` are informational and never prove a target. | Unchanged: none becomes a runtime identity, answerer, readiness, or ancestry input. | No wording transition required |
 
 1. **The role claim is a kernel-arbitrated lock, not a socket file.** Successful exclusive `flock(LOCK_EX)` on a per-role lockfile is the sole ownership instant, and the lock is held for the shim's lifetime; the socket is bound only while the lock is held, and reclaim after any death is lock acquisition alone. Bare `bind()` claims and probe-connect → `unlink` → `bind` reclaim are inadmissible (demonstrated: the socket file survives SIGKILL and blocks rebind; unlink-based reclaim can silently orphan a live shim).
@@ -162,7 +179,9 @@ Existing shipped claims are amended only at the listed cutover PR; until then th
    are the only payload operations and resolve their fixed bytes server-side; `observe` and `stop` are control
    operations and never call the PTY writer. The response carries only framing/version and typed objective facts,
    exactly as design §15.5 specifies. No field can carry caller-supplied PTY text, raw keys, arguments, model values,
-   or environment values; the shim is the sole writer to the harness PTY.
+   or environment values; the shim is the sole writer to the harness PTY. Stop marks the shim stopping before waiting
+   for the shared mutation gate, lets an already-admitted payload finish and report before signaling, refuses later
+   payloads without a PTY write, admits factual observe, and never attempts a second signal for an already-stopping stop.
 5. **The shim is the enforcement point.** Design §15.5 retires tmux metadata/window/pane checks, moves role validation and version/answerer/readiness checks, and replaces `$TMUX_PANE` with one fail-closed ancestry snapshot seeded from `LOCAL_PEERPID`. Advisory environment never targets.
 6. **No role is absent while its recorded child may live or a record commit is uncertain.** A pre-fork durable
    `child-starting` reservation upgrades with PID/raw start token. `kill(pid,0)` `ESRCH` is the sole process-absence
@@ -170,7 +189,10 @@ Existing shipped claims are amended only at the listed cutover PR; until then th
    directory-sync failure is `RecordCommitUncertainError`: its visible record and role artifacts are retained, no
    later cleanup describes the role absent, and the exact `record-commit-uncertain` row reports the phase. The live
    probe observed both pinned harness children terminate after shim SIGHUP, but explicit orphan/indeterminate states
-   remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3.
+   remain mandatory. Dead-shim `child-starting` requires the manual recorded-root remedy in design §15.3. The separate
+   fleet record receives the same retain-on-uncertainty treatment with phase `fleet-config`; a definite override
+   replacement failure rolls back only after separate signal-attempt and observed-exit facts, and an uncertain
+   replacement retains the ready shim and presentation without retry.
 7. **No control delivery before the channel is proven clean.** The nested raw-mode transitions race at startup and
    corrupt early bytes (demonstrated). Design §15.3 fixes the observation: `TIOCGETA` on the retained PTY master at
    `t=0`, every 50ms, and the inclusive 5s boundary; ready means one snapshot has both `ICANON` and `ECHO` clear while
