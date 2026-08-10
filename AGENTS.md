@@ -27,8 +27,9 @@ to operate a fleet. Keep those concerns separate.
 
 ## Hard constraints
 
-- Keep the Go module on the standard library. Do not add third-party Go
-  dependencies.
+- Keep the Go module standard-library-first. Add a third-party Go dependency
+  only when it clearly reduces complexity, and justify each addition in the
+  governing spec and PR.
 - Production external-command execution goes through an interface. tmux and
   process calls use `internal/tmuxx.Runner`; tests use fakes that record exact
   executable and argv elements.

@@ -1,6 +1,6 @@
-// Package launchtemplate reads the structural values in a launch template.
-// It deliberately does not validate fleet values; internal/config owns those
-// rules after template and flag values have been merged.
+// Package launchtemplate validates a launch template's file-local structure.
+// Effective fleet value rules are applied after template and flag values have
+// been merged.
 package launchtemplate
 
 import (
@@ -11,12 +11,42 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/mnbf9rca/agentctl/skills"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
 
 // MaxBytes is the largest launch template agentctl will read.
 const MaxBytes = 1 << 20
+
+const fleetTemplateSchemaPath = skills.Root + "/references/fleet-template.schema.json"
+
+var fleetTemplateSchema = mustCompileFleetTemplateSchema()
+
+func mustCompileFleetTemplateSchema() *jsonschema.Schema {
+	contents, err := skills.Tree.ReadFile(fleetTemplateSchemaPath)
+	if err != nil {
+		panic(fmt.Sprintf("read embedded launch template schema: %v", err))
+	}
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(contents))
+	if err != nil {
+		panic(fmt.Sprintf("decode embedded launch template schema: %v", err))
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(fleetTemplateSchemaPath, document); err != nil {
+		panic(fmt.Sprintf("register embedded launch template schema: %v", err))
+	}
+	schema, err := compiler.Compile(fleetTemplateSchemaPath)
+	if err != nil {
+		panic(fmt.Sprintf("compile embedded launch template schema: %v", err))
+	}
+	return schema
+}
 
 // File is the opened descriptor the decoder verifies and then reads.
 type File interface {
@@ -125,87 +155,64 @@ func fileKind(mode fs.FileMode) string {
 
 type versionState struct {
 	present bool
-	value   any
+	raw     json.RawMessage
+}
+
+type tokenState struct {
+	version      versionState
+	trailing     bool
+	schema       bool
+	session      bool
+	objectFields map[string][]string
 }
 
 func decodeDocument(path string, contents []byte) (Document, error) {
-	version, err := inspectTokens(path, contents)
+	tokens, err := inspectTokens(path, contents)
 	if err != nil {
 		return Document{}, err
 	}
-	if err := requireVersion(path, version); err != nil {
+	if err := requireVersion(path, tokens.version); err != nil {
+		return Document{}, err
+	}
+	instance, err := decodeFirstJSONValue(contents)
+	if err != nil {
+		return Document{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
+	}
+	if err := selectSchemaFailure(path, instance, tokens); err != nil {
 		return Document{}, err
 	}
 
 	var wire documentWire
-	if err := strictDecode(contents, &wire); err != nil {
-		if isTrailingDocument(err) {
-			return Document{}, templateError(path, "", "must contain exactly one JSON document", err)
-		}
-		return Document{}, decoderError(path, "", err)
+	if err := json.Unmarshal(contents, &wire); err != nil {
+		return Document{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
 	}
-	if wire.Session != nil {
-		return Document{}, templateError(path, "", `"session" is not a template field; session identity is supplied per invocation with --session`, nil)
-	}
-
-	directory, err := optionalString(path, "dir", wire.Directory)
-	if err != nil {
-		return Document{}, err
-	}
-	roles, err := decodeRoles(path, wire.Roles)
-	if err != nil {
-		return Document{}, err
-	}
-	return Document{Path: path, Directory: directory, Roles: roles}, nil
+	return decodeWire(path, wire), nil
 }
 
-func inspectTokens(path string, contents []byte) (versionState, error) {
+func inspectTokens(path string, contents []byte) (tokenState, error) {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.UseNumber()
-	var version versionState
-	if err := scanValue(decoder, "", true, &version); err != nil {
+	state := tokenState{objectFields: make(map[string][]string)}
+	if err := scanValue(decoder, "", true, &state, contents); err != nil {
 		var duplicate *duplicateFieldError
 		if errors.As(err, &duplicate) {
-			return versionState{}, templateError(path, duplicate.Location, fmt.Sprintf("duplicate field %q", duplicate.Field), err)
+			return tokenState{}, templateError(path, duplicate.Location, fmt.Sprintf("duplicate field %q", duplicate.Field), err)
 		}
-		return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
+		return tokenState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
 	}
-	if version.present {
-		value, err := decodeVersionValue(contents)
-		if err != nil {
-			return versionState{}, templateError(path, "", "invalid JSON: "+err.Error(), err)
-		}
-		version.value = value
+	if _, err := decoder.Token(); err != io.EOF {
+		state.trailing = true
 	}
-	return version, nil
+	return state, nil
 }
 
-func decodeVersionValue(contents []byte) (any, error) {
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.UseNumber()
-	var root map[string]json.RawMessage
-	if err := decoder.Decode(&root); err != nil {
-		return nil, err
-	}
-	decoder = json.NewDecoder(bytes.NewReader(root["version"]))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	return value, nil
-}
-
-func scanValue(decoder *json.Decoder, location string, root bool, version *versionState) error {
+func scanValue(decoder *json.Decoder, location string, root bool, state *tokenState, contents []byte) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return err
 	}
 	delimiter, composite := token.(json.Delim)
 	if !composite {
-		if location == "version" {
-			version.value = token
-		}
 		return nil
 	}
 
@@ -225,12 +232,26 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 				return &duplicateFieldError{Location: location, Field: key}
 			}
 			seen[key] = struct{}{}
+
+			valueStart := decoder.InputOffset()
 			child := fieldLocation(location, key)
-			if root && key == "version" {
-				version.present = true
+			if root {
+				switch key {
+				case "version":
+					state.version.present = true
+				case "$schema":
+					state.schema = true
+				case "session":
+					state.session = true
+				}
 			}
-			if err := scanValue(decoder, child, false, version); err != nil {
+			state.objectFields[location] = append(state.objectFields[location], key)
+
+			if err := scanValue(decoder, child, false, state, contents); err != nil {
 				return err
+			}
+			if root && key == "version" {
+				state.version.raw = rawValue(contents[valueStart:decoder.InputOffset()])
 			}
 		}
 		_, err = decoder.Token()
@@ -239,7 +260,7 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 		index := 0
 		for decoder.More() {
 			child := fmt.Sprintf("%s[%d]", location, index)
-			if err := scanValue(decoder, child, false, version); err != nil {
+			if err := scanValue(decoder, child, false, state, contents); err != nil {
 				return err
 			}
 			index++
@@ -249,6 +270,20 @@ func scanValue(decoder *json.Decoder, location string, root bool, version *versi
 	default:
 		return fmt.Errorf("unexpected delimiter %q", delimiter)
 	}
+}
+
+func rawValue(value []byte) json.RawMessage {
+	value = bytes.TrimSpace(value)
+	value = bytes.TrimLeft(value, ": \t\r\n")
+	return append(json.RawMessage(nil), bytes.TrimSpace(value)...)
+}
+
+func isRoleItemLocation(location string) bool {
+	if !strings.HasPrefix(location, "roles[") || !strings.HasSuffix(location, "]") {
+		return false
+	}
+	_, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(location, "roles["), "]"))
+	return err == nil
 }
 
 type duplicateFieldError struct {
@@ -267,16 +302,34 @@ func requireVersion(path string, version versionState) error {
 	if !version.present {
 		return templateError(path, "version", "is required", nil)
 	}
-	number, ok := version.value.(json.Number)
+	if string(version.raw) == "1" {
+		return nil
+	}
+
+	value, err := decodeRawJSON(version.raw)
+	if err != nil {
+		return templateError(path, "", "invalid JSON: "+err.Error(), err)
+	}
+	number, ok := value.(json.Number)
 	if !ok || string(number) != "1" {
 		if ok {
 			if integer, err := number.Int64(); err == nil {
 				return templateError(path, "", fmt.Sprintf("version %d is not supported by this agentctl (supports 1)", integer), nil)
 			}
 		}
-		return templateError(path, "version", "must be exactly 1, got "+renderJSONValue(version.value), nil)
+		return templateError(path, "version", "must be exactly 1, got "+renderJSONValue(value), nil)
 	}
 	return nil
+}
+
+func decodeRawJSON(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func renderJSONValue(value any) string {
@@ -291,133 +344,289 @@ func renderJSONValue(value any) string {
 }
 
 type documentWire struct {
-	Version   json.RawMessage `json:"version"`
-	Directory json.RawMessage `json:"dir"`
-	Roles     json.RawMessage `json:"roles"`
-	Session   json.RawMessage `json:"session"`
+	Version   int        `json:"version"`
+	Directory *string    `json:"dir"`
+	Roles     []roleWire `json:"roles"`
 }
 
 type roleWire struct {
-	Name    json.RawMessage `json:"role"`
-	Harness json.RawMessage `json:"harness"`
-	Model   json.RawMessage `json:"model"`
-	Effort  json.RawMessage `json:"effort"`
+	Name    *string `json:"role"`
+	Harness *string `json:"harness"`
+	Model   *string `json:"model"`
+	Effort  *string `json:"effort"`
 }
 
-type trailingDocumentError struct{ Cause error }
+var roleWireFields = jsonFieldNames(reflect.TypeOf(roleWire{}))
 
-func (e *trailingDocumentError) Error() string { return e.Cause.Error() }
-func (e *trailingDocumentError) Unwrap() error { return e.Cause }
+func jsonFieldNames(typ reflect.Type) []string {
+	fields := make([]string, 0, typ.NumField())
+	for index := range typ.NumField() {
+		name, _, _ := strings.Cut(typ.Field(index).Tag.Get("json"), ",")
+		fields = append(fields, name)
+	}
+	return fields
+}
 
-func strictDecode(contents []byte, destination any) error {
+func decodeWire(path string, wire documentWire) Document {
+	roles := make([]Role, 0, len(wire.Roles))
+	for _, role := range wire.Roles {
+		roles = append(roles, Role{Name: *role.Name, Harness: role.Harness, Model: role.Model, Effort: role.Effort})
+	}
+	return Document{Path: path, Directory: wire.Directory, Roles: roles}
+}
+
+func decodeFirstJSONValue(contents []byte) (any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("found another JSON value")
-		}
-		return &trailingDocumentError{Cause: err}
-	}
-	return nil
-}
-
-func isTrailingDocument(err error) bool {
-	_, ok := err.(*trailingDocumentError)
-	return ok
-}
-
-func decodeRoles(path string, raw json.RawMessage) ([]Role, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, templateError(path, "roles", "must not be null; omit the field instead", nil)
-	}
-	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, templateError(path, "roles", "must be an array", err)
-	}
-
-	roles := make([]Role, 0, len(entries))
-	seen := make(map[string]struct{}, len(entries))
-	for index, entry := range entries {
-		location := fmt.Sprintf("roles[%d]", index)
-		trimmed := bytes.TrimSpace(entry)
-		if len(trimmed) == 0 || trimmed[0] != '{' {
-			return nil, templateError(path, location, "must be an object", nil)
-		}
-		var wire roleWire
-		if err := strictDecode(entry, &wire); err != nil {
-			return nil, decoderError(path, location, err)
-		}
-
-		name, err := requiredString(path, location+".role", wire.Name)
-		if err != nil {
-			return nil, err
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return nil, templateError(path, location, fmt.Sprintf("duplicate role %q", name), nil)
-		}
-		seen[name] = struct{}{}
-
-		harness, err := optionalString(path, location+".harness", wire.Harness)
-		if err != nil {
-			return nil, err
-		}
-		model, err := optionalString(path, location+".model", wire.Model)
-		if err != nil {
-			return nil, err
-		}
-		effort, err := optionalString(path, location+".effort", wire.Effort)
-		if err != nil {
-			return nil, err
-		}
-		roles = append(roles, Role{Name: name, Harness: harness, Model: model, Effort: effort})
-	}
-	return roles, nil
-}
-
-func requiredString(path, location string, raw json.RawMessage) (string, error) {
-	if raw == nil {
-		return "", templateError(path, location, "is required", nil)
-	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", templateError(path, location, "must not be null", nil)
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", templateError(path, location, "must be a string", err)
-	}
-	if value == "" {
-		return "", templateError(path, location, "must not be empty", nil)
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
 	}
 	return value, nil
 }
 
-func optionalString(path, location string, raw json.RawMessage) (*string, error) {
-	if raw == nil {
-		return nil, nil
+func selectSchemaFailure(path string, instance any, tokens tokenState) error {
+	err := fleetTemplateSchema.Validate(instance)
+	var failures schemaFailureIndex
+	if err != nil {
+		var validation *jsonschema.ValidationError
+		if !errors.As(err, &validation) {
+			return templateError(path, "", "does not match the embedded template schema", err)
+		}
+		failures = indexSchemaFailures(validation)
 	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, templateError(path, location, "must not be null; omit the field instead", nil)
+	rootUnknown := firstAdditionalProperty(failures, tokens.objectFields[""], nil)
+	if rootUnknown != "" {
+		return templateError(path, "", fmt.Sprintf("unknown field %q", rootUnknown), err)
 	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, templateError(path, location, "must be a string", err)
+	if tokens.trailing {
+		return templateError(path, "", "must contain exactly one JSON document", nil)
 	}
-	if value == "" {
-		return nil, templateError(path, location, "must not be empty; omit the field instead", nil)
+	if tokens.schema {
+		return schemaKeywordError(path)
 	}
-	return &value, nil
+	if tokens.session {
+		return sessionFieldError(path)
+	}
+
+	if failure := decoderSchemaFailureAt(failures, []string{"dir"}); failure != nil {
+		return translateSchemaFailure(path, failure, err)
+	}
+
+	root, _ := instance.(map[string]any)
+	var roles []any
+	if rawRoles, supplied := root["roles"]; supplied {
+		var array bool
+		roles, array = rawRoles.([]any)
+		if !array {
+			if failure := decoderSchemaFailureAt(failures, []string{"roles"}); failure != nil {
+				return translateSchemaFailure(path, failure, err)
+			}
+			return templateError(path, "", "does not match the embedded template schema", err)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(roles))
+	for index, role := range roles {
+		parts := []string{"roles", strconv.Itoa(index)}
+		if failure := roleItemTypeSchemaFailureAt(failures, parts); failure != nil {
+			return translateSchemaFailure(path, failure, err)
+		}
+
+		location := schemaLocation(parts)
+		if name := firstAdditionalProperty(failures, tokens.objectFields[location], parts); name != "" {
+			return templateError(path, location, fmt.Sprintf("unknown field %q", name), err)
+		}
+		if failure := requiredSchemaFailureAt(failures, parts); failure != nil {
+			return translateSchemaFailure(path, failure, err)
+		}
+		if failure := decoderSchemaFailureAt(failures, append(parts, roleWireFields[0])); failure != nil {
+			return translateSchemaFailure(path, failure, err)
+		}
+
+		name := role.(map[string]any)[roleWireFields[0]].(string)
+		if _, duplicate := seen[name]; duplicate {
+			return templateError(path, location, fmt.Sprintf("duplicate role %q", name), nil)
+		}
+		seen[name] = struct{}{}
+		for _, field := range roleWireFields[1:] {
+			if failure := decoderSchemaFailureAt(failures, append(parts, field)); failure != nil {
+				return translateSchemaFailure(path, failure, err)
+			}
+		}
+	}
+	if failure := nonEmptyPatternSchemaFailureAt(failures, []string{"dir"}); failure != nil {
+		return translateSchemaFailure(path, failure, err)
+	}
+	for index := range roles {
+		if failure := nonEmptyPatternSchemaFailureAt(failures, []string{"roles", strconv.Itoa(index), roleWireFields[0]}); failure != nil {
+			return translateSchemaFailure(path, failure, err)
+		}
+	}
+	if err == nil {
+		return nil
+	}
+	return templateError(path, "", "does not match the embedded template schema", err)
 }
 
-func decoderError(path, location string, err error) error {
-	reason := strings.TrimPrefix(err.Error(), "json: ")
-	return templateError(path, location, reason, err)
+func schemaKeywordError(path string) *Error {
+	return templateError(path, "", `"$schema" is not a template field; the schema is applied automatically; see references/fleet-template.schema.json`, nil)
+}
+
+func sessionFieldError(path string) *Error {
+	return templateError(path, "", `"session" is not a template field; session identity is supplied per invocation with --session`, nil)
+}
+
+type schemaFailureIndex map[string][]*jsonschema.ValidationError
+
+func indexSchemaFailures(validation *jsonschema.ValidationError) schemaFailureIndex {
+	index := make(schemaFailureIndex)
+	collectSchemaFailures(validation, index)
+	return index
+}
+
+func collectSchemaFailures(validation *jsonschema.ValidationError, index schemaFailureIndex) {
+	for _, cause := range validation.Causes {
+		collectSchemaFailures(cause, index)
+	}
+	if len(validation.Causes) != 0 {
+		return
+	}
+	if _, root := validation.ErrorKind.(*kind.Schema); !root {
+		location := schemaLocation(validation.InstanceLocation)
+		index[location] = append(index[location], validation)
+	}
+}
+
+func (index schemaFailureIndex) at(parts []string) []*jsonschema.ValidationError {
+	return index[schemaLocation(parts)]
+}
+
+func requiredSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if _, required := failure.ErrorKind.(*kind.Required); required {
+			return failure
+		}
+	}
+	return nil
+}
+
+func firstAdditionalProperty(failures schemaFailureIndex, fields []string, parts []string) string {
+	additional := make(map[string]struct{})
+	for _, failure := range failures.at(parts) {
+		if issue, ok := failure.ErrorKind.(*kind.AdditionalProperties); ok {
+			for _, field := range issue.Properties {
+				if len(parts) == 0 && (field == "$schema" || field == "session") {
+					continue
+				}
+				additional[field] = struct{}{}
+			}
+		}
+	}
+	for _, field := range fields {
+		if _, found := additional[field]; found {
+			return field
+		}
+	}
+	return ""
+}
+
+func decoderSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if _, additional := failure.ErrorKind.(*kind.AdditionalProperties); additional {
+			continue
+		}
+		if pattern, ok := failure.ErrorKind.(*kind.Pattern); ok && pattern.Got != "" {
+			continue
+		}
+		return failure
+	}
+	return nil
+}
+
+func roleItemTypeSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if _, typeFailure := failure.ErrorKind.(*kind.Type); typeFailure {
+			return failure
+		}
+	}
+	return nil
+}
+
+func nonEmptyPatternSchemaFailureAt(failures schemaFailureIndex, parts []string) *jsonschema.ValidationError {
+	for _, failure := range failures.at(parts) {
+		if pattern, ok := failure.ErrorKind.(*kind.Pattern); ok && pattern.Got != "" {
+			return failure
+		}
+	}
+	return nil
+}
+
+func translateSchemaFailure(path string, failure *jsonschema.ValidationError, cause error) error {
+	location := schemaLocation(failure.InstanceLocation)
+	switch issue := failure.ErrorKind.(type) {
+	case *kind.Required:
+		return templateError(path, fieldLocation(location, issue.Missing[0]), "is required", cause)
+	case *kind.Type:
+		return schemaTypeError(path, location, issue.Got, cause)
+	case *kind.MinLength:
+		if strings.HasSuffix(location, ".role") {
+			return templateError(path, location, "must not be empty", cause)
+		}
+		return templateError(path, location, "must not be empty; omit the field instead", cause)
+	case *kind.Pattern:
+		if location == "dir" {
+			if issue.Got == "" {
+				return templateError(path, location, "must not be empty; omit the field instead", cause)
+			}
+			return templateError(path, location, fmt.Sprintf("path %q must be absolute; omit dir and supply --dir at invocation", issue.Got), cause)
+		}
+		if issue.Got == "" {
+			return templateError(path, location, "must not be empty", cause)
+		}
+		return templateError(path, location, fmt.Sprintf("value %q must match %s", issue.Got, issue.Want), cause)
+	default:
+		return templateError(path, location, "does not match the embedded template schema", cause)
+	}
+}
+
+func schemaTypeError(path, location, got string, cause error) error {
+	switch {
+	case location == "dir":
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	case location == "roles":
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be an array", cause)
+	case isRoleItemLocation(location):
+		return templateError(path, location, "must be an object", cause)
+	case strings.HasSuffix(location, ".role"):
+		if got == "null" {
+			return templateError(path, location, "must not be null", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	default:
+		if got == "null" {
+			return templateError(path, location, "must not be null; omit the field instead", cause)
+		}
+		return templateError(path, location, "must be a string", cause)
+	}
+}
+
+func schemaLocation(parts []string) string {
+	var location string
+	for index, part := range parts {
+		if index == 1 && parts[0] == "roles" {
+			location += "[" + part + "]"
+			continue
+		}
+		location = fieldLocation(location, part)
+	}
+	return location
 }
 
 func templateError(path, location, reason string, cause error) *Error {

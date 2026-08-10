@@ -221,24 +221,30 @@ harnesses are `claude` and `codex`; `--models` and `--efforts` may name any role
 overrides the template or invocation working directory and must name an existing directory. Launch fails rather than
 adopting an existing session.
 
-Templates are strict, read-only JSON inputs with this shape:
+Templates are strict, read-only JSON inputs. After `agentctl skill install`, their complete shape is at
+`$HOME/.agents/skills/agentctl/references/fleet-template.schema.json` for Codex (or the matching Claude skill path);
+the repository copy is [`references/fleet-template.schema.json`](skills/agentctl/references/fleet-template.schema.json).
+The binary applies that schema automatically. A schema-valid template can still be refused at launch because value
+rules apply to the merged template-and-flag union.
+Before schema validation, agentctl enforces the 1 MiB file-size limit and refuses duplicate JSON object keys or
+trailing content.
+
+For editor assistance, configure a file-match mapping rather than putting `$schema` in a template. For example, this
+VS Code setting maps an operator-chosen `agentctl-templates` glob to the Codex-installed skill path:
 
 ```json
 {
-  "version": 1,
-  "dir": "/srv/work",
-  "roles": [
-    { "role": "planner", "harness": "claude", "model": "opus-4-1", "effort": "high" },
-    { "role": "worker", "harness": "codex" }
+  "json.schemas": [
+    {
+      "fileMatch": ["**/agentctl-templates/*.json"],
+      "url": "/Users/your-name/.agents/skills/agentctl/references/fleet-template.schema.json"
+    }
   ]
 }
 ```
 
-The file never contains a session name. `version` is required; `dir` and `roles` may be omitted, and a role's harness
-may be supplied later by a matching `--roles` entry. Unknown or duplicate fields, duplicate roles, `null`, empty
-strings, trailing JSON documents, non-regular files, and files over 1 MiB are refused. A template
-`dir` must be absolute; omit it and use `--dir` when the invocation should choose a relative or machine-specific path.
-Every effective role and field passes the same validators used by flags before launch continues.
+Replace both example values for your machine and template location. Never put `$schema` in a template: it is a schema-
+document keyword, and agentctl always applies its embedded schema.
 
 When a template is used, launch prints one provenance line per effective role before the observed status table. It
 labels fields as `template`, `flag override`, or `flags`; a template-supplied directory gets its own line. These lines

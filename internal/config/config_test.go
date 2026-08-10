@@ -116,6 +116,27 @@ func TestParseFleetPreservesRoleDeclarationOrder(t *testing.T) {
 	}
 }
 
+func TestParseFleetRolesAppliesAssignmentsWithoutChangingRoleOrder(t *testing.T) {
+	t.Parallel()
+
+	models := "planner:opus-4-1"
+	efforts := "worker:high"
+	got, err := ParseFleetRoles([]RoleConfig{
+		{Name: "planner", Harness: HarnessClaude},
+		{Name: "worker", Harness: HarnessCodex},
+	}, &models, &efforts)
+	if err != nil {
+		t.Fatalf("ParseFleetRoles() error = %v", err)
+	}
+	want := FleetConfig{Roles: []RoleConfig{
+		{Name: "planner", Harness: HarnessClaude, Model: "opus-4-1"},
+		{Name: "worker", Harness: HarnessCodex, Effort: "high"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseFleetRoles() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseFleetRejectsInvalidRoleLists(t *testing.T) {
 	t.Parallel()
 
@@ -305,11 +326,85 @@ func TestValidateEffortEnforcesCharset(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := ValidateEffort(tt.effort)
 			assertValidationError(t, err, "effort", tt.effort, -1, "",
-				fmt.Sprintf("effort %q must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$", tt.effort),
+				"must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
 				fmt.Sprintf("invalid --effort value %q: effort %q must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$", tt.effort, tt.effort),
 			)
 		})
 	}
+}
+
+func TestValidateModelAndEffortReasonsExcludeTheRejectedValue(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		err   error
+		value string
+	}{
+		{name: "model", err: ValidateModelName("bad model"), value: "bad model"},
+		{name: "effort", err: ValidateEffort("bad effort"), value: "bad effort"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			var validation *ValidationError
+			if !errors.As(test.err, &validation) {
+				t.Fatalf("error = %T %v, want *ValidationError", test.err, test.err)
+			}
+			if validation.Reason != "must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$" {
+				t.Fatalf("Reason = %q, want value-free reason", validation.Reason)
+			}
+			if validation.Value != test.value {
+				t.Fatalf("Value = %q, want %q", validation.Value, test.value)
+			}
+		})
+	}
+}
+
+func TestValidationErrorsDeclareTheirDisplaySubjects(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name            string
+		err             error
+		directSubject   string
+		templateSubject string
+		wantTemplate    string
+	}{
+		{
+			name: "model", err: ValidateModelName("bad model"),
+			directSubject: "", templateSubject: "value",
+			wantTemplate: `value "bad model" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+		},
+		{
+			name: "effort", err: ValidateEffort("bad effort"),
+			directSubject: "effort", templateSubject: "effort",
+			wantTemplate: `effort "bad effort" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+		},
+		{
+			name: "harness", err: invalidHarnessErrorForDisplaySubjects(),
+			directSubject: "", templateSubject: "value",
+			wantTemplate: `value "future" must be claude or codex`,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			var validation *ValidationError
+			if !errors.As(test.err, &validation) {
+				t.Fatalf("error = %T %v, want *ValidationError", test.err, test.err)
+			}
+			if validation.DirectSubject != test.directSubject || validation.TemplateSubject != test.templateSubject {
+				t.Fatalf("display subjects = (%q, %q), want (%q, %q)", validation.DirectSubject, validation.TemplateSubject, test.directSubject, test.templateSubject)
+			}
+			if got := validation.FormatReason(validation.TemplateSubject); got != test.wantTemplate {
+				t.Fatalf("FormatReason() = %q, want %q", got, test.wantTemplate)
+			}
+		})
+	}
+}
+
+func invalidHarnessErrorForDisplaySubjects() error {
+	_, err := ParseHarness("future")
+	return err
 }
 
 func TestParseFleetAcceptsMixedCaseEffortWithoutChangingIt(t *testing.T) {
@@ -419,26 +514,6 @@ func TestParseHarnessAcceptsOnlyRegisteredHarnesses(t *testing.T) {
 		if err.Error() != want {
 			t.Fatalf("ParseHarness(%q) error = %q, want %q", name, err.Error(), want)
 		}
-	}
-}
-
-func TestValidateTemplateDirectoryRequiresAnAbsolutePathAndNamesTheFlagEscapeHatch(t *testing.T) {
-	t.Parallel()
-
-	if err := ValidateTemplateDirectory("/srv/work"); err != nil {
-		t.Fatalf("ValidateTemplateDirectory() error = %v, want nil", err)
-	}
-	err := ValidateTemplateDirectory("relative/work")
-	var validation *ValidationError
-	if !errors.As(err, &validation) {
-		t.Fatalf("error = %T %v, want *ValidationError", err, err)
-	}
-	if validation.Option != "dir" || validation.Value != "relative/work" || validation.EntryIndex != -1 {
-		t.Fatalf("ValidationError = %#v, want option=dir value=relative/work entryIndex=-1", validation)
-	}
-	want := `invalid --dir value "relative/work": template path must be absolute; omit dir and supply --dir at invocation`
-	if got := err.Error(); got != want {
-		t.Fatalf("error = %q, want %q", got, want)
 	}
 }
 

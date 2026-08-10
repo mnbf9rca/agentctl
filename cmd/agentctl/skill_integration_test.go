@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mnbf9rca/agentctl/internal/skillinstall"
@@ -47,6 +48,46 @@ func TestIntegrationSkillInstallAndStatusMatchEmbeddedTree(t *testing.T) {
 		skillinstall.Targets(home)[1].Dir + ": current (installed 0.3.0, binary 0.3.0)\n"
 	if got := stdout.String(); got != wantStatus {
 		t.Fatalf("skill status stdout = %q, want %q", got, wantStatus)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("skill status stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestIntegrationSkillInstallAndStatusPreservesFleetTemplateSchemaBytes(t *testing.T) {
+	restoreBuildStamp(t, "v0.3.0")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const relativeSchemaPath = "references/fleet-template.schema.json"
+	want, err := skills.Tree.ReadFile(skills.Root + "/" + relativeSchemaPath)
+	if err != nil {
+		t.Fatalf("read embedded fleet template schema: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"skill", "install"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("skill install exit = %d, want %d; stdout = %q, stderr = %q", code, exitOK, stdout.String(), stderr.String())
+	}
+	for _, target := range skillinstall.Targets(home) {
+		got, readErr := os.ReadFile(filepath.Join(target.Dir, filepath.FromSlash(relativeSchemaPath)))
+		if readErr != nil {
+			t.Fatalf("read installed schema for %s: %v", target.Harness, readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("installed schema for %s differs from embedded schema", target.Harness)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"skill", "status"}, &stdout, &stderr); code != exitOK {
+		t.Fatalf("skill status exit = %d, want %d; stdout = %q, stderr = %q", code, exitOK, stdout.String(), stderr.String())
+	}
+	for _, target := range skillinstall.Targets(home) {
+		if !strings.Contains(stdout.String(), target.Dir+": current (installed 0.3.0, binary 0.3.0)") {
+			t.Errorf("skill status output = %q, want current schema-bearing installation at %q", stdout.String(), target.Dir)
+		}
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("skill status stderr = %q, want empty", stderr.String())

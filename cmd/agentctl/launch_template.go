@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
@@ -55,18 +54,9 @@ func decodeLaunchTemplate(path *string) (*launchtemplate.Document, error) {
 }
 
 func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions) (launchConfiguration, error) {
-	if document.Directory != nil {
-		if err := config.ValidateTemplateDirectory(*document.Directory); err != nil {
-			return launchConfiguration{}, wrapTemplateDirectoryError(document.Path, *document.Directory, err)
-		}
-	}
-
 	roles := make([]mergedTemplateRole, 0, len(document.Roles))
 	roleIndexes := make(map[string]int, len(document.Roles))
 	for index, role := range document.Roles {
-		if err := config.ValidateRoleName(role.Name); err != nil {
-			return launchConfiguration{}, wrapTemplateValidation(document.Path, fmt.Sprintf("roles[%d].role", index), err)
-		}
 		roles = append(roles, mergedTemplateRole{
 			name:          role.Name,
 			harness:       role.Harness,
@@ -110,7 +100,7 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 		}
 	}
 
-	roleAssignments := make([]string, len(roles))
+	roleAssignments := make([]config.RoleConfig, len(roles))
 	for index := range roles {
 		role := &roles[index]
 		if role.harness == nil {
@@ -126,10 +116,10 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 				)
 			}
 		}
-		roleAssignments[index] = role.name + ":" + *role.harness
+		roleAssignments[index] = config.RoleConfig{Name: role.name, Harness: config.Harness(*role.harness)}
 	}
 
-	effective, err := config.ParseFleet(strings.Join(roleAssignments, ","), options.models, options.efforts)
+	effective, err := config.ParseFleetRoles(roleAssignments, options.models, options.efforts)
 	if err != nil {
 		return launchConfiguration{}, err
 	}
@@ -189,22 +179,7 @@ func wrapTemplateValidation(path, location string, err error) error {
 	if !errors.As(err, &validation) {
 		return &launchtemplate.Error{Path: path, Location: location, Reason: err.Error(), Cause: err}
 	}
-	reason := validation.Reason
-	if validation.Option != "effort" {
-		reason = fmt.Sprintf("value %q %s", validation.Value, validation.Reason)
-	}
-	return &launchtemplate.Error{Path: path, Location: location, Reason: reason, Cause: err}
-}
-
-func wrapTemplateDirectoryError(path, value string, err error) error {
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) {
-		return &launchtemplate.Error{Path: path, Location: "dir", Reason: err.Error(), Cause: err}
-	}
-	reason := strings.TrimPrefix(validation.Reason, "template path ")
-	return &launchtemplate.Error{
-		Path: path, Location: "dir", Reason: fmt.Sprintf("path %q %s", value, reason), Cause: err,
-	}
+	return &launchtemplate.Error{Path: path, Location: location, Reason: validation.FormatReason(validation.TemplateSubject), Cause: err}
 }
 
 func writeLaunchTemplateProvenance(stdout io.Writer, session string, configuration launchConfiguration, directory string) {
