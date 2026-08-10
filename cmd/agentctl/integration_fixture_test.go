@@ -23,8 +23,11 @@ import (
 )
 
 const (
-	integrationMarkerEnv  = "AGENTCTL_INTEGRATION_MARKER"
-	integrationCaptureEnv = "AGENTCTL_INTEGRATION_CAPTURE"
+	integrationMarkerEnv     = "AGENTCTL_INTEGRATION_MARKER"
+	integrationCaptureEnv    = "AGENTCTL_INTEGRATION_CAPTURE"
+	integrationShimBinaryEnv = "AGENTCTL_INTEGRATION_SHIM_BINARY"
+	integrationOwnedPIDsEnv  = "AGENTCTL_INTEGRATION_OWNED_PIDS"
+	integrationRawStubEnv    = "AGENTCTL_INTEGRATION_RAW_STUB"
 )
 
 type integrationResult struct {
@@ -80,11 +83,15 @@ type sentinelSnapshot struct {
 }
 
 type integrationFixture struct {
-	t           *testing.T
-	runner      *socketRunner
-	client      tmuxx.Client
-	invocations string
-	captureDir  string
+	t              *testing.T
+	runner         *socketRunner
+	client         tmuxx.Client
+	invocations    string
+	captureDir     string
+	runtimeRoot    string
+	stateRoot      string
+	agentctlPath   string
+	ownedChildPIDs string
 }
 
 type socketRunner struct {
@@ -105,15 +112,33 @@ func (integrationProcessExitError) ExitCode() int { return 1 }
 
 func TestIntegrationFixtureRemovesSocketDirectory(t *testing.T) {
 	var socketDirectory string
+	var runtimeRoot string
+	var stateRoot string
 	t.Run("fixture lifetime", func(t *testing.T) {
 		fixture := newIntegrationFixture(t)
 		socketDirectory = fixture.runner.tmuxTmpDir
+		runtimeRoot = fixture.runtimeRoot
+		stateRoot = fixture.stateRoot
 		if _, err := os.Stat(socketDirectory); err != nil {
 			t.Fatalf("private tmux socket directory during test: %v", err)
+		}
+		for _, root := range []string{runtimeRoot, stateRoot} {
+			info, err := os.Stat(root)
+			if err != nil {
+				t.Fatalf("private shim root %q during test: %v", root, err)
+			}
+			if got := info.Mode().Perm(); got != 0o700 {
+				t.Fatalf("private shim root %q mode = %#o, want 0700", root, got)
+			}
 		}
 	})
 	if _, err := os.Stat(socketDirectory); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("private tmux socket directory after cleanup: %v", err)
+	}
+	for _, root := range []string{runtimeRoot, stateRoot} {
+		if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("private shim root %q after cleanup: %v", root, err)
+		}
 	}
 }
 
@@ -207,6 +232,10 @@ func TestMain(m *testing.M) {
 	case "claude", "codex":
 		integrationMarkerMain()
 		return
+	}
+	if os.Getenv(integrationShimBinaryEnv) == "1" && len(os.Args) > 1 && os.Args[1] == "__shim" {
+		os.Setenv(integrationRawStubEnv, "1")
+		os.Exit(runWithRunner(context.Background(), os.Args[1:], os.Stdout, os.Stderr, tmuxx.RealRunner{}, os.LookupEnv))
 	}
 	if os.Getenv(integrationMarkerEnv) == "1" {
 		integrationMarkerMain()
@@ -305,6 +334,19 @@ parsedOptions:
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(89)
 	}
+	pidRecord, err := os.OpenFile(os.Getenv(integrationOwnedPIDsEnv), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(89)
+	}
+	if _, err := fmt.Fprintf(pidRecord, "%d\n", os.Getpid()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(89)
+	}
+	if err := pidRecord.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(89)
+	}
 
 	harnessPath, err := exec.LookPath(harness)
 	if err != nil {
@@ -321,6 +363,16 @@ parsedOptions:
 }
 
 func integrationMarkerMain() {
+	if os.Getenv(integrationRawStubEnv) == "1" {
+		command := exec.Command("/bin/stty", "-icanon", "-echo")
+		command.Stdin = os.Stdin
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(95)
+		}
+	}
 	capture := os.Getenv(integrationCaptureEnv)
 	file, err := os.OpenFile(capture, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -368,11 +420,20 @@ func newIntegrationFixtureWithServer(t *testing.T, bootstrapServer bool) *integr
 	socket := "agentctl-test-" + randomHex(t, 8)
 	runner := &socketRunner{tmuxPath: tmuxPath, socket: socket, tmuxTmpDir: shortTmuxTempDir(t)}
 	fixture := &integrationFixture{
-		t:           t,
-		runner:      runner,
-		client:      tmuxx.New(runner),
-		invocations: filepath.Join(t.TempDir(), "amq-invocations.tsv"),
-		captureDir:  t.TempDir(),
+		t:              t,
+		runner:         runner,
+		client:         tmuxx.New(runner),
+		invocations:    filepath.Join(t.TempDir(), "amq-invocations.tsv"),
+		captureDir:     t.TempDir(),
+		ownedChildPIDs: filepath.Join(t.TempDir(), "owned-child-pids.txt"),
+	}
+	shimRoot := shortShimTempDir(t)
+	fixture.runtimeRoot = filepath.Join(shimRoot, "r")
+	fixture.stateRoot = filepath.Join(shimRoot, "s")
+	for _, root := range []string{fixture.runtimeRoot, fixture.stateRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatalf("create isolated shim root %q: %v", root, err)
+		}
 	}
 
 	fixture.installStubs()
@@ -381,23 +442,34 @@ func newIntegrationFixtureWithServer(t *testing.T, bootstrapServer bool) *integr
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		output, cleanupErr := runner.tmuxCommand(ctx, "kill-server").CombinedOutput()
-		if cleanupErr == nil {
-			return
-		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if cleanupErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Errorf("timed out cleaning tmux socket %q", socket)
-			return
+		} else if cleanupErr != nil {
+			message := string(output)
+			if !strings.Contains(message, "no server running") && !strings.Contains(message, "error connecting to") {
+				t.Errorf("clean tmux socket %q: %v: %s", socket, cleanupErr, message)
+			}
 		}
-		message := string(output)
-		if strings.Contains(message, "no server running") || strings.Contains(message, "error connecting to") {
-			return
-		}
-		t.Errorf("clean tmux socket %q: %v: %s", socket, cleanupErr, message)
+		fixture.cleanupOwnedChildren()
 	})
 	if bootstrapServer {
 		fixture.bootstrapEmptyServer()
 	}
 	return fixture
+}
+
+func shortShimTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/tmp", "a5i-")
+	if err != nil {
+		t.Fatalf("create private shim temp directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Errorf("remove private shim temp directory %q: %v", directory, err)
+		}
+	})
+	return directory
 }
 
 func randomHex(t *testing.T, byteCount int) string {
@@ -441,6 +513,7 @@ func (f *integrationFixture) installStubs() {
 	if err != nil {
 		f.t.Fatalf("resolve test binary: %v", err)
 	}
+	f.agentctlPath = testBinary
 
 	for _, executable := range []string{"amq", "claude", "codex"} {
 		if err := os.Link(testBinary, filepath.Join(binDir, executable)); err != nil {
@@ -452,6 +525,10 @@ func (f *integrationFixture) installStubs() {
 	f.t.Setenv("HOME", f.t.TempDir())
 	f.t.Setenv("AGENTCTL_STUB_INVOCATIONS", f.invocations)
 	f.t.Setenv("AGENTCTL_STUB_CAPTURE_DIR", f.captureDir)
+	f.t.Setenv(integrationOwnedPIDsEnv, f.ownedChildPIDs)
+	f.t.Setenv(integrationShimBinaryEnv, "1")
+	f.t.Setenv("AGENTCTL_RUNTIME_ROOT", f.runtimeRoot)
+	f.t.Setenv("AGENTCTL_STATE_ROOT", f.stateRoot)
 
 	// Blank the identity variables the test process may itself have been
 	// launched with: the tmux server inherits this environment, so a value
@@ -460,6 +537,42 @@ func (f *integrationFixture) installStubs() {
 	f.t.Setenv("AGENTCTL_SESSION", "")
 	f.t.Setenv("AGENTCTL_ROLE", "")
 	f.t.Setenv("AGENTCTL_MANAGED", "")
+}
+
+func (f *integrationFixture) cleanupOwnedChildren() {
+	f.t.Helper()
+	payload, err := os.ReadFile(f.ownedChildPIDs)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		f.t.Errorf("read owned child PIDs: %v", err)
+		return
+	}
+	var pids []int
+	for _, line := range nonemptyLines(payload) {
+		var pid int
+		if _, err := fmt.Sscanf(line, "%d", &pid); err != nil || pid <= 0 {
+			f.t.Errorf("parse owned child PID %q: %v", line, err)
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	for _, pid := range pids {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			err := syscall.Kill(pid, 0)
+			if errors.Is(err, syscall.ESRCH) {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				f.t.Errorf("owned child PID %d survived fixture teardown and required SIGKILL", pid)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 }
 
 func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult {
