@@ -1249,7 +1249,9 @@ the write side.
 ## 7. Validation rules (consolidated)
 
 - Session names and flag/control role names: `^[a-z0-9][a-z0-9_-]*$`. Template role names carry the same pattern in
-  the embedded schema, which alone owns that file-local rule.
+  the embedded schema, which alone owns that file-local rule. Session and role names are each capped at **32 ASCII
+  bytes**; the regex makes characters one byte, so byte and character counts cannot diverge. The cap is enforced by
+  `internal/config` for every flag, environment, template-union, stored-record, and control-role input.
 - Model and effort identifiers: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (catalogue-free; charset-bound), implemented by one shared compiled expression. Effort rejection names the rejected value and the charset; a well-formed value is left for the selected harness to accept or reject (§3.2.1).
 - `--efforts` shares every structural rule with `--models`: optional, non-nil-but-empty is a usage error, entries are `ROLE:VALUE`, duplicate role entries and entries for undefined roles are rejected, and empty list entries name the raw list and the entry index.
 - Harnesses: `claude` | `codex` only.
@@ -1708,3 +1710,265 @@ Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2 
 `no-baseline` recovery in §6.8 (which refuses `dead` rather than folding it into `missing`, and refuses every other
 present-window state; a general `restart` command would be filed separately if demand appears). `status` deliberately does not read
 `@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model and effort charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
+
+## 15. Approved 0.5.0 per-agent shim contract
+
+This section supersedes the tmux-window identity and direct `send-keys` parts of §§1–14 at the atomic 0.5.0 cutover.
+Until that cutover, the earlier sections describe shipped behavior; §15.6's interim diagnostic ships ahead of it. The
+[options paper](2026-08-09-issue-182-identity-delivery-options.md) is rationale and evidence only. Option S is selected
+and no behavioral branch remains open. An empirical invalidation would require a new approved design delta before the
+paper's Option A fallback could replace this contract.
+
+### 15.1 Authority, architecture, and command surface
+
+The runtime plane is authoritative for role identity, liveness, status, and control. One resident agentctl shim owns
+one role, holds its kernel claim, runs the unchanged `amq coop exec ... HARNESS` argv on a nested PTY, and serves one
+versioned local socket. The socket protocol carries closed-registry operation names only. The server resolves the
+operation through `internal/control`; no request or decoder field can represent payload bytes, raw keys, slash
+commands, arguments, model values, environment values, or caller text. The shim is the sole writer to the harness
+PTY, serializing relayed operator input and registered control bytes at one point.
+
+tmux becomes optional presentation and fleet-launch plumbing. `launch` may create tmux windows whose command starts
+the shim, `attach` remains tmux-only, and tmux observations may enrich status, but no tmux session/window/pane name,
+option, layout, or process row establishes role identity or permits delivery. `agentctl run` starts one foreground
+role without tmux. The internal shim entrypoint is hidden from public help, `commandUsage`, the embedded skill, and
+agent-facing inventories. No migration or dual dialect is supported; PR 7 switches production paths atomically and
+protocol version skew fails closed.
+
+| Package | Approved responsibility |
+|---|---|
+| `internal/shim` | namespace roots; lifetime `flock`; advisory lockfile; durable role records; version-first codec; `LOCAL_PEERPID`; raw process observation; server/client boundary |
+| `internal/ptyx` | standard-library Darwin nested PTY, child launch, relay, resize/termios observation, readiness, serialized writes |
+| `internal/fleet` | tmux-backed shim launch or foreground composition, roster/config persistence, rollback, relaunch, kill |
+| `internal/status` | runtime-first enumeration and §15.6 precedence; tmux presentation is additive only |
+| `internal/control` | closed operation registry and shim client dispatch; no payload-bearing client API |
+| `internal/tmuxx` | optional presentation/create/attach/kill operations only; production payload delivery is removed |
+| `internal/target` | retained through compile-safe adapters, then removed in PR 7 according to §15.5 |
+
+`launch`, `relaunch`, `kill`, `status`, `clear`, and `compact` do not use tmux as identity or delivery evidence.
+`attach` requires an observed tmux presentation and otherwise uses §15.7's factual refusal.
+
+### 15.2 Namespace, declared roots, and length predicates
+
+For decimal uid `UID`, the production volatile root is `/tmp/agentctl-UID/v1`. Per-role artifacts are:
+
+```text
+/tmp/agentctl-UID/v1/<session>/<role>.lock
+/tmp/agentctl-UID/v1/<session>/<role>.sock
+```
+
+`UID` is treated at its worst case of 10 decimal bytes. With the §7 caps, the longest production socket pathname is
+`/tmp/agentctl-<10-digit-uid>/v1/<32-byte-session>/<32-byte-role>.sock`: **98 pathname bytes, 99 including NUL**, within
+Darwin `sun_path[104]`. The resolved socket path is still checked and refused before claim or role mutation when it is
+104 bytes or longer. `AGENTCTL_RUNTIME_ROOT` is a test/release-verification override, not a trust anchor; it must be
+absolute, at most 1024 bytes, and pass the same descriptor and ownership checks. The name caps are necessary but not
+sufficient for an override: the independent resolved-path check always runs.
+
+The production durable root is `os.UserConfigDir()/agentctl/state-v1`; `AGENTCTL_STATE_ROOT` is its declared
+test/release-verification override. `$HOME`, the `os.UserConfigDir()` result, and `AGENTCTL_STATE_ROOT` are equally
+declared inputs: each supplied path must be nonempty, absolute, at most 1024 bytes, and pass the same
+descriptor-verified private-directory checks. A missing, relative, over-cap, wrong-owner, symlink-substituted, or
+wrong-mode root refuses. Both overrides and `$HOME` are same-user-selectable residual surfaces, never authentication.
+
+Directories are created `0700` with an exclusive primitive and verified on the opened descriptor for type, owner, and
+mode. Socket, lock, and record files are `0600`. Predictable pre-creation of `/tmp/agentctl-UID` can deny service;
+agentctl refuses and never adopts or repairs an unsafe tree. This is a refusal-only denial surface.
+
+The durable role record is exactly:
+
+```text
+<resolved-state-root>/sessions/<session>/roles/<role>.json
+```
+
+It holds reservation/child/config facts and survives volatile-tree deletion and reboot. The uid-anchored lockfile body
+records the shim PID, nonce, fully resolved state root, and protocol metadata as advisory facts. A client first reads
+that root and compares it with its independently resolved root. A mismatch is `state-root-disagreement`; it never
+enumerates the alternate tree or reports `missing`.
+
+### 15.3 Ownership instant and complete failure/rollback rules
+
+Role ownership begins at exactly one instant: successful `flock(LOCK_EX)` on the role lockfile. The lock is held for
+the shim lifetime and is the only ownership arbiter. The file body and socket are advisory; bare socket bind and
+probe-connect/unlink/rebind reclaim are forbidden. POSIX record locks are forbidden because closing an unrelated
+descriptor can release them. Reclaim after death is lock acquisition, never socket probing.
+
+Startup order is fixed:
+
+1. Validate every name, root, descriptor, resolved path length, argv, and durable config before role mutation.
+2. Open safely and acquire `flock(LOCK_EX)` once. This is the ownership instant.
+3. Write the advisory lockfile body and atomically persist `child-starting` with shim PID and a fresh nonce before
+   child fork/start.
+4. Create the nested PTY and start the unchanged harness argv through the injected non-shell child boundary.
+5. After `os/exec.Start` reports success, observe child PID and raw `kinfo_proc.p_starttime` timeval and atomically
+   upgrade the durable record.
+6. Bind/listen while the claim remains held, start relay, and observe the PTY settle condition. No control is accepted.
+7. Publish ready only after listener, relay, durable child identity, and settle observation all exist.
+
+Failure before step 2 owns no role: remove only artifacts created by this invocation, signal no process, and report
+the observed input/tool fact. Failure after ownership but before a successful child start removes this invocation's
+socket and `child-starting`, releases the lock, and returns to absence because failed start proves no child started.
+Failure after successful child start closes readiness/listening, sends SIGHUP to the owned PTY/process group, waits a
+bounded teardown interval, then applies §15.4. Version-pinned SIGHUP evidence informs teardown but never proves
+absence.
+
+Only observed `ESRCH` permits deleting the durable child record or reporting absent/relaunchable. Matching live child,
+`EPERM`, token disagreement, token-reader failure, or another observation retains the record and reports the exact
+orphan/indeterminate/cleanup fact. If child start succeeded but PID/token upgrade failed, retain `child-starting`.
+Listener, readiness, relay, cancellation, and cleanup failures after child start follow the same rule. Fleet rollback
+removes only roles/sessions created by that invocation, in child-before-shim order; it never destroys a peer or calls
+an uncertain child absent.
+
+A dead shim plus `child-starting` has no timeout and never self-resolves. For manual recovery, read
+`<recorded-state-root>` from the lockfile body—not the current environment—and, only after independently verifying no
+child remains, manually remove:
+
+```text
+<recorded-state-root>/sessions/<session>/roles/<role>.json
+```
+
+No production path automatically removes that indeterminate record.
+
+### 15.4 Sole absence oracle and child identity
+
+`kill(pid, 0)` is the sole child presence/absence oracle:
+
+| Observation | Factual result | May report absent or relaunch? |
+|---|---|---|
+| `ESRCH` | child absent | yes; the only permitting result |
+| nil | child present; read raw start token next | no |
+| `EPERM` | child present-not-ours | no |
+| any other error | could-not-observe | no |
+
+After nil, read Darwin `kinfo_proc` through `sysctl(KERN_PROC_PID)` and compare raw `p_starttime` timevals. Equality is
+`present-match`; inequality is `present-token-disagreement`; a syscall failure, short result, or malformed result is
+`could-not-observe`. A token-reader error never substitutes for absence. Formatted `ps`, locale, timezone, child
+environment, and wall-clock conversion do not participate.
+
+### 15.5 Socket enforcement and target-chain disposition
+
+A client resolves the validated session/role path, reads the advisory lockfile, connects, and checks protocol version
+before parsing any other field. Darwin `LOCAL_PEERPID` supplies the kernel-observed answerer PID. It must equal the
+advisory shim PID; disagreement is `answerer-disagreement`, not a kernel-vs-kernel claim. Same-user unlink/rebind stays
+outside the threat model, while status reports the observable disagreement.
+
+For control, take one typed `ps -eo pid=,ppid=` snapshot through the Runner. Starting at the caller's PID, walk parent
+links looking for the `LOCAL_PEERPID` shim. A complete walk finding it is `observed-self-target`. Missing links,
+malformed rows, duplicate/looping ancestry, or process-inspection failure are `ancestry-undetermined`. Both refuse,
+separately. `TMUX_PANE`, `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, and `AGENTCTL_MANAGED` are never ancestry inputs.
+
+| Current `internal/target` check | 0.5.0 disposition |
+|---|---|
+| role charset | retained in `internal/config`, with 32-byte cap |
+| session managed/version tmux options | retired; runtime claim plus version-first protocol replace them |
+| exact role-window resolution and stored window role | retired; validated role namespace plus `flock` replace them |
+| exactly one live pane | moot for identity/delivery; tmux layout is optional presentation |
+| pane-root baseline equality | replaced by child PID, `kill(pid,0)`, and raw start-token observation |
+| `$TMUX_PANE` self-target guard | replaced by fail-closed snapshot ancestry from `LOCAL_PEERPID` |
+| tmux `DeliverPayload` | retired; operation name crosses the socket and shim writes registry bytes to its PTY |
+
+### 15.6 Status vocabulary, confidence, precedence, and interim diagnostic
+
+Status enumerates runtime claims first and durable records second, with or without tmux. A volatile lockfile anchors
+recorded state root and owner observations. Durable records enumerated without an anchor carry
+`"confidence":"unanchored"` on every row and derived absence; they never receive anchored confidence. Anchored rows
+carry `"confidence":"anchored"`. Tmux presentation is `present`, `gone`, or `unavailable` and never changes runtime
+identity.
+
+Within one role, first match wins:
+
+| Order | State | Observation |
+|---|---|---|
+| 1 | `invalid-record` | required volatile/durable data malformed |
+| 2 | `state-root-disagreement` | local root differs from lockfile-recorded root |
+| 3 | `protocol-skew` | answerer version absent/different, before other response parsing |
+| 4 | `answerer-disagreement` | advisory shim PID differs from `LOCAL_PEERPID`, or socket/claim topology conflicts |
+| 5 | `cleanup-failed` | prior owned cleanup durably recorded incomplete |
+| 6 | `concurrent-contender` | claim/record observations identify competing owner decision |
+| 7 | `starting` | live claimed shim plus `child-starting`, or child recorded but not ready |
+| 8 | `indeterminate-child-starting` | dead shim plus `child-starting` |
+| 9 | `running` | live shim, matching child/answerer, ready protocol |
+| 10 | `orphan` | dead shim and child `present-match` |
+| 11 | `present-token-disagreement` | PID present but raw token differs |
+| 12 | `present-not-ours` | `kill(pid,0)` returned `EPERM` |
+| 13 | `could-not-observe` | other presence error or token observation failed after nil |
+| 14 | `stale-record` | durable child record and observed `ESRCH` |
+| 15 | `missing` | no role record at the applicable confidence |
+
+`tmux-presentation-gone` renders as presentation `gone` beside runtime state, never role absence. Only
+`stale-record`/`missing` backed by ESRCH or actual record absence can enter relaunch; disagreements and uncertainty
+refuse.
+
+Before cutover, the tmux collector emits one optional objective report field/table line. Trigger only when every
+roster role is `missing`, exactly one window has empty `@agentctl_role`, and that window has exactly N panes where N is
+roster size. Below, above, multiple role-less windows, or any matched role window suppress it. Exact human text:
+
+```text
+note: all N roster roles are missing; unmanaged window "W" has N panes
+```
+
+JSON carries the same optional `"note"`. This names no cause: a role-less roster-sized window is not proof that panes
+were joined or that it contains the missing harnesses.
+
+### 15.7 Command outcomes and attach limitation
+
+`launch` persists roster/config before absence can be reported, starts shims in roster order, and waits for readiness.
+Tmux launch uses the single §12.1 shell site to start the hidden shim; foreground `run` invokes typed argv directly.
+`relaunch` requires §15.4 absence permission and never starts beside orphan, indeterminate, disagreement, or
+could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
+cleanup remains reported.
+
+Control sends only the operation name after version, answerer, ancestry, child identity, and readiness pass. The shim
+reports only accepted request, bytes written, submit observed, cancellation residue, child exit, and cleanup facts.
+It never reports harness execution from a PTY write. `attach` requires tmux presentation; without one:
+
+```text
+agentctl: refusing to attach session "S"; no tmux presentation was observed; status and control remain available without tmux
+```
+
+### 15.8 Shim-plane exit map
+
+| Typed outcome | Exit | Required factual message |
+|---|---:|---|
+| completed lifecycle/status or accepted delivery write | 0 | only operation/bytes/state observed |
+| unclassified internal failure | 1 | no borrowed meaning |
+| invalid name/root/flag/request | 2 | input and rule; no role mutation |
+| missing fleet/session, protocol skew, no-tmux attach | 3 | missing/observed version/presentation |
+| role outside roster or absent where present required | 4 | role and observed records |
+| `observed-self-target` | 5 | `refusing to OP ROLE; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
+| orphan, indeterminate, unsettled, answerer/root/token disagreement, present-not-ours | 5 | exact state; never `missing` |
+| `ancestry-undetermined` | 6 | `refusing to OP ROLE; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
+| external process/protocol observation failed | 6 | operation and cause |
+| required executable absent | 7 | executable; no role mutation |
+| owned rollback/cleanup attempted after failure | 8 | removed, remaining, launch cause, cleanup cause |
+| ownership retained but readiness unestablished | 9 | retained role and refusal/remedy state |
+
+Observed self-target and ancestry-undetermined deliberately have different codes/messages: one observed ancestry; the
+other did not determine it. Delivery cancellation after bytes but before submit is exit 5 and states residue, never
+success.
+
+### 15.9 External calls and dependency boundary
+
+Production invokes no shell beyond the existing tmux window-command site. Canonical future boundaries are optional
+tmux presentation/create/attach/kill argv through `internal/tmuxx.Runner`; one ancestry snapshot
+`ps -eo pid=,ppid=` through that Runner; PTY child start through a narrow interface receiving only harness/AMQ argv;
+and Darwin syscalls for `flock`, `LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` tokens.
+
+`golang.org/x/sys/unix` is approved only for PR 2's lock/socket/process syscalls. It is compiled into the binary,
+reviewed/pinned, scanned by existing gates, and licensed in archives when the first importer lands. PR 1 adds no
+dependency, module, license, or archive change before that importer. PR 3's PTY lane is standard-library-only.
+
+### 15.10 Evidence, tests, and numbered security trace
+
+The [SIGHUP evidence](../../security/2026-08-10-issue-182-shim-probe-evidence.md) records Claude Code 2.1.226 and
+codex-cli 0.147.0 as direct children of owned nested-PTY fixtures; both children terminated after SIGHUP targeted only
+their fixture parent. Orphan handling remains mandatory. The complete
+[incident replay](../../security/2026-08-10-issue-182-replay-evidence.md), SHA-256
+`d9c14f10df03ec7e7de36adcdd9225b26946c64b9d7f26ec50777b41182f7a01`, was verified byte-for-byte against build2's
+full report. Fake tests own exact syscall/argv ordering and failures; live tests own PTY/kernel/socket/layout/harness
+behavior and use throwaway resources only.
+
+This section traces the implementation plan's ten-row security matrix: (1) §15.3 claim; (2) §15.5 answerer
+disagreement; (3) §15.2 roots/caps; (4) §§15.1/15.7 operation names; (5) §15.5 enforcement/retirement; (6)
+§§15.3–15.6 orphan/absence/manual remedy; (7) §§15.3/15.7 readiness; (8) §§15.3/15.8 ownership/exits; (9) §15.7
+factual delivery; (10) §§15.5/15.8 version-first refusal. Every implementation PR cites applicable rows; none may
+reopen semantics without an approved design delta.
