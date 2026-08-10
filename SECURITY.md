@@ -154,8 +154,10 @@ Existing shipped claims are amended only at the listed cutover PR; until then th
     length header, a 4096-byte maximum JSON payload, a two-second per-frame I/O deadline,
     server-hello/request/response order, and a version-only token pre-pass before schema or operation interpretation
     in both directions. A mismatched, malformed, duplicate, or absent version refuses with the exact §15.8 fact. No
-    migration or dual-dialect support is owed across the tmux-metadata → shim transition; the gate exists for skew,
-    not coexistence.
+    diagnostic swaps the source: the current client names the connected shim hello version, while the current shim
+    names the client request version without interpreting its operation/session/role. Frame-read and frame-write
+    failures likewise use distinct literals and closed cause sets. No migration or dual-dialect support is owed across
+    the tmux-metadata → shim transition; the gate exists for skew, not coexistence.
 
 ## Reporting a vulnerability
 

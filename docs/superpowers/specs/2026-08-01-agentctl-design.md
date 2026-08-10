@@ -1885,7 +1885,7 @@ before parsing any other field. The protocol constants are:
 
 Each frame is a four-byte unsigned big-endian payload length followed by exactly that many UTF-8 JSON bytes. Lengths
 from 1 through 4096 are accepted; zero, a value above 4096, EOF in either header or payload, invalid UTF-8, trailing
-bytes inside a single JSON value, and a non-object top level are `protocol-frame-invalid`. A connection carries,
+bytes inside a single JSON value, and a non-object top level are `protocol-frame-read-invalid`. A connection carries,
 in order, exactly one server hello, one client request, and one server response, then the server closes it. The hello
 payload encoded by version 1 is exactly `{"version":1}`. The request schema contains only `version`, `session`,
 `role`, and `operation`; `operation` is one closed registry name. The response schema contains only `version`,
@@ -1907,8 +1907,10 @@ the decimal integer. Only an exact integer `1` permits a second strict pass, whi
 missing required fields, an unknown operation, or the wrong JSON type. Thus a foreign-version frame with otherwise
 unknown fields always reports skew; it is never partially interpreted. The server hello lets a current client reject
 a foreign shim before sending a request, and the request's version lets a current shim reject a foreign client before
-reading its session, role, or operation. There is no negotiation, downgrade, migration dialect, newline framing, or
-best-effort decode.
+reading its session, role, or operation. A client-side skew diagnostic therefore names the `connected shim hello`
+version and may use the client's already validated operation/session/role. A shim-side skew diagnostic names the
+`client request` version and cannot name operation/session/role because those fields were not interpreted. There is no
+negotiation, downgrade, migration dialect, newline framing, or best-effort decode.
 
 After the current client accepts the hello, Darwin `LOCAL_PEERPID` supplies the kernel-observed answerer PID. It must
 equal the advisory shim PID; disagreement is `answerer-disagreement`, not a kernel-vs-kernel claim. Same-user
@@ -2016,8 +2018,10 @@ sole successful status output and therefore add no diagnostic line.
 | `invalid-request` | 2 | `agentctl: invalid shim request for session SESSION role ROLE: RULE; no role was mutated` |
 | `session-missing` | 3 | `agentctl: session SESSION was not found` |
 | `fleet-config-missing` | 3 | `agentctl: session SESSION has no durable fleet configuration` |
-| `protocol-skew-absent` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; shim protocol version was absent; expected 1 (protocol-skew)` |
-| `protocol-skew-observed` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; shim protocol version was OBSERVED; expected 1 (protocol-skew)` |
+| `protocol-skew-shim-absent` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was absent; expected 1 (protocol-skew)` |
+| `protocol-skew-shim-observed` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was OBSERVED; expected 1 (protocol-skew)` |
+| `protocol-skew-client-absent` | 3 | `agentctl: refusing client request; client request protocol version was absent; expected 1 (protocol-skew)` |
+| `protocol-skew-client-observed` | 3 | `agentctl: refusing client request; client request protocol version was OBSERVED; expected 1 (protocol-skew)` |
 | `attach-no-presentation` | 3 | `agentctl: refusing to attach session SESSION; no tmux presentation was observed; status and control remain available without tmux` |
 | `role-outside-roster` | 4 | `agentctl: role ROLE is not in the durable roster for session SESSION` |
 | `role-missing-when-required` | 4 | `agentctl: role ROLE in session SESSION has no live claim or durable role record (missing)` |
@@ -2039,7 +2043,10 @@ sole successful status output and therefore add no diagnostic line.
 | `ancestry-undetermined` | 6 | `agentctl: refusing to OP role ROLE in session SESSION; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
 | `presence-observation-failed` | 6 | `agentctl: could not observe child PID CHILD for role ROLE in session SESSION: kill(CHILD, 0) returned CAUSE (could-not-observe)` |
 | `token-observation-failed` | 6 | `agentctl: could not observe the start token for child PID CHILD in session SESSION role ROLE: CAUSE (could-not-observe)` |
-| `protocol-frame-invalid` | 6 | `agentctl: could not read shim protocol for role ROLE in session SESSION: CAUSE (protocol-frame-invalid)` |
+| `protocol-read-from-shim-invalid` | 6 | `agentctl: could not read protocol frame from connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-read-invalid)` |
+| `protocol-read-from-client-invalid` | 6 | `agentctl: could not read protocol frame from connected client: CAUSE (protocol-frame-read-invalid)` |
+| `protocol-write-to-shim-failed` | 6 | `agentctl: could not write protocol request to connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-write-failed)` |
+| `protocol-write-to-client-failed` | 6 | `agentctl: could not write protocol frame to connected client: CAUSE (protocol-frame-write-failed)` |
 | `protocol-schema-invalid` | 6 | `agentctl: could not interpret version-1 shim protocol for role ROLE in session SESSION: CAUSE (protocol-schema-invalid)` |
 | `required-executable-missing` | 7 | `agentctl: required executable EXECUTABLE was not found; no role was mutated` |
 | `readiness-timeout-cleaned` | 8 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; cleanup observed child absence and removed every artifact owned by this invocation (readiness-timeout)` |
@@ -2050,18 +2057,22 @@ sole successful status output and therefore add no diagnostic line.
 | `readiness-timeout-retained` | 9 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; child PID CHILD was not observed absent, so ownership and the durable record were retained (readiness-timeout)` |
 | `ownership-retained` | 9 | `agentctl: role ROLE in session SESSION failed after child PID CHILD started: CAUSE; cleanup observation was OBSERVATION, so ownership and the durable record were retained (ownership-retained)` |
 
-`protocol-skew-observed` substitutes `OBSERVED` with `duplicate`, the `%q` raw JSON token for a non-integer, or the
-decimal foreign integer according to §15.5. `RECORD_PATH` is always the lockfile body's recorded root joined with the
-fixed durable template, never a path recomputed from the reader's environment. `REMAINING` is a comma-separated list
-in the fixed order `child, socket, record, lock`; omitted artifacts are not named. `OBSERVATION` is exactly one of
-`present-match`, `present-token-disagreement`, `present-not-ours`, or `could-not-observe`; it is never `missing` unless
-`kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup row applies. Observed self-target and
-ancestry-undetermined deliberately remain different facts, codes, and literals.
+`protocol-skew-shim-observed` and `protocol-skew-client-observed` substitute `OBSERVED` with `duplicate`, the `%q`
+raw JSON token for a non-integer, or the decimal foreign integer according to §15.5. `RECORD_PATH` is always the
+lockfile body's recorded root joined with the fixed durable template, never a path recomputed from the reader's
+environment. `REMAINING` is a comma-separated list in the fixed order `child, socket, record, lock`; omitted artifacts
+are not named. `OBSERVATION` is exactly one of `present-match`, `present-token-disagreement`, `present-not-ours`, or
+`could-not-observe`; it is never `missing` unless `kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup
+row applies. Observed self-target and ancestry-undetermined deliberately remain different facts, codes, and literals.
 
-For `protocol-frame-invalid`, `CAUSE` is exactly one of `zero payload length`, `payload length N exceeds 4096`,
-`EOF after N of 4 header bytes`, `EOF after N of LENGTH payload bytes`, `frame read exceeded 2s after N of LENGTH
-bytes`, `frame write exceeded 2s after N of LENGTH bytes`, `payload is not valid UTF-8`,
-`payload has trailing bytes after its JSON value`, `payload top level is not an object`, or the `%q` JSON syntax error.
+For `protocol-read-from-shim-invalid` and `protocol-read-from-client-invalid`, `CAUSE` is exactly one of
+`zero payload length`, `payload length N exceeds 4096`, `EOF after N of 4 header bytes`, `EOF after N of LENGTH payload
+bytes`, `frame read exceeded 2s during header after N of 4 bytes`, `frame read exceeded 2s during payload after N of
+LENGTH bytes`, `frame read failed during header after N of 4 bytes: ERROR`, `frame read failed during payload after N
+of LENGTH bytes: ERROR`, `payload is not valid UTF-8`, `payload has trailing bytes after its JSON value`, `payload top
+level is not an object`, or the `%q` JSON syntax error. For `protocol-write-to-shim-failed` and
+`protocol-write-to-client-failed`, `CAUSE` is exactly `frame write exceeded 2s after N of TOTAL bytes` or
+`frame write failed after N of TOTAL bytes: ERROR`, where `TOTAL` is the four-byte header plus payload length.
 For `protocol-schema-invalid`, `CAUSE` is exactly `duplicate field FIELD`, `unknown field FIELD`,
 `missing required field FIELD`, `field FIELD has JSON type TYPE; expected EXPECTED_TYPE`, `operation OPERATION is not
 registered`, or `response field FIELD is not valid for outcome OUTCOME`.
@@ -2108,6 +2119,9 @@ continue Option S after `FAIL`, or improvise a third design.
 
 Release verification owns the deterministic second-binary fixture at `hack/fixtures/shim-version/main.go`. It builds
 that source separately from the current binary and records both artifact versions and SHA-256 hashes. The mandatory
-matrix is current client → foreign shim, foreign client → current shim, absent-version peer → current counterpart,
-and current/matching controls in both directions. Every foreign or absent leg must fail at the version pre-pass before
-schema/operation interpretation; each matching control must pass framing and proceed to its next typed gate.
+matrix names each direction separately: current client reads a foreign-version shim hello; foreign-version client
+sends a request to the current shim; current client reads an absent-version shim hello; absent-version client sends a
+request to the current shim; and current client/current shim matching controls exercise both hello and request. Every
+foreign or absent leg must fail at the version pre-pass before schema/operation interpretation and record whether the
+observed value came from the `connected shim hello` or `client request`. Each matching control must pass framing and
+proceed to its next typed gate.
