@@ -6,7 +6,7 @@
 
 **Architecture:** Each role is owned by a resident shim that holds a kernel-arbitrated role claim, runs the unchanged harness command on a nested PTY, and serves a versioned local control socket. Runtime observations become authoritative for role identity, liveness, and control; tmux remains an optional presentation and fleet-launch mechanism, never an identity or delivery dependency. The CLI sends only closed-registry operation names, and the shim is the sole writer to the harness PTY.
 
-**Tech Stack:** Go 1.26, Go standard library plus a reviewed `golang.org/x/sys/unix` dependency for Darwin PTY and lock syscalls, AF_UNIX sockets, fake `tmuxx.Runner` and shim-boundary fakes, throwaway tmux sockets, stub harnesses, and version-pinned live harness probes.
+**Tech Stack:** Go 1.26, Go's standard-library Darwin PTY surface, a reviewed `golang.org/x/sys/unix` dependency scoped to PR 2's lock/socket/process syscalls, AF_UNIX sockets, fake `tmuxx.Runner` and shim-boundary fakes, throwaway tmux sockets, stub harnesses, and version-pinned live harness probes.
 
 ## Global Constraints
 
@@ -36,15 +36,26 @@ The planner arbitrated both review reports in `/Users/rob/git/agentctl/.worktree
 7. **Compile-safe cutover.** PRs 5 and 6 add shim-backed implementations beside the current production paths and keep compatibility adapters compiling. PR 7 alone rewires `cmd/agentctl`, removes `internal/target` and tmux delivery, and performs the flag-day transition atomically. PR 5 owns the shared integration fixture before PR 6 consumes it. No PR 5/PR 6 parallel edge remains.
 8. **Fallback and live skew evidence.** After PRs 2 and 3, an explicit Option S viability gate tests the Darwin claim/socket and PTY/readiness contracts. Any failure that cannot be fixed inside the approved surface stops PR 4 and returns the planner to pane-scoped Option A in paper §3. The release verifier builds a deterministic foreign-version socket peer that exercises both mismatch directions against the real current binary.
 
+## Binding Planner Decisions — R9–R13
+
+The round-two rulings in `/Users/rob/git/agentctl/.worktrees/issue-182-planner-rulings-round2.md` supplement R1–R8 without reopening them.
+
+9. **Raw PID-reuse token and mismatch refusal.** Read a process start token from Darwin `kinfo_proc` through `sysctl(KERN_PROC_PID)` and use the raw `p_starttime` timeval; no formatted `ps`, locale, timezone, or child environment participates. A present PID whose token differs from the durable record is an observed disagreement and refuses relaunch; it is never absence evidence.
+10. **State-root disagreement.** Keep the durable production root at `os.UserConfigDir()/agentctl/state-v1`, but record its fully resolved absolute path in the uid-anchored volatile lockfile body. A CLI that resolves a different root reports `state-root-disagreement` instead of `missing`. `$HOME`/`os.UserConfigDir()` and `AGENTCTL_STATE_ROOT` are equally declared, capped, validated, same-user-selectable surfaces in the spec and SECURITY.md.
+11. **Stdlib PTY lane with recorded fallback.** PR 3 begins by rerunning the complete options-paper stdlib PTY prototype and records fresh evidence in its own PR. The accepted parallel lane imports no `x/sys` and edits no module/license/archive file. If the prototype fails, PR 3 stops before implementation; the planner records removal of the parallel edge and serializes PR 3 behind PR 2 before any dependency-scope amendment. No third path is improvised.
+12. **Hidden routing before first use.** PR 4 adds compatibility-safe hidden-command dispatch in `cmd/agentctl/main.go` and its dispatch tests. The internal shim command remains absent from `commandUsage`, help, and agent-facing inventories, and no user-facing lifecycle command cuts over before PR 7.
+13. **Honest residuals and remedies.** SECURITY.md names predictable `/tmp/agentctl-<uid>` pre-creation as a refusal-only denial surface. The §9 contract assigns different typed outcomes, messages, and exit codes to observed self-target and ancestry-undetermined refusal. A dead-shim `child-starting` record never self-resolves: recovery requires documented manual operator action on the exact durable role-record path after independent child-absence verification.
+
 ## Pull Request and Dependency Graph
 
 Each PR gets its own focused signed commits, reviewer gate, and fresh pull-request CI. PR numbers below are sequencing labels, not GitHub numbers.
 
 | PR | Scope | Depends on | Parallel lane |
 |---|---|---|---|
-| PR 1 | Probes, tracked replay-evidence consumption, superseding spec/security amendments, and interim measures | Planner rulings R1–R8 published into issue #182 | Builder 1; Builder 2 reviews probe/spec evidence |
-| PR 2 | Runtime namespace, role claim, durable record, and protocol codec | PR 1 | Builder 1, parallel with PR 3 |
-| PR 3 | Nested PTY, child lifecycle, relay, resize, and terminal-state observation | PR 1 | Builder 2, parallel with PR 2 |
+| PR 1 | Probes, tracked replay-evidence consumption, superseding spec/security amendments, and interim measures | Planner rulings R1–R13 published into issue #182 | Builder 1; Builder 2 reviews probe/spec evidence |
+| PR 2 | Runtime namespace, role claim, durable record, and protocol codec | PR 1 | Builder 1, parallel with PR 3 only after Gate P passes |
+| Gate P | Fresh full stdlib PTY prototype and dependency decision recorded in PR 3 | PR 1 | Pass keeps PR 2/PR 3 parallel; failure stops PR 3 and makes PR 2 its predecessor |
+| PR 3 | Nested PTY, child lifecycle, relay, resize, and terminal-state observation | PR 1 + Gate P pass; or PR 2 after a recorded Gate P failure | Builder 2, parallel with PR 2 only on the passing stdlib branch |
 | Gate S | Option S viability decision; choose continued shim work or the paper-§3 pane fallback | PR 2 + PR 3 | Planner decision with both builders' empirical evidence |
 | PR 4 | Resident shim server, hidden shim entrypoint, readiness, and closed operation delivery | Gate S continues Option S | integration point; one builder implements, the other adversarially reviews |
 | PR 5 | Shim-backed fleet/kill implementations plus the shared integration fixture, kept behind compiling compatibility seams | PR 4 | Builder 1; serial predecessor of PR 6 |
@@ -55,9 +66,9 @@ Each PR gets its own focused signed commits, reviewer gate, and fresh pull-reque
 Dependency edges:
 
 ```text
-R1–R8 in issue #182 ──> PR 1 ──┬──> PR 2 ──┐
-                               └──> PR 3 ──┴──> Gate S ──> PR 4 ──> PR 5 ──> PR 6 ──> PR 7 ──> PR 8
-                                                  └──────> Option A decision when Option S is invalidated
+R1–R13 in issue #182 ──> PR 1 ──┬──────────────> PR 2 ──────────────┐
+                                └──> Gate P pass ──> PR 3 ─────────┼──> Gate S ──> PR 4 ──> PR 5 ──> PR 6 ──> PR 7 ──> PR 8
+                                      Gate P fail ──> PR 2 ──> PR 3┘       └──────> Option A decision when Option S is invalidated
 ```
 
 ## Spec Amendments That Supersede the Options Paper
@@ -67,19 +78,19 @@ PR 1 carries every semantic design delta below and lands before shim code. Later
 | Approved-design area | Amendment | Carrying PR |
 |---|---|---|
 | §§1 and 5 | Make the shim/runtime plane authoritative; define the new package boundaries and tmux as optional presentation rather than identity/delivery | PR 1 |
-| §§3 and 10 | Record version-pinned SIGHUP, PTY, `flock`, advisory-record, `LOCAL_PEERPID`, socket-path, readiness, ancestry, and tracked incident-replay evidence plus the fake/live test boundaries | PR 1; evidence refinements in PRs 2–4 and 8 |
-| §4 | Add the planner-approved foreground no-tmux surface, keep the internal shim entrypoint non-agent-facing, and pin which commands require or merely enrich from tmux | PR 1; exact help fixtures in PR 7 |
+| §§3 and 10 | Record version-pinned SIGHUP, fresh full stdlib PTY prototype, `flock`, advisory-record, `LOCAL_PEERPID`, raw `kinfo_proc` start-token, socket-path, readiness, ancestry, and tracked incident-replay evidence plus the fake/live test boundaries | PR 1; evidence refinements in PRs 2–4 and 8 |
+| §4 | Add the planner-approved foreground no-tmux surface, keep the internal shim entrypoint non-agent-facing, and pin which commands require or merely enrich from tmux | PR 1; hidden-dispatch fixtures in PR 4; exact public help fixtures in PR 7 |
 | §§6.1 and 6.6 | Replace direct-harness window startup with shim startup; name lock acquisition as the role-ownership instant; specify every pre/post-ownership failure, child cleanup, orphan retention, and rollback boundary | PR 1; exact creation/cleanup output fixtures in PRs 4–5 |
 | §§6.2 and 13.6 | Replace pane resolution and `tmux send-keys` with version-first socket resolution, advisory lockfile-record/kernel-answerer comparison, fail-closed snapshot ancestry guard, readiness gate, and operation-name delivery | PR 1; exact protocol and process argv in PRs 2, 4, 6, and 7 |
-| §§6.3–6.4 | Define runtime-driven session/role enumeration, the complete state vocabulary and precedence, presentation-only tmux observations, interim aggregate note, and tmux-only attach behavior | PR 1; exact table/JSON/help fixtures in PRs 6–7 |
-| §§6.5 and 6.8 | Separate volatile claim/socket artifacts from durable reservation/child/config records; specify `child-starting`, orphan-safe relaunch, PID-reuse-token comparison, and presentation-only tmux metadata | PR 1; exact lifecycle fixtures in PRs 2, 4, and 5 |
-| §7 and §12 | Pin the short production runtime base, durable state base, named root overrides, runtime socket-length refusal, and derived session/role caps; preserve validation-before-side-effects, quoting, and informational-environment rules | PR 1; exact validation and window-command tests in PRs 2 and 5 |
-| §8 | Replace pane-root executable equality with shim/child parentage, pre-fork reservation, durable child identity, foreign-process start-token observation, orphan detection, PID-reuse-safe refusal, and snapshot ancestry inspection | PR 1; empirical/argv details in PRs 2–4 and 6 |
-| §9 | Assign exit codes to version refusal, unsafe/forged topology, unsettled role, orphan refusal, partial cleanup, no-tmux attach, and observed delivery outcomes without borrowing old tmux meanings | PR 1; exact command mappings in PRs 5–7 |
+| §§6.3–6.4 | Define runtime-driven session/role enumeration, the complete state vocabulary and precedence including state-root/token disagreements, presentation-only tmux observations, interim aggregate note, and tmux-only attach behavior | PR 1; exact table/JSON/help fixtures in PRs 6–7 |
+| §§6.5 and 6.8 | Separate volatile claim/socket artifacts from durable reservation/child/config records; store the resolved durable root in the lockfile body; specify `child-starting`, manual-only indeterminate recovery, orphan-safe relaunch, raw PID-reuse-token comparison, and presentation-only tmux metadata | PR 1; exact lifecycle fixtures in PRs 2, 4, and 5 |
+| §7 and §12 | Pin the short production runtime base, durable state base, `$HOME`/`os.UserConfigDir()` plus named root overrides as declared surfaces, runtime socket-length refusal, and derived session/role caps; preserve validation-before-side-effects, quoting, and informational-environment rules | PR 1; exact validation and window-command tests in PRs 2 and 5 |
+| §8 | Replace pane-root executable equality with shim/child parentage, pre-fork reservation, durable child identity, raw foreign-process start-token observation, disagreement refusal, orphan detection, and snapshot ancestry inspection | PR 1; empirical/argv details in PRs 2–4 and 6 |
+| §9 | Assign distinct outcomes/messages/exit codes to observed self-target and ancestry-undetermined refusal, plus version refusal, forged topology, root/token disagreement, unsettled role, orphan/indeterminate refusal, partial cleanup, no-tmux attach, and observed delivery outcomes without borrowing old tmux meanings | PR 1; exact command mappings in PRs 5–7 |
 | §13 | Split canonical external calls into optional tmux-presentation operations, process ancestry/identity operations, and the non-shell PTY child boundary; retire the production send-keys row | PR 1; exact tables alongside implementations in PRs 2–6 |
 | §14 | Keep terminal layout repair, terminal emulation, multi-user hardening, same-user socket/lock tampering, and harness-native control planes out of scope | PR 1 |
 
-PR 1 updates `SECURITY.md` from unresolved design-phase constraints to ratified implementation invariants, rewords constraint 2 as an advisory-record/kernel-answerer comparison with reviewer provenance, names the socket-forgery, root-override, ancestry-failure, and PID-observation residuals, records the future `internal/target` disposition, and describes the planned `golang.org/x/sys` supply-chain impact without adding the module early. Each later behavior PR changes shipped-behavior claims in the same PR as the corresponding production cutover.
+PR 1 updates `SECURITY.md` from unresolved design-phase constraints to ratified implementation invariants, rewords constraint 2 as an advisory-record/kernel-answerer comparison with reviewer provenance, names the socket-forgery, `$HOME`/state-root override, predictable-`/tmp` pre-creation denial, ancestry-failure, and PID-observation residuals, records the future `internal/target` disposition, and describes the planned `golang.org/x/sys` supply-chain impact without adding the module early. Each later behavior PR changes shipped-behavior claims in the same PR as the corresponding production cutover.
 
 ## Existing SECURITY.md Claims Amended by Option S
 
@@ -99,10 +110,10 @@ Reviewers check this table in every implementation PR and reject any row whose c
 |---|---|
 | 1. Kernel-arbitrated role claim | Task 2 claim acquisition/reclaim tests; Task 4 lifetime ownership; Task 5 concurrent launch/relaunch integration |
 | 2. Socket forgery detection | Task 1 honest constraint rewording; Task 2 advisory lockfile body plus `LOCAL_PEERPID`; Task 6 status disagreement state/rendering; Task 8 live adversarial replay |
-| 3. Runtime-directory discipline | Task 1 roots/override/cap contract; Task 2 descriptor-verified volatile and durable homes plus runtime length refusal; Task 8 release fixture audit |
+| 3. Runtime-directory discipline | Task 1 roots/`$HOME`/override/cap contract and predictable-`/tmp` denial residual; Task 2 descriptor-verified volatile and durable homes, anchored root-disagreement detection, plus runtime length refusal; Task 8 release fixture audit |
 | 4. Operation names only | Task 2 protocol decoder; Task 4 server-to-registry dispatch and sole PTY writer; Task 6 client/structural tests |
 | 5. Shim enforcement and target-chain disposition | Task 1 approved snapshot-ancestry decision and check inventory; Task 4 enforcement; Task 6 compatibility implementation; Task 7 atomic retirement/move/moot audit |
-| 6. Never report absent while child may live | Task 1 SIGHUP evidence and orphan contract; Task 2 durable state and foreign start-token reader; Task 3 child observation; Task 4 reservation/upgrade ordering; Tasks 5–7 relaunch/status behavior; Task 8 crash replay |
+| 6. Never report absent while child may live | Task 1 SIGHUP evidence and orphan/disagreement/manual-remedy contract; Task 2 durable state plus raw `kinfo_proc` token and state-root anchoring; Task 3 child observation; Task 4 reservation/upgrade ordering; Tasks 5–7 relaunch/status behavior; Task 8 crash/re-root replay |
 | 7. Prove a clean channel before delivery | Task 3 terminal-state observation; Task 4 readiness gate; Task 6 pre-ready refusal; Task 8 live early-delivery replay |
 | 8. Specify ownership and exit codes first | Task 1 approved §§6.6/9 amendments; Tasks 4–7 implement only those outcomes |
 | 9. Keep delivery claims factual | Task 4 write/observation response; Task 6 CLI wording and cancellation tests; Task 8 live verification |
@@ -138,8 +149,11 @@ Reviewers check this table in every implementation PR and reject any row whose c
 - Consumes: build2's live incident-replay report as evidence before making any recovery claim.
 
 **Acceptance criteria:**
-- Issue #182 contains an `AMENDED 2026-08-10` section publishing binding rulings R1–R8 before this PR is implemented; the spec contains no unresolved behavioral branch.
+- Issue #182 contains an `AMENDED 2026-08-10` section publishing binding rulings R1–R13 before this PR is implemented; the spec contains no unresolved behavioral branch.
 - The spec names one ownership instant, complete failure/rollback behavior, complete state precedence, and a §9-discipline exit map before any shim implementation lands.
+- The §9 exit map distinguishes an observed self-target from an ancestry check that could not determine the relationship, assigning each its own typed outcome, truthful message, and exit code.
+- The spec names `$HOME`/`os.UserConfigDir()` as a declared state-root input with the same validation and residual treatment as `AGENTCTL_STATE_ROOT`, requires lockfile-anchored state-root disagreement reporting, and documents predictable `/tmp/agentctl-<uid>` pre-creation as a refusal-only denial surface.
+- The exact durable record template is `<resolved-state-root>/sessions/<session>/roles/<role>.json`; dead-shim `child-starting` can be cleared only by a documented manual action on that path after the operator independently verifies child absence.
 - The SIGHUP probe covers each pinned harness in an isolated nested PTY, records child/shim PIDs and observed termination, and never targets a default tmux server or existing agent.
 - The spec describes the intended narrow `x/sys/unix` surface and supply-chain boundary, but this PR does not add the dependency before a production importer exists.
 - Every §5 interim measure ships: aggregate observation note, join-pane warning, verified per-role recovery guidance, and grouped-session viewing guidance.
@@ -149,7 +163,7 @@ Reviewers check this table in every implementation PR and reject any row whose c
 
 - [ ] **Step 1: Verify and consume the published planner rulings**
 
-  Require the planner to publish R1–R8 in issue #182 as an `AMENDED 2026-08-10` contract predecessor. Verify the issue body contains the binding text, then implement that text without reopening a resolved branch in plan prose.
+  Require the planner to publish R1–R13 in issue #182 as an `AMENDED 2026-08-10` contract predecessor. Verify the issue body contains the binding text, then implement that text without reopening a resolved branch in plan prose.
 
 - [ ] **Step 2: Write failing cap and interim-status tests**
 
@@ -203,23 +217,24 @@ Reviewers check this table in every implementation PR and reject any row whose c
 
 **Interfaces:**
 - Produces: `shim.Namespace`, `shim.RolePath`, `shim.Claim`, `shim.Record`, `shim.Request`, `shim.Response`, and version-first encode/decode helpers.
-- Produces: a held `flock` role claim, advisory lockfile identity, a `LOCAL_PEERPID` query for the connected socket answerer, and a foreign-process start-token reader.
+- Produces: a held `flock` role claim, advisory lockfile identity including the shim's resolved durable-state root, a `LOCAL_PEERPID` query for the connected socket answerer, and a raw `kinfo_proc` foreign-process start-token reader.
 - Consumes: Task 1's exact caps, runtime template, state vocabulary, protocol version, and ownership rules.
 
 **Acceptance criteria:**
-- Volatile runtime and durable state creation are separately descriptor-verified and private. The production socket/lock base is `/tmp/agentctl-<decimal-uid>/v1`; the child/config base is `os.UserConfigDir()/agentctl/state-v1` and survives runtime-tree deletion and reboot boundaries.
-- `AGENTCTL_RUNTIME_ROOT` and `AGENTCTL_STATE_ROOT` are named, capped, absolute test/release overrides. They receive the same descriptor checks and are documented as same-user-controlled residuals, not trust anchors.
+- Volatile runtime and durable state creation are separately descriptor-verified and private. The production socket/lock base is `/tmp/agentctl-<decimal-uid>/v1`; the child/config base is `os.UserConfigDir()/agentctl/state-v1` and survives runtime-tree deletion and reboot boundaries. The durable role record uses `<resolved-state-root>/sessions/<session>/roles/<role>.json`.
+- `AGENTCTL_RUNTIME_ROOT`, `AGENTCTL_STATE_ROOT`, and the `$HOME` input consumed by `os.UserConfigDir()` are declared, capped, absolute surfaces. They receive the approved descriptor/path checks and are documented as same-user-controlled residuals, not trust anchors. A missing, relative, over-cap, or unsafe resolved root refuses.
 - The fully resolved socket path is rejected before claim or mutation when it exceeds Darwin's 104-byte `sun_path` capacity; name caps are derived from the approved worst-case resolved template.
-- Claim contention is kernel-arbitrated by held `flock`; stale socket cleanup happens only after claim acquisition; SIGKILL releases the claim without treating the advisory lockfile body, socket unlink, or rebind as ownership evidence.
+- Claim contention is kernel-arbitrated by held `flock`; stale socket cleanup happens only after claim acquisition; SIGKILL releases the claim without treating the advisory lockfile body, socket unlink, or rebind as ownership evidence. Predictable runtime-root pre-creation remains a declared refusal-only denial surface.
 - Durable records are written atomically, never become liveness evidence, and support `child-starting` with shim PID/nonce plus the upgraded child PID/start-token identity needed for orphan-safe refusal. Deleting the volatile runtime tree does not delete or invalidate the durable record.
 - Connected answerer identity comes from Darwin `getsockopt(SOL_LOCAL, LOCAL_PEERPID)`. The advisory record comparison detects disagreement without being described as a second kernel identity.
-- The foreign start token is read through the pinned `ps -o lstart= -p PID` interface and malformed, missing, or failed observations refuse rather than guessing.
+- Each successful child start and later foreign-process observation reads the raw `kinfo_proc` `p_starttime` timeval through `sysctl(KERN_PROC_PID)` using `x/sys/unix`. No formatted output, locale, timezone, shell, or child environment participates. PID present plus token mismatch is a typed disagreement that refuses and cannot become absence evidence; malformed/missing/sysctl-failed observations also refuse.
+- The shim writes its fully resolved durable-state root into the uid-anchored lockfile body. A client whose independently resolved root differs returns a typed `state-root-disagreement` fact and never enumerates the alternate tree as `missing`.
 - Decode rejects missing/mismatched version before interpreting any other field and rejects unknown operations without passing text onward.
 - This first production importer adds only the reviewed `x/sys/unix` surface, records its license and module graph, and makes the release archive carry the license.
 
 - [ ] **Step 1: Write namespace and claim RED tests**
 
-  Cover production and override roots, cap boundaries, the fully resolved 103/104/105-byte socket boundary, pre-existing/symlinked/wrong-mode directories, descriptor substitution, two claimants, SIGKILL release, stale sockets, advisory lockfile bodies, and `LOCAL_PEERPID` observation.
+  Cover production, `$HOME`-derived, and override roots; cap boundaries; the fully resolved 103/104/105-byte socket boundary; pre-existing/symlinked/wrong-mode directories; predictable `/tmp` pre-creation refusal; descriptor substitution; two claimants; SIGKILL release; stale sockets; advisory lockfile bodies containing the resolved state root; matching/different roots; and `LOCAL_PEERPID` observation.
 
 - [ ] **Step 2: Implement the smallest namespace and claim layer**
 
@@ -227,11 +242,11 @@ Reviewers check this table in every implementation PR and reject any row whose c
 
 - [ ] **Step 3: Write durable-record and codec RED tests**
 
-  Cover pre-fork `child-starting`, upgrade, partial writes, runtime-tree deletion, simulated reboot residue, malformed records, PID-reuse token matches/mismatches, the pinned foreign `ps -o lstart=` reader and all its failures, absent/foreign protocol versions, oversized frames, unknown fields, unknown operations, and attempts to encode payload text.
+  Cover pre-fork `child-starting`, upgrade, partial writes, runtime-tree deletion, simulated reboot residue, malformed records, raw timeval equality, PID-present/token-disagreement refusal, PID absence, every `sysctl(KERN_PROC_PID)` failure/short-result case, proof that `TZ`/`LC_ALL` cannot affect the token, absent/foreign protocol versions, oversized frames, unknown fields, unknown operations, and attempts to encode payload text.
 
 - [ ] **Step 4: Implement record and codec GREEN**
 
-  Keep the public codec types incapable of representing arbitrary PTY input. Run `go test ./internal/shim -run 'Test.*(Namespace|Claim|Record|Protocol)' -count=1`.
+  Keep the public codec types incapable of representing arbitrary PTY input. Run `go test ./internal/shim -run 'Test.*(Namespace|Claim|Record|Process|StartToken|StateRoot|Protocol)' -count=1`.
 
 - [ ] **Step 5: Re-verify dependency and archive evidence**
 
@@ -241,7 +256,7 @@ Reviewers check this table in every implementation PR and reject any row whose c
 
   Run `go test -race ./internal/shim -count=1`, `go test ./...`, and `go vet ./...`; preserve exact contention and reclaim evidence in the PR.
 
-### Task 3: Build the nested PTY and child-lifecycle boundary (PR 3, parallel with PR 2)
+### Task 3: Prove and build the stdlib nested PTY and child-lifecycle boundary (PR 3, conditionally parallel with PR 2)
 
 **Files:**
 - Create: `internal/ptyx/pty_darwin.go`
@@ -258,35 +273,46 @@ Reviewers check this table in every implementation PR and reject any row whose c
 - Consumes: validated argv and environment only; it has no session/role resolution, protocol parsing, registry lookup, or filesystem ownership.
 
 **Acceptance criteria:**
+- Before implementation, rerun the complete options-paper stdlib PTY prototype through child round-trip and clean teardown; retain exact commands, Go/Darwin versions, child/PTY observations, and exit status in this PR rather than inheriting the paper or review probes.
+- On the accepted parallel path, all PTY code uses Go standard-library `syscall`/`os`/`os/exec` facilities, introduces no dependency, imports no `x/sys`, and edits no `go.mod`, `go.sum`, `LICENSES`, `.goreleaser.yaml`, archive verifier, shared spec, security, or evidence file.
 - The child starts with the nested PTY as its controlling terminal and the parent observes its exact PID before readiness.
 - Input/output relay is byte-preserving, resize and termios changes are forwarded, EOF/half-close behavior is bounded, and relayed terminal input enters the same serialized writer used later by control operations.
 - The terminal observer distinguishes pre-ready cooked/echo state from the approved settled state without reading terminal contents.
 - Teardown records signal attempts and observed child exit separately; a surviving child is returned as a typed outcome rather than reported dead.
-- This PR edits no Task 2 artifact, including shared docs, so the only parallel implementation lanes remain file-disjoint.
+- If the full stdlib prototype fails, stop this PR before implementation and record Gate P. The planner must first serialize PR 3 behind PR 2 and remove the parallel/disjointness claim before considering any already-admitted dependency surface; no third mechanism or silent dependency edit is allowed.
+- When Gate P passes, this PR edits no Task 2 artifact, including shared docs, so the only parallel implementation lanes remain file-disjoint.
 
-- [ ] **Step 1: Write PTY-open and child-start RED tests**
+- [ ] **Step 1: Rerun the complete stdlib PTY prototype**
+
+  Reproduce the options-paper sequence through PTY master grant/unlock/name resolution, controlling-terminal child start, bidirectional child round-trip, window-size mutation, observed child exit, and owned-descriptor cleanup. Record the source, exact command, Go/Darwin versions, raw output, and exit status in the PR body.
+
+- [ ] **Step 2: Record Gate P before implementation**
+
+  If the prototype passes, record that PR 3 stays stdlib-only and parallel/file-disjoint. If it fails, stop; preserve the failure and obtain the planner's recorded PR 2 → PR 3 serialization/dependency-scope amendment before rebasing or writing implementation. Do not improvise a third path.
+
+- [ ] **Step 3: Write PTY-open and child-start RED tests**
 
   Cover syscall failure at every ordered setup point, controlling-terminal assignment, process-group ownership, exact argv/env, child PID capture, and cleanup of only resources created by the invocation.
 
-- [ ] **Step 2: Implement PTY open and injected child start**
+- [ ] **Step 4: Implement PTY open and injected child start**
 
-  Keep `os/exec` behind `ptyx.ChildStarter`; unit tests use a recording fake, while Darwin integration tests use a stub child in a throwaway PTY.
+  On the passing branch use only the demonstrated standard-library surface. Keep `os/exec` behind `ptyx.ChildStarter`; unit tests use a recording fake, while Darwin integration tests use a stub child in a throwaway PTY.
 
-- [ ] **Step 3: Write relay/readiness/resize RED tests**
+- [ ] **Step 5: Write relay/readiness/resize RED tests**
 
   Cover binary byte round trips, concurrent resize, early control attempts, simultaneous operator input and control bytes, context cancellation, parent input EOF, child exit, shim-side failure, and exactly one serialized PTY writer.
 
-- [ ] **Step 4: Implement relay and terminal observation GREEN**
+- [ ] **Step 6: Implement relay and terminal observation GREEN**
 
   Run `go test ./internal/ptyx -count=1` and `go test -race ./internal/ptyx -count=1`.
 
-- [ ] **Step 5: Capture throwaway live PTY evidence in the PR**
+- [ ] **Step 7: Capture throwaway live PTY evidence in the PR**
 
-  Exercise the stub relay and both version-pinned harness startup transitions without tmux, preserve the commands and observed facts in the PR body, and run the PR's full unit/vet/lint gates. Do not edit PR 2's spec, security, dependency, or evidence artifacts from this parallel lane.
+  Exercise the stub relay and both version-pinned harness startup transitions without tmux, preserve the commands and observed facts in the PR body, and run the PR's full unit/vet/lint gates. On the Gate P passing lane, do not edit PR 2's spec, security, dependency, or evidence artifacts.
 
 ### Gate S: Decide whether Option S remains viable after PRs 2 and 3
 
-The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/readiness evidence from PR 3 before PR 4 starts. Continue Option S only when `flock`, `LOCAL_PEERPID`, the fully resolved socket-length policy, nested controlling-PTY startup, clean-channel observation, and durable reservation boundary all satisfy the approved contract without a new semantic surface. If any failure cannot be fixed inside that surface, stop the shim graph, amend issue #182, and return to the named pane-scoped Option A fallback in options-paper §3; do not silently weaken the gate or improvise a third design.
+The planner reviews the merged Darwin claim/socket/process evidence from PR 2, Gate P record, and PTY/readiness evidence from PR 3 before PR 4 starts. Continue Option S only when `flock`, `LOCAL_PEERPID`, raw `kinfo_proc` token observation, state-root disagreement detection, the fully resolved socket-length policy, nested controlling-PTY startup, clean-channel observation, and durable reservation boundary all satisfy the approved contract without a new semantic surface. If any failure cannot be fixed inside that surface, stop the shim graph, amend issue #182, and return to the named pane-scoped Option A fallback in options-paper §3; do not silently weaken the gate or improvise a third design.
 
 ### Task 4: Assemble the resident shim server and closed operation path (PR 4)
 
@@ -299,6 +325,8 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - Create: `internal/shim/lifecycle_test.go`
 - Create: `cmd/agentctl/shim_command.go`
 - Create: `cmd/agentctl/shim_command_test.go`
+- Modify: `cmd/agentctl/main.go`
+- Create: `cmd/agentctl/main_shim_test.go`
 - Modify: `internal/control/registry.go`
 - Modify: `internal/control/registry_test.go`
 - Modify: `internal/harness/harness.go`
@@ -309,6 +337,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 **Interfaces:**
 - Produces: `shim.Server.Run`, `shim.Client.Observe`, `shim.Client.DeliverOperation`, and `shim.Client.Stop` with the exact typed outcomes approved in Task 1.
 - Produces: a hidden, validated shim command that reconstructs child argv through `harness.AgentArgv`; it accepts no raw child command or payload.
+- Produces: compatibility-safe main dispatch for that hidden command before PR 5 first invokes the current executable.
 - Consumes: Task 2's claim/record/protocol and Task 3's PTY/child interfaces.
 
 **Acceptance criteria:**
@@ -316,6 +345,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - Every request validates protocol version, claimed session/role, advisory-record/`LOCAL_PEERPID` answerer agreement, readiness, and registry membership before PTY mutation.
 - The shim is the sole PTY writer. Relayed operator input and registry-resolved control bytes pass through one serialization point; registry lookup occurs server-side, and structural tests prove no client path can provide payload bytes.
 - Response facts distinguish accepted request, bytes written, submit observed, cancellation residue, child exit, and orphan/cleanup outcomes without asserting harness execution.
+- `cmd/agentctl/main.go` recognizes the hidden route before the public `commandUsage` lookup, but the route is absent from `commandUsage`, global help, shell completions, embedded skill inventories, and every user-facing lifecycle dispatch. Existing public commands keep their pre-cutover wiring until PR 7.
 
 - [ ] **Step 1: Write lifecycle and ownership RED tests**
 
@@ -331,7 +361,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 
 - [ ] **Step 4: Add and wire the hidden shim command**
 
-  Parse only the internal validated fields approved in §4, build harness argv through the existing registry, and keep it out of agent-facing help and the embedded skill command inventory.
+  Parse only the internal validated fields approved in §4, build harness argv through the existing registry, and add the minimal pre-`commandUsage` dispatch branch in `main.go`. In `main_shim_test.go`, prove valid internal dispatch reaches the shim handler, malformed internal argv refuses, and the command stays absent from usage/help/skill surfaces. This PR does not rewire launch/control/status/relaunch/kill.
 
 - [ ] **Step 5: Run GREEN and adversarial review**
 
@@ -366,6 +396,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - Launch records the complete roster/config before roles can be reported missing, waits for each shim's approved readiness observation, and applies the amended ownership/rollback table exactly.
 - Concurrent launch/relaunch claims have one kernel winner. Losing invocations create no second harness and remove nothing they do not own.
 - Relaunch refuses every live, unsettled, forged, indeterminate, and orphan child state; it creates only after the approved absence observation.
+- A present child PID with a raw start-token mismatch and a CLI/lockfile state-root mismatch are disagreement refusals, never absence. Dead-shim `child-starting` remains wedged until the documented manual record action; fleet code does not auto-delete it.
 - Kill quiesces operations, requests child termination, observes outcomes, and removes optional tmux presentation only under the approved prior-state rule.
 - Existing CLI behavior and the legacy target/send-keys path still compile and retain their current tests. The new shim path is invoked directly by unit/integration tests until PR 7 performs the atomic cutover.
 
@@ -379,7 +410,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 
 - [ ] **Step 3: Write relaunch and kill RED matrices**
 
-  Cover absent, running, starting, orphan, forged-answerer, protocol-skew, stale-record, cleanup-failed, concurrent-contender, and tmux-presentation-gone cases. Assert no mutation before every non-destructive check completes.
+  Cover absent, running, starting, dead-shim `child-starting`, orphan, PID-present/token-disagreement, state-root-disagreement, forged-answerer, protocol-skew, stale-record, cleanup-failed, concurrent-contender, and tmux-presentation-gone cases. Assert no mutation before every non-destructive check completes and no automatic cleanup of an indeterminate reservation.
 
 - [ ] **Step 4: Implement relaunch and kill GREEN**
 
@@ -417,16 +448,17 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - The CLI-to-dispatcher boundary carries operation name, session, and role only; the registry payload is resolved inside the shim server.
 - The former target checks are explicitly classified in `SECURITY.md`: runtime validation or shim enforcement, presentation-only/moot, or retired with rationale linked to the approved spec.
 - Self-target detection starts at the caller PID, walks the single parsed snapshot toward the target PID obtained from the already connected peer's `LOCAL_PEERPID`, and refuses on a broken chain, disappeared PID, malformed row, duplicate PID, loop, or command failure. It never uses the advisory lockfile PID, `TMUX_PANE`, or role/session environment values.
-- Status enumerates the approved runtime roster in both tmux and no-tmux cases, compares the advisory lockfile identity with the `LOCAL_PEERPID` answerer, preserves build2's presentation note, and reports every state at the approved precedence.
+- The dispatcher returns distinct typed results for `observed-self-target` and `ancestry-undetermined`; later CLI rendering uses distinct spec-approved messages and exit codes, so tool failure never claims self-target was observed.
+- Status enumerates the approved runtime roster in both tmux and no-tmux cases, compares the advisory lockfile identity with the `LOCAL_PEERPID` answerer, compares the locally resolved state root with the lockfile's recorded path before durable enumeration, preserves build2's presentation note, and reports every state at the approved precedence.
 - This PR adds no new `send-keys` or payload-text surface. The existing `internal/target` and `tmuxx.DeliverPayload` remain temporarily because `cmd/agentctl/main.go` still imports them; PR 7 retires them in the same commit that rewires the CLI.
 
 - [ ] **Step 1: Write dispatcher and ancestry RED tests**
 
-  Assert the exact single `ps -eo pid=,ppid=` argv and one-snapshot call count for self, sibling, human-terminal, disappeared parent/target, broken chain, duplicate PID, loop, malformed output, and tool failure. Source the target only from a fake `LOCAL_PEERPID` observation and assert the dispatcher never receives or exposes payload text.
+  Assert the exact single `ps -eo pid=,ppid=` argv and one-snapshot call count for self, sibling, human-terminal, disappeared parent/target, broken chain, duplicate PID, loop, malformed output, and tool failure. Source the target only from a fake `LOCAL_PEERPID` observation; assert self returns `observed-self-target`, every incomplete observation returns `ancestry-undetermined`, and the dispatcher never receives or exposes payload text.
 
 - [ ] **Step 2: Write status RED matrix**
 
-  Cover every approved runtime state and precedence collision, missing records, live lock/no socket, socket/no lock, holder/answerer disagreement, protocol skew, orphan child, optional tmux unavailable, and merged presentation.
+  Cover every approved runtime state and precedence collision, missing records, live lock/no socket, socket/no lock, advisory-holder/answerer disagreement, local/recorded state-root disagreement before enumeration, raw child-token disagreement, protocol skew, orphan/indeterminate child, optional tmux unavailable, and merged presentation.
 
 - [ ] **Step 3: Implement control/status GREEN**
 
@@ -490,10 +522,11 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - Help, README, examples, and exit rendering match the amended spec; the hidden shim entrypoint remains absent from agent-facing command inventories.
 - The integration fixture supports both throwaway tmux presentation and isolated direct-terminal shim processes and always reaps owned children/runtime paths.
 - The cutover commit removes every `internal/target` import and production `tmux send-keys`/payload-text delivery entrypoint while preserving compilation throughout the commit; no intermediate PR deletes a dependency still imported by `cmd/agentctl/main.go`.
+- CLI tests map `observed-self-target` and `ancestry-undetermined` to their distinct §9 messages and exit codes, and map state-root/token disagreements plus manual-only indeterminate refusal without collapsing any of them into `missing`.
 
 - [ ] **Step 1: Write final CLI dispatch/exit RED tests**
 
-  Cover every shim result class, explicit/ambient session selection, JSON/table status, foreground run validation and signal forwarding, no-tmux attach, and unchanged `version`/`skill` behavior.
+  Cover every shim result class, including distinct observed-self-target/ancestry-undetermined exits, state-root/token disagreements, and manual-only indeterminate refusal; also cover explicit/ambient session selection, JSON/table status, foreground run validation and signal forwarding, no-tmux attach, and unchanged `version`/`skill` behavior.
 
 - [ ] **Step 2: Wire shared dependencies once**
 
@@ -505,7 +538,7 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 
 - [ ] **Step 4: Update operator documentation and integration fixtures**
 
-  Document the flag-day transition, volatile and durable roots plus both overrides, cleanup, no-tmux composition, attach limitation and exact factual refusal, orphan/indeterminate remedies, layout-proof controls, interim merged-layout note, replay-qualified recovery order, and factual-delivery limitation. Change SECURITY/spec claims from planned to shipped in the same PR.
+  Document the flag-day transition, volatile and durable roots, `$HOME`/`os.UserConfigDir()`, both overrides, root-disagreement diagnosis, cleanup, no-tmux composition, attach limitation and exact factual refusal, orphan remedies, layout-proof controls, interim merged-layout note, replay-qualified recovery order, and factual-delivery limitation. For dead-shim `child-starting`, state that agentctl cannot resolve it observationally: only after independently proving no child remains may the operator manually remove `<resolved-state-root>/sessions/<session>/roles/<role>.json`; never imply automatic expiry or cleanup. Change SECURITY/spec claims from planned to shipped in the same PR.
 
 - [ ] **Step 5: Run CLI and integration GREEN**
 
@@ -536,8 +569,9 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 - Consumes: build2's tracked incident replay, Task 1's probe evidence, Task 3's PTY evidence retained in its PR, and the complete merged implementation.
 
 **Acceptance criteria:**
-- The live verifier uses only its owned named tmux server, isolated `AGENTCTL_RUNTIME_ROOT`, isolated `AGENTCTL_STATE_ROOT`, temporary HOME, and stub/consented harness processes; teardown observes absence of every owned child, socket, lock, PTY helper, tmux server, and credential fixture while retaining only evidence the checklist explicitly owns.
+- The live verifier uses only its owned named tmux server, isolated `AGENTCTL_RUNTIME_ROOT`, isolated `AGENTCTL_STATE_ROOT`, declared temporary HOME, and stub/consented harness processes; teardown observes absence of every owned child, socket, lock, PTY helper, tmux server, and credential fixture while retaining only evidence the checklist explicitly owns.
 - Verification proves the four layout operations leave identity and delivery intact, early delivery refuses until ready, an advisory-record/`LOCAL_PEERPID` mismatch is reported, version skew fails closed, and no orphan or `child-starting` indeterminate can be called missing or relaunched beside a possible survivor.
+- A divergent-HOME fixture keeps the uid-rooted lock visible while changing the CLI's resolved durable root and proves status/relaunch report `state-root-disagreement`; raw token tests vary `TZ` and `LC_ALL` and prove the token and refusal result are unchanged.
 - The committed deterministic foreign-version fixture is a separately built second binary artifact. The matrix runs current CLI → foreign shim and foreign client → current shim, plus absent-version and matching-current controls, and records both artifact hashes/versions.
 - Release archives contain the `x/sys` license and all prior license materials.
 - The embedded skill exposes only the approved agent-facing surface and matches `status.States()` plus CLI exit constants through drift tests.
@@ -570,11 +604,15 @@ The planner reviews the merged Darwin claim/socket evidence from PR 2 and PTY/re
 
 - [ ] Every spec-amendment row is assigned to a PR and no semantic delta is deferred into implementation prose.
 - [ ] Every SECURITY.md constraint maps to at least one unit test, one owning task, and live evidence where the constraint is empirical.
-- [ ] Binding planner rulings R1–R8 are published in issue #182 before PR 1 and no task reintroduces a resolved proposal.
+- [ ] Binding planner rulings R1–R13 are published in issue #182 before PR 1; R9–R13 supplement rather than rewrite R1–R8, and no task reintroduces a resolved proposal.
 - [ ] build2's complete incident-replay report is tracked by Task 1; interim recovery guidance cites `classifyRelaunchWindow`, the sole-window exit-3 outcome, the eight-pane duplicate interval, the supported ordering, and the `kill` plus `launch` alternative without presenting inference as replay.
-- [ ] The only parallel implementation PRs, PR 2 and PR 3, share no edited file including docs; all later implementation PRs are serial, and PR 5 owns the shared integration fixture before PR 6 consumes it.
+- [ ] Gate P contains fresh complete stdlib PTY evidence. On pass, the only parallel implementation PRs, PR 2 and PR 3, share no edited file including docs and PR 3 imports no `x/sys`; on failure, PR 3 stops until the planner records PR 2 → PR 3 serialization and removes the parallel claim.
 - [ ] Gate S records an explicit continue-Option-S or fall-back-to-Option-A decision before PR 4; no failing empirical contract is silently weakened.
+- [ ] PR 4 owns hidden `main.go` dispatch and tests before PR 5 first invokes the internal command; it changes no public lifecycle routing, and PR 4→5→6→7 is serial so no parallel file-ownership invariant is weakened.
 - [ ] PRs 5 and 6 keep legacy imports compiling beside their shim implementations; PR 7 alone performs the atomic CLI rewire and target/send-keys deletion.
+- [ ] Raw `kinfo_proc` timevals are immune to `TZ`/`LC_ALL`; PID-present/token mismatch and local/lockfile state-root mismatch are reported refusal states, never `missing` or relaunch permission.
+- [ ] SECURITY.md names `$HOME`/`os.UserConfigDir()`, declared root overrides, and predictable-runtime-root pre-creation residuals; §9 keeps observed-self-target separate from ancestry-undetermined.
+- [ ] Dead-shim `child-starting` has no automatic expiry: docs name `<resolved-state-root>/sessions/<session>/roles/<role>.json` and require independent child-absence proof before manual removal.
 - [ ] Release verification uses a committed second binary fixture and exercises both protocol-version mismatch directions plus absent/matching controls.
 - [ ] Each behavior PR preserves RED and GREEN commands/results in its PR body.
 - [ ] Every integration test uses a throwaway tmux socket or an isolated no-tmux runtime root and reaps what it owns.
