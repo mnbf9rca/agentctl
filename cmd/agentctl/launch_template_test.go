@@ -168,9 +168,9 @@ func TestMergeLaunchTemplateUnionFailuresNameTheirSourceAndRule(t *testing.T) {
 		{
 			name: "invalid effective effort",
 			document: launchtemplate.Document{Path: "/fleet.json", Roles: []launchtemplate.Role{{
-				Name: "planner", Harness: stringPointerForTemplate("codex"), Effort: stringPointerForTemplate("extreme"),
+				Name: "planner", Harness: stringPointerForTemplate("codex"), Effort: stringPointerForTemplate("EXtreme"),
 			}}},
-			want: `template /fleet.json: roles[0].effort: harness "codex" does not support effort "extreme"; supported levels are low, medium, high, xhigh, max`,
+			want: `template /fleet.json: roles[0].effort: effort "EXtreme" must match ^[a-z][a-z0-9-]*$`,
 		},
 		{
 			name:     "relative template directory",

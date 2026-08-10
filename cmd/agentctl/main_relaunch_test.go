@@ -165,7 +165,7 @@ func TestRunRelaunchRejectsInvalidInvocationsBeforeAnyDependency(t *testing.T) {
 		{name: "empty harness", args: []string{"relaunch", "--session", "epic123", "--harness=", "planner"}},
 		{name: "smuggled model", args: []string{"relaunch", "--session", "epic123", "--model", "--dangerously-bypass-approvals-and-sandbox", "planner"}},
 		{name: "empty model", args: []string{"relaunch", "--session", "epic123", "--model=", "planner"}},
-		{name: "unknown effort", args: []string{"relaunch", "--session", "epic123", "--effort", "turbo", "planner"}},
+		{name: "invalid effort charset", args: []string{"relaunch", "--session", "epic123", "--effort", "HIGH", "planner"}},
 		{name: "empty effort", args: []string{"relaunch", "--session", "epic123", "--effort=", "planner"}},
 		{name: "duplicate harness", args: []string{"relaunch", "--session", "epic123", "--harness", "claude", "--harness", "codex", "planner"}},
 		{name: "duplicate effort", args: []string{"relaunch", "--session", "epic123", "--effort", "high", "--effort", "low", "planner"}},

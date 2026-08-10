@@ -152,7 +152,7 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 		if role.Effort != "" {
 			merged.sources.effort = fleet.ProvenanceOverride
 		} else if merged.effort != nil {
-			if err := config.ValidateEffort(role.Harness, *merged.effort); err != nil {
+			if err := config.ValidateEffort(*merged.effort); err != nil {
 				return launchConfiguration{}, wrapTemplateValidation(
 					document.Path, fmt.Sprintf("roles[%d].effort", merged.templateIndex), err,
 				)

@@ -88,8 +88,8 @@ func claudeEffortArgs(effort string) []string {
 // codex-cli 0.146.0: the main codex CLI has no --effort flag, so the level is
 // supplied as `--config 'model_reasoning_effort="<level>"'`. The value portion
 // is parsed by codex as TOML, so it is rendered with %q; agentctl additionally
-// restricts efforts to a closed set of levels (internal/config), so the quoted
-// string can never be escaped.
+// restricts efforts to a lowercase alphanumeric-and-hyphen charset
+// (internal/config), so the quoted string can never be escaped.
 func codexEffortArgs(effort string) []string {
 	return []string{"--config", fmt.Sprintf("model_reasoning_effort=%q", effort)}
 }

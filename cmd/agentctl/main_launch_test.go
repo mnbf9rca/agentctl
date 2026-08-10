@@ -39,7 +39,7 @@ func TestRunLaunchRejectsInvalidConfigurationBeforeRunner(t *testing.T) {
 		{name: "invalid fleet", args: []string{"launch", "--session", "fleet", "--roles", "planner:unknown"}, want: "unknown harness \"unknown\""},
 		{name: "explicitly empty models", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models="}, want: "--models value \"\": must not be empty"},
 		{name: "explicitly empty efforts", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts="}, want: "--efforts value \"\": must not be empty"},
-		{name: "unsupported effort level", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:turbo"}, want: "harness \"claude\" does not support effort \"turbo\"; supported levels are low, medium, high, xhigh, max"},
+		{name: "invalid effort charset", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:HIGH"}, want: "effort \"HIGH\" must match ^[a-z][a-z0-9-]*$"},
 		{name: "effort for undefined role", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "worker:high"}, want: "effort references undefined role \"worker\""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

@@ -61,7 +61,7 @@ These extend or refine `brief.md`:
 | Agent working directory | Windows start in agentctl's invocation cwd, passed **explicitly** to tmux via `-c` (never relying on tmux server default). Optional `--dir PATH` on `launch` overrides. Rationale: `amq coop exec` roots `AM_ROOT`/`.amqrc` in the pane's cwd, so cwd determines the fleet's AMQ session directory. |
 | Teardown | New command `agentctl kill [--session S]`. Validates the session is agentctl-managed (same gate as control commands) before `tmux kill-session`. Refuses unmanaged sessions. |
 | Model identifier validation | Models are catalogue-free but **not** charset-free: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`. The mandatory alphanumeric first character makes flag smuggling (e.g. `--dangerously-bypass-approvals-and-sandbox`) unrepresentable in the model slot. |
-| Effort validation (added 2026-08-03, issue #88) | Efforts are the **opposite** of models: a closed per-harness allowlist (`low`, `medium`, `high`, `xhigh`, `max`), rejected before anything is created. The value names a harness mode rather than an opaque identifier, and the codex rendering embeds it in an expression codex parses as TOML, so a charset rule would be the weaker instrument. Optional everywhere: a role with no effort emits no harness argument at all. |
+| Effort validation (added 2026-08-03, issue #88; amended by issue #195) | Efforts are opaque harness-specific mode names validated against `^[a-z][a-z0-9-]*$`, rejected before anything is created when they fall outside that charset. The lowercase-letter first character prevents flag smuggling, and the remaining charset makes TOML breakout in codex's configuration expression unrepresentable without freezing agentctl to a harness-version catalogue. Optional everywhere: a role with no effort emits no harness argument at all. |
 | `--if-missing` | Deferred. v1 `launch` always fails when the target session exists. The exact-fleet-comparison metadata is designed in now so `--if-missing` is cheap later; tracked as a deferred backlog issue. Its direction is fixed by §6.5: comparison reads `@agentctl_fleet` and `@agentctl_dir` behind the §12.6 gate — **zero** window reads — which is correct even when roles are missing, and refuses legacy sessions carrying neither option. |
 | Harness process check | No name pattern-matching. At launch, the observed executable of each pane's root process is recorded as `@agentctl_process` metadata; control and status require exact equality with that baseline (§8). Motivated by the spike finding that Claude Code's process name is its **version string** (e.g. `2.1.220`), not `claude`. |
 | Payload registry policy | The registry is hardcoded and may grow beyond `clear`/`compact`, but only with **argument-free** payloads. Commands that carry caller-supplied text (e.g. `/rename NAME`) are permanently inadmissible. |
@@ -92,9 +92,10 @@ Both harnesses natively support `/clear` and `/compact`. One payload registry se
 | claude | Claude Code 2.1.220 | `--effort LEVEL` | `claude --help`: *"Effort level for the current session (low, medium, high, xhigh, max)"* |
 | codex | codex-cli 0.146.0 | `--config 'model_reasoning_effort="LEVEL"'` | no `--effort` flag on the main CLI (`codex --help`); `-c/--config` documents that the value portion is parsed as TOML |
 
-codex's own reasoning-effort enum additionally carries `none`, `minimal` and `ultra`. agentctl exposes only the five
-levels verified on **both** harnesses, so one accepted set serves both; a per-harness split is already the mechanism
-(`internal/config`'s per-harness table plus `harness.Spec.effortArgs`) and would be a small change if the sets diverge.
+codex's own reasoning-effort enum additionally carries `none`, `minimal` and `ultra`. agentctl treats effort names as
+opaque harness-specific values and accepts any name matching `^[a-z][a-z0-9-]*$`; the selected harness remains
+responsible for accepting or rejecting a well-formed name. Rendering remains harness-specific through
+`harness.Spec.effortArgs`.
 
 ### 3.3 Keystroke-injection spike results
 
@@ -1227,7 +1228,7 @@ location, the value and the rule; wrapping the decoder's own error underneath is
 
 ```text
 agentctl: template /srv/fleet.json: unknown field "efort"
-agentctl: template /srv/fleet.json: roles[1].effort: harness "codex" does not support effort "extreme"; supported levels are low, medium, high, xhigh, max
+agentctl: template /srv/fleet.json: roles[1].effort: effort "EXtreme" must match ^[a-z][a-z0-9-]*$
 agentctl: template /srv/fleet.json: roles[2]: duplicate role "planner"
 agentctl: template /srv/fleet.json: roles[0].model: must not be empty; omit the field instead
 ```
@@ -1261,7 +1262,7 @@ the write side.
 
 - Session and role names: `^[a-z0-9][a-z0-9_-]*$`.
 - Model identifiers: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (catalogue-free; charset-bound).
-- Effort levels: allowlist per harness — `low`, `medium`, `high`, `xhigh`, `max` for both `claude` and `codex` (§3.2.1). Rejection names the harness, the rejected value, and the supported levels.
+- Effort levels: `^[a-z][a-z0-9-]*$` (catalogue-free; charset-bound). Rejection names the rejected value and the charset; a well-formed value is left for the selected harness to accept or reject (§3.2.1).
 - `--efforts` shares every structural rule with `--models`: optional, non-nil-but-empty is a usage error, entries are `ROLE:VALUE`, duplicate role entries and entries for undefined roles are rejected, and empty list entries name the raw list and the entry index.
 - Harnesses: `claude` | `codex` only.
 - All rejection cases from the brief's Validation section: unknown harnesses, duplicate roles, duplicate model entries, models for undefined roles, missing values, empty `--roles`, trailing commas, whitespace in names, names beginning with `-`, duplicate command-line options.
@@ -1382,7 +1383,7 @@ Consequently:
 
 ## 10. Testing
 
-- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model charset rejections; effort allowlist rejections and per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), with an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and, when observations remain unsettled through the timeout boundary, stamps no `@agentctl_process`, stamps `@agentctl_unproven` as that role's final call instead, issues no kill, and lets the remaining roles continue (§6.6) while `relaunch` still rolls back its own created window (§8); a `no-baseline` window without that record is refused by recovery with no kill issued; equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
+- Unit tests against the fake `Runner` asserting **exact argv** for every case in the brief's Testing section, plus: `kill` refuses unmanaged sessions; `--dir` propagates to `-c`; model and effort charset rejections; per-harness effort rendering (`--effort LEVEL` for claude, `--config 'model_reasoning_effort="LEVEL"'` for codex), including a well-formed value outside the originally verified five and an absent effort emitting no argument; baseline capture accepts `claude` rather than transient `env` for `[amq, env, claude, claude]`, accepts the first stable pair without extra polling for `[amq, claude, claude]`, and, when observations remain unsettled through the timeout boundary, stamps no `@agentctl_process`, stamps `@agentctl_unproven` as that role's final call instead, issues no kill, and lets the remaining roles continue (§6.6) while `relaunch` still rolls back its own created window (§8); a `no-baseline` window without that record is refused by recovery with no kill issued; equality check against `@agentctl_process` including empty-baseline fail-closed; self-target guard (`$TMUX_PANE` == target pane refused, absent/different pane allowed).
 - `status` (§6.3): state precedence exercised in order, each state reached with the higher ones inapplicable; multi-pane
   renders `unmanaged`; alive-pane-with-unavailable-identity renders `unexpected-process` and an empty baseline renders `no-baseline` (§6.3), with no process probe issued for the latter; zero
   panes renders `missing`; a roster role with no window renders `missing`; `unexpected-process` renders the observed
@@ -1711,4 +1712,4 @@ Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2 
 §6.5's metadata) and restarting a role whose window still exists, **except** the bounded
 `no-baseline` recovery in §6.8 (which refuses `dead` rather than folding it into `missing`, and refuses every other
 present-window state; a general `restart` command would be filed separately if demand appears). `status` deliberately does not read
-`@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model charset enforcement; per-harness effort allowlist enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
+`@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model and effort charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.

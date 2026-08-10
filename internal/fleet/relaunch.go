@@ -322,11 +322,7 @@ func (l Launcher) Relaunch(ctx context.Context, session tmuxx.Session, request R
 		}
 	}
 	if request.Effort != nil {
-		harness := config.HarnessClaude
-		if request.Harness != nil {
-			harness, _ = config.ParseHarness(*request.Harness)
-		}
-		if err := config.ValidateEffort(harness, *request.Effort); err != nil {
+		if err := config.ValidateEffort(*request.Effort); err != nil {
 			return RelaunchResult{}, err
 		}
 	}
@@ -824,7 +820,7 @@ func decodeFleet(value string) ([]config.RoleConfig, error) {
 			}
 		}
 		if fields[3] != "" {
-			if err := config.ValidateEffort(harness, fields[3]); err != nil {
+			if err := config.ValidateEffort(fields[3]); err != nil {
 				return nil, fmt.Errorf("entry %d %q has invalid effort %q", index+1, entry, fields[3])
 			}
 		}

@@ -279,56 +279,42 @@ func TestParseFleetOmittedEffortsLeaveEveryRoleUnset(t *testing.T) {
 	}
 }
 
-func TestParseFleetAcceptsEveryDocumentedEffortLevelOnEveryHarness(t *testing.T) {
+func TestValidateEffortEnforcesCharset(t *testing.T) {
 	t.Parallel()
 
-	for _, harnessName := range []Harness{HarnessClaude, HarnessCodex} {
-		for _, level := range EffortLevels(harnessName) {
-			t.Run(string(harnessName)+"/"+level, func(t *testing.T) {
-				t.Parallel()
-
-				efforts := "p:" + level
-				got, err := ParseFleet("p:"+string(harnessName), nil, &efforts)
-				if err != nil {
-					t.Fatalf("ParseFleet() error = %v", err)
-				}
-				want := FleetConfig{Roles: []RoleConfig{{Name: "p", Harness: harnessName, Effort: level}}}
-				if !reflect.DeepEqual(got, want) {
-					t.Fatalf("ParseFleet() = %#v, want %#v", got, want)
-				}
-			})
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "minimal", "ultra", "turbo", "high-2", "a"} {
+		if err := ValidateEffort(effort); err != nil {
+			t.Errorf("ValidateEffort(%q) error = %v, want nil", effort, err)
 		}
 	}
-}
 
-func TestEffortLevelsAreTheDocumentedSet(t *testing.T) {
-	t.Parallel()
-
-	want := []string{"low", "medium", "high", "xhigh", "max"}
-	for _, harnessName := range []Harness{HarnessClaude, HarnessCodex} {
-		if got := EffortLevels(harnessName); !reflect.DeepEqual(got, want) {
-			t.Fatalf("EffortLevels(%q) = %#v, want %#v", harnessName, got, want)
-		}
-	}
-	if got := EffortLevels("rust"); got != nil {
-		t.Fatalf("EffortLevels(rust) = %#v, want nil", got)
-	}
-}
-
-func TestEffortLevelsCannotBeMutatedThroughTheReturnedSlice(t *testing.T) {
-	first := EffortLevels(HarnessClaude)
-	first[0] = "changed"
-
-	second := EffortLevels(HarnessClaude)
-	if second[0] != "low" {
-		t.Fatalf("EffortLevels(claude)[0] = %q after caller mutation, want %q", second[0], "low")
+	for _, tt := range []struct {
+		name   string
+		effort string
+	}{
+		{name: "empty", effort: ""},
+		{name: "uppercase", effort: "HIGH"},
+		{name: "single quote", effort: "high'"},
+		{name: "double quote", effort: `high"`},
+		{name: "backslash", effort: `high\`},
+		{name: "newline", effort: "high\n"},
+		{name: "space", effort: "hi gh"},
+		{name: "equals", effort: "high=evil"},
+		{name: "colon", effort: "high:evil"},
+		{name: "leading hyphen", effort: "-high"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateEffort(tt.effort)
+			assertValidationError(t, err, "effort", tt.effort, -1, "",
+				fmt.Sprintf("effort %q must match ^[a-z][a-z0-9-]*$", tt.effort),
+				fmt.Sprintf("invalid --effort value %q: effort %q must match ^[a-z][a-z0-9-]*$", tt.effort, tt.effort),
+			)
+		})
 	}
 }
 
 func TestParseFleetRejectsInvalidEffortLists(t *testing.T) {
 	t.Parallel()
-
-	const supported = "supported levels are low, medium, high, xhigh, max"
 
 	tests := []struct {
 		name       string
@@ -351,12 +337,11 @@ func TestParseFleetRejectsInvalidEffortLists(t *testing.T) {
 		{name: "leading comma", roles: "p:claude", efforts: ",p:high", entryIndex: 1, reason: "entry is empty", message: "invalid --efforts value \",p:high\": entry 1 is empty"},
 		{name: "consecutive commas", roles: "p:claude,q:codex", efforts: "p:high,,q:low", entryIndex: 2, reason: "entry is empty", message: "invalid --efforts value \"p:high,,q:low\": entry 2 is empty"},
 		{name: "invalid effort role", roles: "p:claude", efforts: "P:high", entryIndex: 1, entry: "P:high", reason: "role \"P\" must match ^[a-z0-9][a-z0-9_-]*$", message: "invalid --efforts entry 1 \"P:high\": role \"P\" must match ^[a-z0-9][a-z0-9_-]*$"},
-		{name: "unknown level", roles: "p:claude", efforts: "p:turbo", entryIndex: 1, entry: "p:turbo", reason: "harness \"claude\" does not support effort \"turbo\"; " + supported, message: "invalid --efforts entry 1 \"p:turbo\": harness \"claude\" does not support effort \"turbo\"; " + supported},
-		{name: "uppercase level", roles: "p:claude", efforts: "p:HIGH", entryIndex: 1, entry: "p:HIGH", reason: "harness \"claude\" does not support effort \"HIGH\"; " + supported, message: "invalid --efforts entry 1 \"p:HIGH\": harness \"claude\" does not support effort \"HIGH\"; " + supported},
-		{name: "whitespace level", roles: "p:claude", efforts: "p:hi gh", entryIndex: 1, entry: "p:hi gh", reason: "harness \"claude\" does not support effort \"hi gh\"; " + supported, message: "invalid --efforts entry 1 \"p:hi gh\": harness \"claude\" does not support effort \"hi gh\"; " + supported},
-		{name: "trailing newline level", roles: "p:claude", efforts: "p:high\n", entryIndex: 1, entry: "p:high\n", reason: "harness \"claude\" does not support effort \"high\\n\"; " + supported, message: "invalid --efforts entry 1 \"p:high\\n\": harness \"claude\" does not support effort \"high\\n\"; " + supported},
-		{name: "flag smuggling", roles: "p:claude", efforts: "p:--dangerously-bypass-approvals-and-sandbox", entryIndex: 1, entry: "p:--dangerously-bypass-approvals-and-sandbox", reason: "harness \"claude\" does not support effort \"--dangerously-bypass-approvals-and-sandbox\"; " + supported, message: "invalid --efforts entry 1 \"p:--dangerously-bypass-approvals-and-sandbox\": harness \"claude\" does not support effort \"--dangerously-bypass-approvals-and-sandbox\"; " + supported},
-		{name: "toml string escape", roles: "p:codex", efforts: "p:high\"\nmodel=\"evil", entryIndex: 1, entry: "p:high\"\nmodel=\"evil", reason: "harness \"codex\" does not support effort \"high\\\"\\nmodel=\\\"evil\"; " + supported, message: "invalid --efforts entry 1 \"p:high\\\"\\nmodel=\\\"evil\": harness \"codex\" does not support effort \"high\\\"\\nmodel=\\\"evil\"; " + supported},
+		{name: "uppercase level", roles: "p:claude", efforts: "p:HIGH", entryIndex: 1, entry: "p:HIGH", reason: "effort \"HIGH\" must match ^[a-z][a-z0-9-]*$", message: "invalid --efforts entry 1 \"p:HIGH\": effort \"HIGH\" must match ^[a-z][a-z0-9-]*$"},
+		{name: "whitespace level", roles: "p:claude", efforts: "p:hi gh", entryIndex: 1, entry: "p:hi gh", reason: "effort \"hi gh\" must match ^[a-z][a-z0-9-]*$", message: "invalid --efforts entry 1 \"p:hi gh\": effort \"hi gh\" must match ^[a-z][a-z0-9-]*$"},
+		{name: "trailing newline level", roles: "p:claude", efforts: "p:high\n", entryIndex: 1, entry: "p:high\n", reason: "effort \"high\\n\" must match ^[a-z][a-z0-9-]*$", message: "invalid --efforts entry 1 \"p:high\\n\": effort \"high\\n\" must match ^[a-z][a-z0-9-]*$"},
+		{name: "flag smuggling", roles: "p:claude", efforts: "p:--dangerously-bypass-approvals-and-sandbox", entryIndex: 1, entry: "p:--dangerously-bypass-approvals-and-sandbox", reason: "effort \"--dangerously-bypass-approvals-and-sandbox\" must match ^[a-z][a-z0-9-]*$", message: "invalid --efforts entry 1 \"p:--dangerously-bypass-approvals-and-sandbox\": effort \"--dangerously-bypass-approvals-and-sandbox\" must match ^[a-z][a-z0-9-]*$"},
+		{name: "toml string escape", roles: "p:codex", efforts: "p:high\"\nmodel=\"evil", entryIndex: 1, entry: "p:high\"\nmodel=\"evil", reason: "effort \"high\\\"\\nmodel=\\\"evil\" must match ^[a-z][a-z0-9-]*$", message: "invalid --efforts entry 1 \"p:high\\\"\\nmodel=\\\"evil\": effort \"high\\\"\\nmodel=\\\"evil\" must match ^[a-z][a-z0-9-]*$"},
 	}
 
 	for _, test := range tests {

@@ -803,11 +803,7 @@ func validateRelaunchOverrides(options commandOptions) error {
 		}
 	}
 	if options.effort != nil {
-		harness := config.HarnessClaude
-		if options.harness != nil {
-			harness, _ = config.ParseHarness(*options.harness)
-		}
-		if err := config.ValidateEffort(harness, *options.effort); err != nil {
+		if err := config.ValidateEffort(*options.effort); err != nil {
 			return err
 		}
 	}
