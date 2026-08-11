@@ -127,11 +127,7 @@ func OpenNamespace() (*Namespace, error) {
 		if err := validateRootInput("home", home); err != nil {
 			return nil, err
 		}
-		homeRoot, err := openVerifiedPrivateRoot("home", home)
-		if err != nil {
-			return nil, err
-		}
-		_ = homeRoot.Close()
+		var err error
 		configRoot, err = os.UserConfigDir()
 		if err != nil {
 			return nil, &InvalidRootError{Kind: "user-config", Reason: err.Error()}
@@ -183,31 +179,16 @@ func validateRootInput(kind, path string) error {
 }
 
 func openResolvedNamespace(roots namespaceRoots, runtimeOverride, stateOverride bool, userConfigRoot string) (*Namespace, error) {
-	return openResolvedNamespaceWithHook(roots, runtimeOverride, stateOverride, userConfigRoot, func() {})
-}
-
-func openResolvedNamespaceWithHook(
-	roots namespaceRoots,
-	runtimeOverride bool,
-	stateOverride bool,
-	userConfigRoot string,
-	afterUserConfigVerified func(),
-) (*Namespace, error) {
 	var retainedConfig *os.Root
 	if !stateOverride {
 		if err := validateRootInput("user-config", userConfigRoot); err != nil {
 			return nil, err
 		}
-		configRoot, err := openVerifiedPrivateRoot("user-config", userConfigRoot)
+		configRoot, err := openNoSymlinkDirectory(userConfigRoot)
 		if err != nil {
-			return nil, err
+			return nil, &InvalidRootError{Kind: "user-config", Path: userConfigRoot, Reason: err.Error()}
 		}
 		retainedConfig = configRoot
-		afterUserConfigVerified()
-		if err := verifyRetainedRoot("user-config", userConfigRoot, retainedConfig); err != nil {
-			_ = retainedConfig.Close()
-			return nil, err
-		}
 	}
 
 	var runtime *os.Root
@@ -228,7 +209,7 @@ func openResolvedNamespaceWithHook(
 	if stateOverride {
 		state, err = ensureExactPrivateRoot("state", roots.State)
 	} else {
-		state, err = ensurePrivateTreeFromRoot("state", userConfigRoot, retainedConfig, "agentctl", "state-v1")
+		state, err = ensurePrivateStateRoot(userConfigRoot, retainedConfig)
 		retainedConfig = nil
 	}
 	if err != nil {
@@ -286,6 +267,56 @@ func ensurePrivateTree(kind, base string, components ...string) (*os.Root, error
 		return nil, &InvalidRootError{Kind: kind, Path: base, Reason: err.Error()}
 	}
 	return ensurePrivateTreeFromRoot(kind, base, current, components...)
+}
+
+// ensurePrivateStateRoot consumes configRoot. Ancestor modes do not gate the
+// durable namespace; only the final state-v1 directory is privately verified.
+// A missing application directory is still created with the standard 0700
+// discipline before the descriptor-verified state root is opened below it.
+func ensurePrivateStateRoot(userConfigRoot string, configRoot *os.Root) (*os.Root, error) {
+	applicationPath := filepath.Join(userConfigRoot, "agentctl")
+	applicationRoot, err := ensureDirectoryChild("state", applicationPath, configRoot, "agentctl")
+	_ = configRoot.Close()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = applicationRoot.Close() }()
+	return ensurePrivateChild("state", filepath.Join(applicationPath, "state-v1"), applicationRoot, "state-v1")
+}
+
+func ensureDirectoryChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	pathInfo, err := parent.Lstat(name)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: "must not be a symbolic link"}
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: err.Error()}
+	}
+	descriptorInfo, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, &FilesystemObservationError{Kind: kind, Path: fullPath, Operation: "stat retained directory", Err: err}
+	}
+	if !descriptorInfo.IsDir() {
+		_ = root.Close()
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: "descriptor is not a directory"}
+	}
+	if !os.SameFile(pathInfo, descriptorInfo) {
+		_ = root.Close()
+		return nil, &RootSubstitutedError{Kind: kind, Path: fullPath}
+	}
+	if err := syncDirectoryRoot(parent); err != nil {
+		_ = root.Close()
+		return nil, &InvalidRootError{Kind: kind, Path: fullPath, Reason: fmt.Sprintf("sync parent directory: %v", err)}
+	}
+	return root, nil
 }
 
 // ensurePrivateTreeFromRoot consumes current and returns the final retained
@@ -382,34 +413,6 @@ func openNoSymlinkDirectory(path string) (*os.Root, error) {
 		return nil, fmt.Errorf("path is not absolute")
 	}
 	return os.OpenRoot(path)
-}
-
-func openVerifiedPrivateRoot(kind, path string) (*os.Root, error) {
-	pathInfo, err := os.Lstat(path)
-	if err != nil {
-		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
-	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: "must not be a symbolic link"}
-	}
-	root, err := os.OpenRoot(path)
-	if err != nil {
-		return nil, &InvalidRootError{Kind: kind, Path: path, Reason: err.Error()}
-	}
-	if err := verifyPrivateDirectory(kind, path, root); err != nil {
-		_ = root.Close()
-		return nil, err
-	}
-	descriptorInfo, err := root.Stat(".")
-	if err != nil {
-		_ = root.Close()
-		return nil, &FilesystemObservationError{Kind: kind, Path: path, Operation: "stat retained directory", Err: err}
-	}
-	if !os.SameFile(pathInfo, descriptorInfo) {
-		_ = root.Close()
-		return nil, &RootSubstitutedError{Kind: kind, Path: path}
-	}
-	return root, nil
 }
 
 func resolvedRetainedRoot(kind, path string, root *os.Root) (string, error) {

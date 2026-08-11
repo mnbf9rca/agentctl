@@ -4,8 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -34,14 +38,52 @@ func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	}
 }
 
-func TestNamespaceAcceptsExactRootCapAndUsesHOMEThroughUserConfigDir(t *testing.T) {
+func TestNamespaceAcceptsExactRootCap(t *testing.T) {
 	exactCap := "/" + strings.Repeat("r", RootPathMaxBytes-1)
 	if _, err := resolveNamespaceRoots(501, exactCap, "/tmp/state", "/tmp/config"); err != nil {
 		t.Fatalf("exact %d-byte root rejected: %v", RootPathMaxBytes, err)
 	}
+}
+
+func TestNamespaceAcceptsFactoryDefaultMacOSHome(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("factory-default home fixture is specific to macOS")
+	}
 
 	parent := shortTempDir(t)
 	home := filepath.Join(parent, "home")
+	if err := os.Mkdir(home, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	staff, err := user.LookupGroup("staff")
+	if err != nil {
+		t.Fatalf("look up stock macOS staff group: %v", err)
+	}
+	staffGID, err := strconv.Atoi(staff.Gid)
+	if err != nil {
+		t.Fatalf("parse staff gid %q: %v", staff.Gid, err)
+	}
+	if err := os.Chown(home, os.Geteuid(), staffGID); err != nil {
+		t.Fatalf("set stock macOS home group: %v", err)
+	}
+	if err := os.Chmod(home, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("home stat type = %T, want *syscall.Stat_t", info.Sys())
+	}
+	if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("stock home mode = %04o, want 0750", got)
+	}
+	if got := int(stat.Gid); got != staffGID {
+		t.Fatalf("stock home gid = %d, want staff gid %d", got, staffGID)
+	}
+
 	configRoot := filepath.Join(home, "Library", "Application Support")
 	if err := os.MkdirAll(configRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -75,6 +117,15 @@ func TestNamespaceAcceptsExactRootCapAndUsesHOMEThroughUserConfigDir(t *testing.
 	if got, want := namespace.StateRoot, wantStateRoot; got != want {
 		t.Fatalf("HOME-derived StateRoot = %q, want %q", got, want)
 	}
+	for _, path := range []string{filepath.Dir(namespace.StateRoot), namespace.StateRoot} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Fatalf("new durable directory mode(%q) = %04o, want 0700", path, got)
+		}
+	}
 }
 
 func TestNamespaceValidatesHOMEAsItsOwnDeclaredSurface(t *testing.T) {
@@ -99,95 +150,40 @@ func TestNamespaceValidatesHOMEAsItsOwnDeclaredSurface(t *testing.T) {
 	}
 }
 
-func TestNamespaceDescriptorVerifiesHOMEAndUserConfigRoots(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		prepare  func(*testing.T, string) string
-		wantKind string
-	}{
-		{
-			name: "symlink HOME",
-			prepare: func(t *testing.T, parent string) string {
-				target := filepath.Join(parent, "home-target")
-				if err := os.MkdirAll(filepath.Join(target, "Library", "Application Support"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				link := filepath.Join(parent, "home")
-				if err := os.Symlink(target, link); err != nil {
-					t.Fatal(err)
-				}
-				return link
-			},
-			wantKind: "home",
-		},
-		{
-			name: "wrong-mode HOME",
-			prepare: func(t *testing.T, parent string) string {
-				home := filepath.Join(parent, "home")
-				if err := os.MkdirAll(filepath.Join(home, "Library", "Application Support"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(home, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				return home
-			},
-			wantKind: "home",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			parent := shortTempDir(t)
-			home := tt.prepare(t, parent)
-			t.Setenv("HOME", home)
-			t.Setenv(runtimeRootEnvironment, filepath.Join(parent, "runtime"))
-			stateValue, stateWasSet := os.LookupEnv(stateRootEnvironment)
-			if err := os.Unsetenv(stateRootEnvironment); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if stateWasSet {
-					_ = os.Setenv(stateRootEnvironment, stateValue)
-				} else {
-					_ = os.Unsetenv(stateRootEnvironment)
-				}
-			})
-			_, err := OpenNamespace()
-			var invalid *InvalidRootError
-			if !errors.As(err, &invalid) || invalid.Kind != tt.wantKind {
-				t.Fatalf("OpenNamespace error = %T %v, want %s *InvalidRootError", err, err, tt.wantKind)
-			}
-		})
+func TestNamespaceAcceptsNonPrivateDurableAncestorModes(t *testing.T) {
+	parent := shortTempDir(t)
+	configRoot := filepath.Join(parent, "config")
+	agentctlRoot := filepath.Join(configRoot, "agentctl")
+	if err := os.MkdirAll(agentctlRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{configRoot, agentctlRoot} {
+		if err := os.Chmod(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	t.Run("wrong-mode user config", func(t *testing.T) {
-		parent := shortTempDir(t)
-		configRoot := filepath.Join(parent, "config")
-		if err := os.Mkdir(configRoot, 0o755); err != nil {
+	namespace, err := openProductionNamespaceAt(parent, 501, configRoot)
+	if err != nil {
+		t.Fatalf("open namespace below traversable durable ancestors: %v", err)
+	}
+	defer func() { _ = namespace.Close() }()
+	for _, path := range []string{configRoot, agentctlRoot} {
+		info, err := os.Stat(path)
+		if err != nil {
 			t.Fatal(err)
 		}
-		_, err := openProductionNamespaceAt(parent, 501, configRoot)
-		var invalid *InvalidRootError
-		if !errors.As(err, &invalid) || invalid.Kind != "user-config" {
-			t.Fatalf("openProductionNamespaceAt error = %T %v, want user-config *InvalidRootError", err, err)
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Fatalf("ancestor mode(%q) = %04o, want unchanged 0750", path, got)
 		}
-	})
-
-	t.Run("symlink user config", func(t *testing.T) {
-		parent := shortTempDir(t)
-		target := filepath.Join(parent, "config-target")
-		if err := os.Mkdir(target, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		configRoot := filepath.Join(parent, "config")
-		if err := os.Symlink(target, configRoot); err != nil {
-			t.Fatal(err)
-		}
-		_, err := openProductionNamespaceAt(parent, 501, configRoot)
-		var invalid *InvalidRootError
-		if !errors.As(err, &invalid) || invalid.Kind != "user-config" {
-			t.Fatalf("openProductionNamespaceAt error = %T %v, want user-config *InvalidRootError", err, err)
-		}
-	})
+	}
+	info, err := os.Stat(filepath.Join(agentctlRoot, "state-v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("state root mode = %04o, want 0700", got)
+	}
 }
 
 func TestNamespacePublishesFullyResolvedStateRoot(t *testing.T) {
@@ -212,39 +208,6 @@ func TestNamespacePublishesFullyResolvedStateRoot(t *testing.T) {
 	}
 	if namespace.StateRoot != want {
 		t.Fatalf("StateRoot = %q, want fully resolved %q", namespace.StateRoot, want)
-	}
-}
-
-func TestNamespaceRetainsUserConfigDescriptorAcrossVerificationAndUse(t *testing.T) {
-	parent := shortTempDir(t)
-	configRoot := filepath.Join(parent, "config")
-	if err := os.Mkdir(configRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtimeRoot := filepath.Join(parent, "runtime")
-	stateRoot := filepath.Join(configRoot, "agentctl", "state-v1")
-	roots := namespaceRoots{Runtime: runtimeRoot, State: stateRoot}
-	original := configRoot + "-original"
-	_, err := openResolvedNamespaceWithHook(roots, true, false, configRoot, func() {
-		if renameErr := os.Rename(configRoot, original); renameErr != nil {
-			t.Fatal(renameErr)
-		}
-		if mkdirErr := os.Mkdir(configRoot, 0o700); mkdirErr != nil {
-			t.Fatal(mkdirErr)
-		}
-	})
-	var substituted *RootSubstitutedError
-	if !errors.As(err, &substituted) {
-		t.Fatalf("openResolvedNamespace error = %T %v, want *RootSubstitutedError", err, err)
-	}
-	for _, path := range []string{
-		runtimeRoot,
-		filepath.Join(original, "agentctl"),
-		filepath.Join(configRoot, "agentctl"),
-	} {
-		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
-			t.Fatalf("mutation at %q before substitution refusal: %v", path, statErr)
-		}
 	}
 }
 
@@ -374,6 +337,45 @@ func TestNamespaceRefusesSymlinkAndWrongModeRoots(t *testing.T) {
 	})
 }
 
+func TestNamespaceRefusesUnsafeFinalStateRoot(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		parent := t.TempDir()
+		target := filepath.Join(parent, "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stateRoot := filepath.Join(parent, "state")
+		if err := os.Symlink(target, stateRoot); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openNamespaceRoots(namespaceRoots{Runtime: filepath.Join(parent, "runtime"), State: stateRoot})
+		var invalid *InvalidRootError
+		if !errors.As(err, &invalid) || invalid.Kind != "state" || invalid.Path != stateRoot || invalid.Reason != "must not be a symbolic link" {
+			t.Fatalf("error = %T %#v, want exact state-root symlink refusal", err, err)
+		}
+	})
+
+	t.Run("wrong mode", func(t *testing.T) {
+		parent := t.TempDir()
+		stateRoot := filepath.Join(parent, "state")
+		if err := os.Mkdir(stateRoot, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openNamespaceRoots(namespaceRoots{Runtime: filepath.Join(parent, "runtime"), State: stateRoot})
+		var invalid *InvalidRootError
+		if !errors.As(err, &invalid) || invalid.Kind != "state" || invalid.Path != stateRoot || invalid.Reason != "mode is 0750; expected 0700" {
+			t.Fatalf("error = %T %#v, want exact state-root mode refusal", err, err)
+		}
+		info, statErr := os.Stat(stateRoot)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Fatalf("unsafe state-root mode was repaired to %04o; want refusal without repair", got)
+		}
+	})
+}
+
 func TestNamespaceRefusesPredictableRuntimePrecreation(t *testing.T) {
 	parent := t.TempDir()
 	configRoot := filepath.Join(parent, "config")
@@ -460,30 +462,38 @@ func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutatio
 }
 
 func TestNamespaceRefusesDescriptorSubstitutionBeforeRoleMutation(t *testing.T) {
-	parent := shortTempDir(t)
-	runtimeRoot := filepath.Join(parent, "runtime")
-	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: filepath.Join(parent, "state")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = namespace.Close() })
+	for _, kind := range []string{"runtime", "state"} {
+		t.Run(kind, func(t *testing.T) {
+			parent := shortTempDir(t)
+			roots := namespaceRoots{Runtime: filepath.Join(parent, "runtime"), State: filepath.Join(parent, "state")}
+			namespace, err := openNamespaceRoots(roots)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = namespace.Close() })
 
-	original := filepath.Join(parent, "runtime-original")
-	if err := os.Rename(runtimeRoot, original); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, err = namespace.RolePath("s", "r")
-	var substituted *RootSubstitutedError
-	if !errors.As(err, &substituted) {
-		t.Fatalf("RolePath error = %T %v, want *RootSubstitutedError", err, err)
-	}
-	for _, root := range []string{runtimeRoot, original} {
-		if _, statErr := os.Stat(filepath.Join(root, "s")); !os.IsNotExist(statErr) {
-			t.Fatalf("role mutation under %q after substitution: stat error = %v", root, statErr)
-		}
+			selectedRoot := roots.Runtime
+			if kind == "state" {
+				selectedRoot = namespace.StateRoot
+			}
+			original := selectedRoot + "-original"
+			if err := os.Rename(selectedRoot, original); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(selectedRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, err = namespace.RolePath("s", "r")
+			var substituted *RootSubstitutedError
+			if !errors.As(err, &substituted) || substituted.Kind != kind || substituted.Path != selectedRoot {
+				t.Fatalf("RolePath error = %T %#v, want exact %s *RootSubstitutedError", err, err, kind)
+			}
+			for _, root := range []string{selectedRoot, original} {
+				if _, statErr := os.Stat(filepath.Join(root, "s")); !os.IsNotExist(statErr) {
+					t.Fatalf("role mutation under %q after substitution: stat error = %v", root, statErr)
+				}
+			}
+		})
 	}
 }
 

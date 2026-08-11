@@ -118,9 +118,15 @@ Archive verification refuses a release missing any required material.
    or adopts the tree.
 5. **Declared roots are selectable, not trusted.** `$HOME`,
    `os.UserConfigDir()`, `AGENTCTL_RUNTIME_ROOT`, and
-   `AGENTCTL_STATE_ROOT` are bounded and validated inputs. A changed HOME can
-   resolve a different durable tree. The uid-rooted advisory lockfile anchors
-   the recorded root; disagreement refuses every named public lifecycle path
+   `AGENTCTL_STATE_ROOT` are bounded inputs. The volatile root and final
+   durable `state-v1` directory are descriptor-verified owner-only
+   boundaries; durable ancestor modes do not gate. This matches the threat
+   model: multi-user hardening is out of scope, and read-only traversal such
+   as a stock macOS mode-`0750` `staff` home is not a substitution vector.
+   Ancestor writability can redirect resolution and remains a residual on
+   same-user or multi-user-writable trees. A changed HOME can likewise resolve
+   a different durable tree. The uid-rooted advisory lockfile anchors the
+   recorded root; disagreement refuses every named public lifecycle path
    before alternate-tree enumeration, tmux presentation mutation, or an
    assertion that fleet/role configuration is missing.
 6. **Dead-shim `child-starting` is manually recoverable only.** The reservation
@@ -155,8 +161,8 @@ mode-`0700` root:
 /tmp/agentctl-<decimal-uid>/v1/<session>/<role>.sock
 ```
 
-Durable mode-`0600` records live below descriptor-verified mode-`0700`
-`os.UserConfigDir()/agentctl/state-v1`:
+Durable mode-`0600` records live below the descriptor-verified same-user
+mode-`0700` `os.UserConfigDir()/agentctl/state-v1` directory:
 
 ```text
 <state-root>/sessions/<session>/roles/<role>.json
@@ -167,7 +173,12 @@ Overrides receive identical validation and confer no trust. No lifecycle path
 writes inside application repositories. Atomic record writes use a complete
 same-directory temporary file, file sync, rename, and directory sync. A
 post-rename sync failure is typed commit uncertainty and retains the visible
-record.
+record. Durable ancestor modes are not private-boundary gates. Missing
+`agentctl` and `state-v1` directories are created mode `0700`, but pre-existing
+ancestors are not repaired; the final `state-v1` directory must still pass the
+owner, mode, type, nonsymlink, and retained-descriptor checks. Path traversal
+and creation must still succeed, and the fixed `agentctl` component is refused
+when it is a symlink or not a directory.
 
 The skill installer separately writes only its declared user-scope skill
 directories, proves ownership through its manifest, and refuses unmanaged or
@@ -183,8 +194,10 @@ release invariants:
    the sole ownership instant. Reclaim is lock acquisition, never probe/unlink.
 2. **Honest answerer detection.** The advisory PID is compared with kernel
    `LOCAL_PEERPID`; neither side is mislabeled authentication.
-3. **Private bounded roots.** Default and override roots are absolute, capped,
-   private, descriptor-verified, and independently checked against Darwin's
+3. **Private bounded roots.** Default and override roots are absolute and
+   capped. The complete volatile tree and final durable `state-v1` directory
+   are private and descriptor-verified; durable ancestor modes are not gates.
+   The resolved socket path is independently checked against Darwin's
    `sun_path[104]` limit before mutation. The unchanged runtime lockfile anchor
    is consulted before named session/role paths may render durable absence; a
    mismatch reports both roots and never reads the alternate durable tree.
