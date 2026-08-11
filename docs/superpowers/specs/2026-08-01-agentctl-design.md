@@ -1348,6 +1348,12 @@ At the 0.5.0 atomic cutover, §15.8 is the complete public exit map, including f
 runtime/shim refusal classes, retained ownership, and `fleet-directory-disagreement`. The pre-cutover derivation below
 is retained only as history where §15 does not supersede it.
 
+`invalid-root` exit 2 covers those declared-root, fixed-path traversal/creation, and private-boundary failures reported
+as `InvalidRootError`. Descriptor observation and substitution failures retain the existing `unclassified` exit-1 row;
+during setup its `SESSION` substitution is exactly `""`. A durable ancestor with a mode other than `0700`, including
+`$HOME` or the `os.UserConfigDir()` result, selects neither branch and emits no refusal; §15.2 makes the final state
+directory the validated durable boundary.
+
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 8's claim extends from "the session this invocation created was removed" to "**what this invocation created**
 was removed": `launch` rolls back a session, `relaunch` rolls back the single window it created (§6.8).
@@ -1805,14 +1811,20 @@ absolute, at most 1024 bytes, and pass the same descriptor and ownership checks.
 sufficient for an override: the independent resolved-path check always runs.
 
 The production durable root is `os.UserConfigDir()/agentctl/state-v1`; `AGENTCTL_STATE_ROOT` is its declared
-test/release-verification override. `$HOME`, the `os.UserConfigDir()` result, and `AGENTCTL_STATE_ROOT` are equally
-declared inputs: each supplied path must be nonempty, absolute, at most 1024 bytes, and pass the same
-descriptor-verified private-directory checks. A missing, relative, over-cap, wrong-owner, symlink-substituted, or
-wrong-mode root refuses. Both overrides and `$HOME` are same-user-selectable residual surfaces, never authentication.
+test/release-verification override. `$HOME`, the `os.UserConfigDir()` result, and `AGENTCTL_STATE_ROOT` remain bounded
+declared inputs: each supplied path must be nonempty, absolute, clean, and at most 1024 bytes. The final resolved
+`state-v1` directory is the durable private boundary: it is opened descriptor-relatively and verified as a nonsymlink,
+same-user, mode-`0700` directory. Ancestor directory modes, including `$HOME`, the `os.UserConfigDir()` result, and a
+pre-existing `agentctl` directory, do not gate execution. A missing `agentctl` ancestor and final `state-v1` directory
+are each created mode `0700`; a pre-existing ancestor is not repaired. Traversal and creation must still succeed, and
+the fixed `agentctl` component must be a directory rather than a symlink. The state-root override receives the same
+final directory validation. Both overrides and `$HOME` are same-user-selectable residual surfaces, never
+authentication.
 
-Directories are created `0700` with an exclusive primitive and verified on the opened descriptor for type, owner, and
-mode. Socket, lock, and record files are `0600`. Predictable pre-creation of `/tmp/agentctl-UID` can deny service;
-agentctl refuses and never adopts or repairs an unsafe tree. This is a refusal-only denial surface.
+The volatile tree keeps its separate, stricter discipline: every created component is `0700`, and unsafe type, owner,
+mode, symlink, or descriptor substitution refuses. Socket, lock, and record files are `0600`. Predictable pre-creation
+of `/tmp/agentctl-UID` can deny service; agentctl refuses and never adopts or repairs an unsafe tree. This is a
+refusal-only denial surface.
 
 The durable role record is exactly:
 
@@ -2314,6 +2326,11 @@ sole successful status output and therefore add no diagnostic line.
 | `stop-child-retained` | 9 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP but did not observe child PID CHILD exit; child observation was OBSERVATION; ownership and the durable record were retained (stop-child-retained)` |
 | `post-exit-cleanup-retained` | 9 | `agentctl: stop for role ROLE in session SESSION observed child PID CHILD exit, but role cleanup was not observed complete; last outcome was OUTCOME: CAUSE; presentation and fleet record were retained (post-exit-cleanup-retained)` |
 | `record-commit-uncertain` | 9 | `agentctl: role ROLE in session SESSION has an uncertain durable PHASE record commit: CAUSE; the record was retained and the role was not reported absent (record-commit-uncertain)` |
+
+`invalid-root` is selected when declared-input syntax, fixed durable-path traversal/creation, or a volatile/final-state
+private-boundary failure is represented by `InvalidRootError`. Descriptor observation and substitution errors select
+`unclassified`; setup renders that row with `SESSION` exactly `""`. A durable ancestor mode selects neither row, and
+there is no alternate durable-ancestor-mode refusal literal.
 
 `protocol-skew-shim-observed` and `protocol-skew-client-observed` substitute `OBSERVED` with `duplicate`, the `%q`
 raw JSON token for a non-integer, or the decimal foreign integer according to §15.5. `RECORD_PATH` is always the
