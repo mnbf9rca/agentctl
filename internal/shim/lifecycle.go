@@ -116,6 +116,8 @@ type lifecycleDependencies struct {
 	removeRecord        func(*RolePath) error
 	startToken          func(int) (StartToken, error)
 	observeProcess      func(int, StartToken) ProcessResult
+	observePresence     func(int) ProcessResult
+	observeRemaining    func(*RolePath) ([]string, error)
 	cleanupPollInterval time.Duration
 	cleanupTimeout      time.Duration
 	starter             ptyx.ChildStarter
@@ -155,6 +157,8 @@ func newRoleLifecycle(namespace *Namespace) roleLifecycle {
 		removeRecord:        RemoveRecord,
 		startToken:          ReadStartToken,
 		observeProcess:      ObserveProcess,
+		observePresence:     ObserveProcessPresence,
+		observeRemaining:    observeRemainingRoleArtifacts,
 		cleanupPollInterval: ptyx.ReadinessPollInterval,
 		cleanupTimeout:      ptyx.ReadinessTimeout,
 		starter:             ptyx.ExecChildStarter{},
@@ -266,32 +270,32 @@ func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harne
 	if err != nil {
 		var started *ptyx.StartedChildError
 		if errors.As(err, &started) {
-			return l.cleanupStartedChild(path, claim, started.Child, StartToken{}, err, nil)
+			return l.cleanupStartedChild(path, claim, reservation, started.Child, StartToken{}, err, nil)
 		}
 		return cleanupNoChild(err)
 	}
 	token, err := l.deps.startToken(child.PID())
 	if err != nil {
-		return l.cleanupStartedChild(path, claim, child, StartToken{}, err, nil)
+		return l.cleanupStartedChild(path, claim, reservation, child, StartToken{}, err, nil)
 	}
 	childRecord, err := reservation.WithChild(child.PID(), token)
 	if err != nil {
-		return l.cleanupStartedChild(path, claim, child, token, err, nil)
+		return l.cleanupStartedChild(path, claim, reservation, child, token, err, nil)
 	}
 	if err := l.deps.writeRecord(path, childRecord); err != nil {
 		var uncertain *RecordCommitUncertainError
 		if errors.As(err, &uncertain) {
 			err = &LifecycleCommitUncertainError{Phase: "child-recorded", Err: err}
 		}
-		return l.cleanupStartedChild(path, claim, child, token, err, nil)
+		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, nil)
 	}
 	listener, err := l.deps.listen(path.Socket)
 	if err != nil {
-		return l.cleanupStartedChild(path, claim, child, token, err, nil)
+		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, nil)
 	}
 	master, restore, err := l.deps.newMasterEndpoint(child.Master())
 	if err != nil {
-		return l.cleanupStartedChild(path, claim, child, token, err, listener)
+		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, listener)
 	}
 	relay := l.deps.newRelay(request.OperatorInput, request.OperatorOutput, master)
 	return &roleRuntime{
@@ -304,6 +308,7 @@ func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harne
 func (l roleLifecycle) cleanupStartedChild(
 	path *RolePath,
 	claim claimHandle,
+	record Record,
 	child ptyx.Child,
 	token StartToken,
 	cause error,
@@ -315,7 +320,11 @@ func (l roleLifecycle) cleanupStartedChild(
 	}
 	signal := child.SignalProcessGroup(syscall.SIGHUP)
 	cleanupErrors = append(cleanupErrors, signal.Err)
-	result := l.observeStartedCleanup(child.PID(), token)
+	var retainedToken *StartToken
+	if token.validate() == nil {
+		retainedToken = &token
+	}
+	result := l.observeStartedCleanup(child.PID(), retainedToken)
 	cleanupErrors = append(cleanupErrors, child.CloseMaster())
 	var uncertain *LifecycleCommitUncertainError
 	commitUncertain := errors.As(cause, &uncertain)
@@ -329,18 +338,69 @@ func (l roleLifecycle) cleanupStartedChild(
 		cleanupErrors = append(cleanupErrors, path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}
-	cleanupErrors = append(cleanupErrors, claim.Close(), path.Close())
 	if commitUncertain {
+		cleanupErrors = append(cleanupErrors, claim.Close(), path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}
+	remaining := map[string]bool{"child": true}
+	if l.deps.observeRemaining != nil {
+		observed, err := l.deps.observeRemaining(path)
+		cleanupErrors = append(cleanupErrors, err)
+		for _, artifact := range observed {
+			remaining[artifact] = true
+		}
+	}
+	ordered := orderedCleanupArtifacts(remaining)
+	failure := CleanupFailure{
+		Cause:       errors.Join(cause, errors.Join(cleanupErrors...)).Error(),
+		Observation: cleanupObservationFromProcess(result.Observation),
+		Remaining:   ordered,
+	}
+	cleanupRecord, recordErr := record.WithCleanupFailure(child.PID(), retainedToken, failure)
+	if recordErr == nil {
+		recordErr = l.deps.writeRecord(path, cleanupRecord)
+	}
+	cleanupErrors = append(cleanupErrors, recordErr)
 	retained := &LifecycleOwnershipRetainedError{ChildPID: child.PID(), Observation: result.Observation, Cause: cause}
+	cleanupErrors = append(cleanupErrors, claim.Close(), path.Close())
 	return nil, errors.Join(retained, errors.Join(cleanupErrors...))
 }
 
-func (l roleLifecycle) observeStartedCleanup(pid int, token StartToken) ProcessResult {
+func cleanupObservationFromProcess(observation ProcessObservation) CleanupObservation {
+	switch observation {
+	case ProcessPresentMatch:
+		return CleanupObservationPresentMatch
+	case ProcessPresentTokenDisagreement:
+		return CleanupObservationPresentTokenDisagreement
+	case ProcessPresentNotOurs:
+		return CleanupObservationPresentNotOurs
+	default:
+		return CleanupObservationCouldNotObserve
+	}
+}
+
+func orderedCleanupArtifacts(present map[string]bool) []string {
+	var ordered []string
+	for _, artifact := range []string{"child", "socket", "record", "lock"} {
+		if present[artifact] {
+			ordered = append(ordered, artifact)
+		}
+	}
+	return ordered
+}
+
+func (l roleLifecycle) observeStartedCleanup(pid int, token *StartToken) ProcessResult {
 	deadline := time.Now().Add(l.deps.cleanupTimeout)
 	for {
-		result := l.deps.observeProcess(pid, token)
+		var result ProcessResult
+		if token == nil {
+			if l.deps.observePresence == nil {
+				return ProcessResult{Observation: ProcessCouldNotObserve, Err: errors.New("process presence observer is unavailable")}
+			}
+			result = l.deps.observePresence(pid)
+		} else {
+			result = l.deps.observeProcess(pid, *token)
+		}
 		if result.MayReportAbsent() || l.deps.cleanupTimeout <= 0 || !time.Now().Before(deadline) {
 			return result
 		}

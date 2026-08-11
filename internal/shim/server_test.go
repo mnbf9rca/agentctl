@@ -5,6 +5,7 @@ package shim
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -469,6 +470,48 @@ func TestShimCleanupRemainingListUsesPostCleanupPathObservations(t *testing.T) {
 	}
 	if got, err := observeRemainingRoleArtifacts(path); err != nil || len(got) != 0 {
 		t.Fatalf("observeRemainingRoleArtifacts() after cleanup = %#v, %v, want none", got, err)
+	}
+}
+
+func TestShimRuntimeCleanupPersistsCleanupFailedFactsBeforeReleasingClaim(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "cleanup", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := StartToken{Sec: 1, Usec: 2}
+	record, err := NewChildStartingRecord(path.Session, path.Role, os.Getpid(), "cleanup").WithChild(456, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &roleRuntime{path: path, claim: claim, record: record, child: &stopRaceChild{pid: 456}}
+	server := &Server{
+		cleanupTimeout: -time.Nanosecond,
+		observeProcess: func(int, StartToken) ProcessResult {
+			return ProcessResult{Observation: ProcessPresentMatch}
+		},
+	}
+
+	result := server.cleanupRuntime(runtime, false)
+	if result.Observation != ProcessPresentMatch || !reflect.DeepEqual(result.Remaining, []string{"child", "record", "lock"}) {
+		t.Fatalf("cleanupRuntime() = %#v, want retained child/record/lock facts", result)
+	}
+	payload, err := os.ReadFile(path.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Record
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRecord(got); err != nil {
+		t.Fatalf("persisted cleanup record invalid: %v", err)
+	}
+	if got.State != RecordStateCleanupFailed || got.Cleanup == nil || got.Cleanup.Observation != CleanupObservationPresentMatch || !reflect.DeepEqual(got.Cleanup.Remaining, result.Remaining) {
+		t.Fatalf("persisted cleanup record = %#v, want exact cleanup-failed facts", got)
 	}
 }
 

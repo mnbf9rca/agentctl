@@ -86,6 +86,58 @@ type ClaimContendedError struct {
 	Path string
 }
 
+// ClaimObservation is a non-acquiring F_GETLK observation of the lifetime
+// flock. Darwin reports BSD-flock conflicts as F_WRLCK with pid=-1.
+type ClaimObservation struct {
+	Held        bool
+	ConflictPID int
+}
+
+// ObserveClaim inspects the existing role lock without attempting LOCK_EX or
+// otherwise acquiring ownership. It never turns owner death into role seizure.
+func ObserveClaim(path *RolePath) (ClaimObservation, error) {
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.runtimeSession == nil {
+		return ClaimObservation{}, errors.New("role path is closed")
+	}
+	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
+		return ClaimObservation{}, err
+	}
+	name := path.Role + ".lock"
+	file, err := path.runtimeSession.OpenFile(name, os.O_RDWR, 0)
+	if err != nil {
+		return ClaimObservation{}, err
+	}
+	defer func() { _ = file.Close() }()
+	if err := verifyPrivateArtifact(file, path.Lock, "lockfile"); err != nil {
+		return ClaimObservation{}, err
+	}
+	pathInfo, pathErr := path.runtimeSession.Lstat(name)
+	fileInfo, fileErr := file.Stat()
+	if pathErr != nil || fileErr != nil {
+		return ClaimObservation{}, errors.Join(pathErr, fileErr)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(pathInfo, fileInfo) {
+		return ClaimObservation{}, fmt.Errorf("lockfile %q was substituted", path.Lock)
+	}
+	lock := unix.Flock_t{Type: unix.F_WRLCK, Whence: io.SeekStart}
+	if err := unix.FcntlFlock(file.Fd(), unix.F_GETLK, &lock); err != nil {
+		return ClaimObservation{}, fmt.Errorf("observe role flock with F_GETLK: %w", err)
+	}
+	switch lock.Type {
+	case unix.F_UNLCK:
+		return ClaimObservation{}, nil
+	case unix.F_WRLCK:
+		if lock.Pid != -1 {
+			return ClaimObservation{}, fmt.Errorf("F_GETLK reported unexpected role-lock conflict pid %d", lock.Pid)
+		}
+		return ClaimObservation{Held: true, ConflictPID: int(lock.Pid)}, nil
+	default:
+		return ClaimObservation{}, fmt.Errorf("F_GETLK reported unexpected role-lock type %d", lock.Type)
+	}
+}
+
 func (e *ClaimContendedError) Error() string {
 	return fmt.Sprintf("flock on %q returned EWOULDBLOCK", e.Path)
 }
@@ -265,7 +317,7 @@ func ReadAdvisory(path *RolePath) (Advisory, error) {
 		return Advisory{}, err
 	}
 	if len(payload) > advisoryMaxBytes {
-		return Advisory{}, errors.New("advisory lockfile exceeds 4096 bytes")
+		return Advisory{}, advisoryParseError(errors.New("advisory lockfile exceeds 4096 bytes"))
 	}
 	fields, err := decodeJSONObject(payload)
 	if err != nil {
@@ -296,7 +348,7 @@ func ReadAdvisory(path *RolePath) (Advisory, error) {
 		return Advisory{}, advisoryParseError(errors.New("advisory lockfile has trailing JSON"))
 	}
 	if err := validateAdvisory(advisory, advisory.StateRoot); err != nil {
-		return Advisory{}, err
+		return Advisory{}, advisoryParseError(err)
 	}
 	return advisory, nil
 }

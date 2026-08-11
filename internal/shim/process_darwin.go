@@ -48,6 +48,29 @@ func ObserveProcess(pid int, recorded StartToken) ProcessResult {
 	return observeProcess(pid, recorded, unix.Kill, ReadStartToken)
 }
 
+// ObserveProcessPresence applies only the sole absence oracle when no recorded
+// start token exists. Observed presence cannot become a match or disagreement.
+func ObserveProcessPresence(pid int) ProcessResult {
+	return observeProcessPresence(pid, unix.Kill)
+}
+
+func observeProcessPresence(pid int, killZero func(int, syscall.Signal) error) ProcessResult {
+	if !validDarwinPID(pid) {
+		return ProcessResult{Observation: ProcessCouldNotObserve, Err: ErrInvalidProcessPID}
+	}
+	err := killZero(pid, 0)
+	switch {
+	case errors.Is(err, unix.ESRCH):
+		return ProcessResult{Observation: ProcessAbsent}
+	case errors.Is(err, unix.EPERM):
+		return ProcessResult{Observation: ProcessPresentNotOurs, Err: err}
+	case err != nil:
+		return ProcessResult{Observation: ProcessCouldNotObserve, Err: err}
+	default:
+		return ProcessResult{Observation: ProcessCouldNotObserve, Err: errors.New("process is present but no recorded start token is available")}
+	}
+}
+
 func observeProcess(
 	pid int,
 	recorded StartToken,

@@ -137,8 +137,8 @@ commit uncertainty retains the record, and no launch/relaunch rollback removes t
 role child may live. Kill attempts a previously observed typed presentation ID exactly once only after child cleanup.
 If tmux auto-removes the last shim window first, only one exact post-failure observation of presentation `gone` permits
 fleet-record removal; a still-present or unavailable presentation retains the fleet record. An already-gone
-presentation is never reported as removed. This path and the isolated integration fixture are invoked directly by
-tests only until PR 7.
+presentation is never reported as removed. The fleet path, guarded control dispatcher, runtime-authoritative status
+collector, and isolated integration fixture are invoked directly by tests only until PR 7.
 
 The developer-facing `hack/release-verify.sh` Part C walkthrough is separate from the production surface. On macOS it may copy only the fixed path `~/.codex/auth.json` from the operator's real HOME (proved sufficient for codex-cli 0.146.1, 2026-08-06). For Claude, a 2026-08-08 probe proved Claude Code 2.1.226 could read the existing authentication from a fresh HOME containing the exact symlink `$TEMP_HOME/Library/Keychains → $REAL_HOME/Library/Keychains`; the verifier offers that link separately, stating before consent that the probe fleet's harnesses can reach the operator's login keychain through it (per-item ACLs still apply). It copies no Claude secret or Keychain data, but token refresh writes through the link reach the real login keychain.
 
@@ -158,6 +158,37 @@ broaden the closed operation surface.
 
 PR 5 implements the separate durable fleet record, explicitly named shim-backed launch/relaunch/kill compatibility
 paths, and stop/payload serialization behind direct tests. It does not cut over a public lifecycle command.
+
+PR 6 implements the explicitly named shim-backed control and status compatibility paths behind direct tests. The
+guarded client obtains `LOCAL_PEERPID` from the already-connected socket, runs one `ps -eo pid=,ppid=` ancestry
+decision, and writes no request frame when that decision refuses. Runtime status reads the volatile advisory anchor
+before any durable role record, refuses local/recorded root disagreement before durable enumeration, and labels every
+no-anchor durable row and derived absence `unanchored`. Optional tmux observations add only
+`present`/`gone`/`unavailable` presentation and the pre-cutover aggregate note. The public CLI remains on the legacy
+path until PR 7.
+
+Planner R19 adds a non-acquiring held-claim observation and a durable cleanup fact at their first PR 6 consumers.
+Status uses only `F_GETLK`; Darwin exposes a conflicting lifetime `flock` as `F_WRLCK` with `pid=-1`. It never attempts
+`LOCK_NB`, so an owner death cannot make observation seize the role. Before releasing a claim when owned cleanup did
+not observe child absence, startup rollback and server teardown atomically replace the existing role record with
+state `cleanup-failed` and one closed cleanup object containing cause, process observation, and the observed remaining
+subset of child/socket/record/lock. Unknown or malformed content is `invalid-record`; filesystem, permission, and
+descriptor-observation failures are `could-not-observe`. Disagreements render both observed sides. A losing concurrent
+claim attempt leaves no durable status fact and is not converted into a synthetic contender row. When no initial
+child start token was observed, cleanup uses only `kill(pid,0)` and records present as `could-not-observe`; it never
+claims token match or disagreement and omits `child_start_token`.
+
+The former target chain is classified during this compatibility interval as follows:
+
+| Former check | PR 6 classification | 0.5.0 enforcement |
+|---|---|---|
+| Session and role character validation | Runtime validation | Retained in `internal/config` before namespace resolution; the version-first socket protocol revalidates the closed request. |
+| tmux managed/version session options | Retired at cutover | The durable fleet record selects the roster and protocol version gates the connected shim; tmux metadata supplies neither fact. |
+| Exact role window and stored window-role equality | Presentation-only/moot | The validated role namespace plus held role claim identify the target; windows may be joined, broken, swapped, moved, or absent. |
+| Exactly one live pane | Presentation-only/moot | The shim-owned nested PTY and child record replace pane topology as runtime facts. |
+| Pane-root process baseline | Retired at cutover | The durable child PID plus raw Darwin start token and the `kill(pid,0)` oracle replace formatted pane-process observations. |
+| `$TMUX_PANE` self-target check | Retired at cutover | A single fail-closed parent snapshot starts at the caller PID and searches only for the connected peer's `LOCAL_PEERPID`; environment and advisory PIDs are inadmissible inputs. |
+| `tmux send-keys` payload delivery | Transitional legacy exception | The compatibility dispatcher sends only an operation name; the shim resolves registry bytes server-side. PR 7 deletes the legacy call in the same commit that rewires the CLI. |
 
 Existing shipped claims are amended only at the listed cutover PR; until then their current-path wording remains true:
 

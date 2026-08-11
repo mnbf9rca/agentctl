@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mnbf9rca/agentctl/internal/control"
 )
 
 const shellqImportPath = "github.com/mnbf9rca/agentctl/internal/shellq"
@@ -131,6 +133,122 @@ func TestProductionSendKeysLiteralsAreInsideDeliverPayload(t *testing.T) {
 	sort.Strings(violations)
 	if len(violations) != 0 {
 		t.Fatalf("production send-keys literals outside internal/tmuxx.DeliverPayload: %s", strings.Join(violations, ", "))
+	}
+}
+
+func TestShimWireRequestHasExactlyFourApprovedFields(t *testing.T) {
+	root := repositoryRoot(t)
+	var found []string
+	for _, src := range parseProductionGo(t, root) {
+		if src.rel != "internal/shim/protocol.go" {
+			continue
+		}
+		for _, declaration := range src.file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.TYPE {
+				continue
+			}
+			for _, specification := range general.Specs {
+				typeSpec, ok := specification.(*ast.TypeSpec)
+				if !ok || typeSpec.Name.Name != "Request" {
+					continue
+				}
+				structure, ok := typeSpec.Type.(*ast.StructType)
+				if !ok {
+					t.Fatal("shim.Request is not a struct")
+				}
+				for _, field := range structure.Fields.List {
+					if len(field.Names) != 1 {
+						t.Fatalf("shim.Request field declaration has %d names, want exactly one", len(field.Names))
+					}
+					found = append(found, field.Names[0].Name)
+				}
+			}
+		}
+	}
+	want := []string{"Version", "Session", "Role", "Operation"}
+	if strings.Join(found, ",") != strings.Join(want, ",") {
+		t.Fatalf("shim.Request fields = %#v, want exact argument-free wire schema %#v", found, want)
+	}
+}
+
+func TestControlRegistryLifecycleOperationsCarryNoPayload(t *testing.T) {
+	for _, command := range control.Operations() {
+		if command.Kind == control.OperationControl && command.Payload != "" {
+			t.Fatalf("control operation %q carries payload %q; lifecycle operations must be structurally payload-free", command.Operation, command.Payload)
+		}
+	}
+}
+
+func TestShimCompatibilityAPIsExposeNoPayloadParameter(t *testing.T) {
+	root := repositoryRoot(t)
+	wantParameters := map[string][]string{
+		"internal/control/shim_dispatcher.go:Execute":     {"ctx", "operation", "session", "role"},
+		"internal/shim/client.go:DeliverOperationGuarded": {"ctx", "session", "role", "operation", "guard"},
+	}
+	found := make(map[string][]string)
+	for _, src := range parseProductionGo(t, root) {
+		for _, declaration := range src.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Type.Params == nil {
+				continue
+			}
+			key := src.rel + ":" + function.Name.Name
+			if _, tracked := wantParameters[key]; !tracked {
+				continue
+			}
+			for _, field := range function.Type.Params.List {
+				for _, name := range field.Names {
+					found[key] = append(found[key], name.Name)
+				}
+			}
+		}
+	}
+	for key, want := range wantParameters {
+		if strings.Join(found[key], ",") != strings.Join(want, ",") {
+			t.Fatalf("%s parameters = %#v, want exact operation-name-only boundary %#v", key, found[key], want)
+		}
+	}
+}
+
+func TestLegacyTargetAndPayloadDeliveryStayAtTransitionalInventory(t *testing.T) {
+	root := repositoryRoot(t)
+	var targetImports []string
+	var deliveryCalls []string
+	var deliveryDeclarations []string
+	for _, src := range parseProductionGo(t, root) {
+		for _, specification := range src.file.Imports {
+			path, err := strconv.Unquote(specification.Path.Value)
+			if err == nil && path == "github.com/mnbf9rca/agentctl/internal/target" {
+				targetImports = append(targetImports, src.rel)
+			}
+		}
+		ast.Inspect(src.file, func(node ast.Node) bool {
+			switch value := node.(type) {
+			case *ast.FuncDecl:
+				if value.Name.Name == "DeliverPayload" {
+					deliveryDeclarations = append(deliveryDeclarations, src.rel+":"+value.Name.Name)
+				}
+			case *ast.CallExpr:
+				selector, ok := value.Fun.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "DeliverPayload" {
+					deliveryCalls = append(deliveryCalls, src.rel+":"+enclosingFunctionName(src.file, value.Pos()))
+				}
+			}
+			return true
+		})
+	}
+	sort.Strings(targetImports)
+	sort.Strings(deliveryCalls)
+	sort.Strings(deliveryDeclarations)
+	if got, want := strings.Join(targetImports, ","), "cmd/agentctl/main.go"; got != want {
+		t.Fatalf("legacy internal/target imports = %q, want transitional inventory %q", got, want)
+	}
+	if got, want := strings.Join(deliveryCalls, ","), "internal/control/dispatcher.go:Execute"; got != want {
+		t.Fatalf("legacy DeliverPayload calls = %q, want transitional inventory %q", got, want)
+	}
+	if got, want := strings.Join(deliveryDeclarations, ","), "internal/tmuxx/control.go:DeliverPayload"; got != want {
+		t.Fatalf("legacy DeliverPayload declarations = %q, want transitional inventory %q", got, want)
 	}
 }
 

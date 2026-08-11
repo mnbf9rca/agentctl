@@ -500,18 +500,121 @@ func (n *Namespace) ExistingRolePath(session, role string) (*RolePath, error) {
 	return n.rolePath(session, role, false)
 }
 
-func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, error) {
-	if err := config.ValidateSessionName(session); err != nil {
+// ExistingRuntimeRolePath opens only the already-created volatile session
+// side. Status uses it before any durable enumeration so a missing lockfile
+// cannot silently acquire anchored confidence.
+func (n *Namespace) ExistingRuntimeRolePath(session, role string) (*RolePath, error) {
+	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	if err != nil {
 		return nil, err
 	}
-	if err := config.ValidateRoleName(role); err != nil {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.runtime == nil {
+		return nil, errors.New("namespace is closed")
+	}
+	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
 		return nil, err
+	}
+	runtimeSession, err := openPrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+	if err != nil {
+		return nil, err
+	}
+	return &RolePath{
+		Session: session, Role: role, RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
+		Lock: lockPath, Socket: socketPath, Record: recordPath, runtimeSession: runtimeSession,
+	}, nil
+}
+
+// ExistingDurableRolePath opens only the already-created durable role side.
+// It permits explicitly unanchored observation when the volatile tree is gone.
+func (n *Namespace) ExistingDurableRolePath(session, role string) (*RolePath, error) {
+	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	if err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.state == nil {
+		return nil, errors.New("namespace is closed")
+	}
+	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
+		return nil, err
+	}
+	stateSessions, err := openPrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
+	if err != nil {
+		return nil, err
+	}
+	stateSession, err := openPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
+	_ = stateSessions.Close()
+	if err != nil {
+		return nil, err
+	}
+	stateRoles, err := openPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
+	_ = stateSession.Close()
+	if err != nil {
+		return nil, err
+	}
+	return &RolePath{
+		Session: session, Role: role, RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
+		Lock: lockPath, Socket: socketPath, Record: recordPath, stateRoles: stateRoles,
+	}, nil
+}
+
+func (n *Namespace) validatedRolePaths(session, role string) (string, string, string, error) {
+	if err := config.ValidateSessionName(session); err != nil {
+		return "", "", "", err
+	}
+	if err := config.ValidateRoleName(role); err != nil {
+		return "", "", "", err
 	}
 	lockPath := filepath.Join(n.RuntimeRoot, session, role+".lock")
 	socketPath := filepath.Join(n.RuntimeRoot, session, role+".sock")
 	recordPath := filepath.Join(n.StateRoot, "sessions", session, "roles", role+".json")
 	if len(socketPath) >= DarwinUnixSocketPathBytes {
-		return nil, &SocketPathTooLongError{Path: socketPath, Length: len(socketPath)}
+		return "", "", "", &SocketPathTooLongError{Path: socketPath, Length: len(socketPath)}
+	}
+	return lockPath, socketPath, recordPath, nil
+}
+
+// SocketPresent observes the exact role socket entry through the retained
+// runtime-session descriptor. A non-socket artifact is an observation error,
+// never socket presence.
+type SocketTopologyError struct {
+	Path   string
+	Reason string
+}
+
+func (e *SocketTopologyError) Error() string {
+	return fmt.Sprintf("role socket topology at %q is invalid: %s", e.Path, e.Reason)
+}
+
+func SocketPresent(path *RolePath) (bool, error) {
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.runtimeSession == nil {
+		return false, errors.New("runtime role path is closed")
+	}
+	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Socket), path.runtimeSession); err != nil {
+		return false, err
+	}
+	info, err := path.runtimeSession.Lstat(path.Role + ".sock")
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return false, &SocketTopologyError{Path: path.Socket, Reason: "contains a non-socket artifact"}
+	}
+	return true, nil
+}
+
+func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, error) {
+	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	if err != nil {
+		return nil, err
 	}
 
 	n.mu.Lock()

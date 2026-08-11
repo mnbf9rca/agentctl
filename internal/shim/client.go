@@ -38,12 +38,25 @@ func dialRoleSocket(ctx context.Context, path string) (*net.UnixConn, error) {
 
 // Observe requests the closed, non-payload runtime observation operation.
 func (c *Client) Observe(ctx context.Context, session, role string) (Response, error) {
-	return c.roundTrip(ctx, session, role, "observe")
+	return c.roundTrip(ctx, session, role, "observe", nil)
 }
 
 // DeliverOperation requests one closed payload operation by name. Payload
 // bytes are resolved only inside the server.
 func (c *Client) DeliverOperation(ctx context.Context, session, role, operation string) (Response, error) {
+	return c.DeliverOperationGuarded(ctx, session, role, operation, nil)
+}
+
+// DeliverOperationGuarded obtains LOCAL_PEERPID from the connected socket and
+// runs guard before writing any request bytes. The callback cannot supply or
+// alter operation payload; payload resolution remains inside the shim server.
+func (c *Client) DeliverOperationGuarded(
+	ctx context.Context,
+	session string,
+	role string,
+	operation string,
+	guard func(context.Context, int) error,
+) (Response, error) {
 	command, err := control.Lookup(operation)
 	if err != nil {
 		return Response{}, err
@@ -51,15 +64,21 @@ func (c *Client) DeliverOperation(ctx context.Context, session, role, operation 
 	if command.Kind != control.OperationPayload {
 		return Response{}, ErrOperationHasNoPayload
 	}
-	return c.roundTrip(ctx, session, role, operation)
+	return c.roundTrip(ctx, session, role, operation, guard)
 }
 
 // Stop requests the closed, non-payload lifecycle stop operation.
 func (c *Client) Stop(ctx context.Context, session, role string) (Response, error) {
-	return c.roundTrip(ctx, session, role, "stop")
+	return c.roundTrip(ctx, session, role, "stop", nil)
 }
 
-func (c *Client) roundTrip(ctx context.Context, session, role, operation string) (Response, error) {
+func (c *Client) roundTrip(
+	ctx context.Context,
+	session string,
+	role string,
+	operation string,
+	guard func(context.Context, int) error,
+) (Response, error) {
 	if c == nil || c.namespace == nil {
 		return Response{}, errors.New("shim client requires a namespace")
 	}
@@ -99,6 +118,11 @@ func (c *Client) roundTrip(ctx context.Context, session, role, operation string)
 	}
 	if err := advisory.CompareAnswerer(answererPID); err != nil {
 		return Response{}, err
+	}
+	if guard != nil {
+		if err := guard(ctx, answererPID); err != nil {
+			return Response{}, err
+		}
 	}
 
 	requestPayload, err := EncodeRequest(Request{

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,9 +11,60 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/control"
+	"github.com/mnbf9rca/agentctl/internal/fleet"
+	"github.com/mnbf9rca/agentctl/internal/shim"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
+
+func TestIntegrationShimCompatibilityStatusAndGuardedControlSurviveJoinedPresentation(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	namespace, records, lifecycle, _ := fixture.shimStack(t)
+	launcher := fleet.NewShimLauncher(fixture.client, lifecycle, records, fixture.shimLaunchDependencies())
+	launched, err := launcher.Launch(context.Background(), "shim-compat", config.FleetConfig{Roles: []config.RoleConfig{
+		{Name: "planner", Harness: config.HarnessClaude},
+		{Name: "coder", Harness: config.HarnessCodex},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("shim Launch() error = %v", err)
+	}
+	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
+
+	panes := fixture.shimPresentationPanes(launched.Session.ID)
+	fixture.tmuxOutput("join-pane", "-d", "-s", string(panes["coder"].ID), "-t", string(panes["planner"].ID))
+
+	collector := statuspkg.NewShimCollector(
+		fleet.NewShimStatusFleetReader(records),
+		statuspkg.NewRuntimeShimRoleSource(namespace, lifecycle),
+		statuspkg.NewRuntimePresentationSource(fixture.client),
+	)
+	report, err := collector.Collect(context.Background(), "shim-compat")
+	if err != nil {
+		t.Fatalf("shim status Collect() after join-pane error = %v", err)
+	}
+	if report.Presentation != statuspkg.PresentationPresent || len(report.Agents) != 2 {
+		t.Fatalf("shim status after join-pane = %#v, want present two-role runtime report", report)
+	}
+	for _, agent := range report.Agents {
+		if agent.State != statuspkg.RuntimeStateRunning || agent.Confidence != statuspkg.ConfidenceAnchored || agent.ShimPID == 0 || agent.ChildPID == 0 {
+			t.Fatalf("shim status row after join-pane = %#v, want anchored running runtime identity", agent)
+		}
+	}
+
+	dispatcher := control.NewShimDispatcher[shim.Response](lifecycle, control.NewAncestryObserver(fixture.runner), os.Getpid)
+	response, err := dispatcher.Execute(context.Background(), "clear", "shim-compat", "coder")
+	if err != nil {
+		t.Fatalf("guarded shim clear after join-pane error = %v", err)
+	}
+	if response.Outcome != shim.OutcomeDeliverySubmitted || response.SubmitObserved == nil || !*response.SubmitObserved {
+		t.Fatalf("guarded shim clear after join-pane = %#v, want observed submit", response)
+	}
+	fixture.waitRoleInput("coder", "\x15/clear\n")
+	fixture.assertRoleInputRemains("planner", "", 500*time.Millisecond)
+}
 
 func TestIntegrationStatusReportsLiveAndKilledRoleWindows(t *testing.T) {
 	fixture := newIntegrationFixture(t)
