@@ -21,6 +21,7 @@ type Client interface {
 	ListWindows(context.Context, tmuxx.SessionID) ([]tmuxx.Window, error)
 	AttachSession(context.Context, tmuxx.SessionID) error
 	ListSessions(context.Context) ([]tmuxx.Session, error)
+	FindPresentationSession(context.Context, string) (tmuxx.Session, bool, error)
 }
 
 // EnvironmentError reports a local terminal environment where iTerm2 control
@@ -47,6 +48,14 @@ type RefusalError struct {
 	Session tmuxx.Session
 	Option  string
 	Value   string
+}
+
+// NoPresentationError is the factual attach-only limitation: runtime control
+// remains available, but no tmux UI was observed for this session.
+type NoPresentationError struct{ Session string }
+
+func (e *NoPresentationError) Error() string {
+	return fmt.Sprintf("refusing to attach session %q; no tmux presentation was observed; status and control remain available without tmux", e.Session)
 }
 
 func (e *RefusalError) Error() string {
@@ -118,6 +127,27 @@ func (e Executor) Execute(ctx context.Context, target tmuxx.Session, out io.Writ
 		return tmuxx.ClassifyError(err)
 	}
 	return nil
+}
+
+// ExecutePresentation attaches only an exact tmux presentation observed by
+// name. Legacy tmux metadata is not runtime ownership evidence and is not read.
+func (e Executor) ExecutePresentation(ctx context.Context, session string, out io.Writer) (tmuxx.Session, error) {
+	target, present, err := e.client.FindPresentationSession(ctx, session)
+	if err != nil {
+		return tmuxx.Session{}, tmuxx.ClassifyError(err)
+	}
+	if !present {
+		return tmuxx.Session{}, &NoPresentationError{Session: session}
+	}
+	windowCount := -1
+	if windows, countErr := e.client.ListWindows(ctx, target.ID); countErr == nil {
+		windowCount = len(windows)
+	}
+	writeNarration(out, target, windowCount)
+	if err := e.client.AttachSession(ctx, target.ID); err != nil {
+		return tmuxx.Session{}, tmuxx.ClassifyError(err)
+	}
+	return target, nil
 }
 
 // StillRunning reports whether the attached session is still present once

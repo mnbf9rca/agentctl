@@ -84,6 +84,16 @@ func (s TerminalState) Settled() bool {
 	return s.termiosObserved && !s.Canonical() && !s.Echo()
 }
 
+// RelayInputState returns the observed nested mode adapted for the outer
+// terminal. Disabling outer ISIG makes control characters available to the
+// relay as bytes; the nested PTY's own ISIG policy then delivers the signal to
+// the harness process group. All other observed termios fields are preserved.
+func (s TerminalState) RelayInputState() TerminalState {
+	relay := s
+	relay.termios.Lflag &^= syscall.ISIG
+	return relay
+}
+
 // WindowSize returns the size from the same terminal observation.
 func (s TerminalState) WindowSize() (WindowSize, error) {
 	if !s.sizeObserved {

@@ -55,8 +55,7 @@ type ShimLaunchDependencies struct {
 	Sleep      func(time.Duration)
 }
 
-// ShimLauncher is the explicitly named compatibility implementation used
-// directly until the atomic CLI cutover.
+// ShimLauncher is the runtime-backed fleet launcher used by the public CLI.
 type ShimLauncher struct {
 	presentation ShimPresentation
 	lifecycle    ShimLifecycle
@@ -120,8 +119,7 @@ func (e *ShimLaunchRollbackError) Error() string {
 
 func (e *ShimLaunchRollbackError) Unwrap() error { return e.Cause }
 
-// NewShimLauncher constructs the compatibility implementation without
-// changing the legacy New/Launcher production path.
+// NewShimLauncher constructs the runtime-backed fleet launcher.
 func NewShimLauncher(presentation ShimPresentation, lifecycle ShimLifecycle, records ShimFleetRecords, dependencies ShimLaunchDependencies) ShimLauncher {
 	if dependencies.LookPath == nil {
 		dependencies.LookPath = exec.LookPath

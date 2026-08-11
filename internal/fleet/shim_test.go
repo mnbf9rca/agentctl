@@ -63,6 +63,41 @@ func TestShimFleetRecordStorePersistsCompleteVersionedConfig(t *testing.T) {
 	}
 }
 
+func TestShimFleetRecordStoreListsEveryDurableSessionEntryWithoutOpeningOrMutatingIt(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenShimFleetRecordStore(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := os.Mkdir(filepath.Join(stateRoot, "sessions", "zeta"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "sessions", "broken"), []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(stateRoot, "sessions", "alpha"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []string{"alpha", "broken", "zeta"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("List() = %#v, want %#v", got, want)
+	}
+	if payload, err := os.ReadFile(filepath.Join(stateRoot, "sessions", "broken")); err != nil || string(payload) != "not a directory\n" {
+		t.Fatalf("List() mutated unreadable entry: payload=%q err=%v", payload, err)
+	}
+}
+
 func TestShimFleetRecordStoreConcurrentCreateHasOneKernelWinner(t *testing.T) {
 	t.Parallel()
 
@@ -599,22 +634,6 @@ func TestShimLauncherRecordCommitUncertainStopsBeforePresentationMutation(t *tes
 	}
 }
 
-func TestLegacyLaunchRemainsOnItsExistingPath(t *testing.T) {
-	t.Parallel()
-
-	runner := tmuxx.NewFakeRunner(successfulOneRoleResponses("secure-prefix\n")...)
-	launcher := New(runner, Dependencies{
-		LookPath: presentExecutable,
-		Getwd:    func() (string, error) { return "/legacy", nil },
-	})
-	if _, err := launcher.Launch(context.Background(), "fleet", oneRoleFleet(), nil); err != nil {
-		t.Fatalf("legacy Launch() error = %v", err)
-	}
-	if got := runner.Calls[1].Args[len(runner.Calls[1].Args)-1]; got != "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude'" {
-		t.Fatalf("legacy creation command = %q, want unchanged direct harness path", got)
-	}
-}
-
 func shimTestFleet() config.FleetConfig {
 	return config.FleetConfig{Roles: []config.RoleConfig{
 		{Name: "planner", Harness: config.HarnessClaude, Effort: "max"},
@@ -718,12 +737,13 @@ func (f *fakeShimFleetRecords) RemoveOwned(ShimFleetRecord) error {
 }
 
 type fakeShimPresentation struct {
-	events     *shimEventLog
-	session    tmuxx.CreatedSession
-	sessionErr error
-	windows    []tmuxx.CreatedWindow
-	windowErrs []error
-	found      *tmuxx.Session
+	events      *shimEventLog
+	session     tmuxx.CreatedSession
+	sessionErr  error
+	windows     []tmuxx.CreatedWindow
+	windowErrs  []error
+	found       *tmuxx.Session
+	directories []string
 }
 
 func (f *fakeShimPresentation) FindPresentationSession(_ context.Context, name string) (tmuxx.Session, bool, error) {
@@ -739,8 +759,9 @@ func (f *fakeShimPresentation) CreatePresentationSession(_ context.Context, _, r
 	return f.session, f.sessionErr
 }
 
-func (f *fakeShimPresentation) CreatePresentationWindow(_ context.Context, _ tmuxx.SessionID, role, _, command string) (tmuxx.CreatedWindow, error) {
+func (f *fakeShimPresentation) CreatePresentationWindow(_ context.Context, _ tmuxx.SessionID, role, directory, command string) (tmuxx.CreatedWindow, error) {
 	f.events.add("presentation-window:" + role + ":" + command)
+	f.directories = append(f.directories, directory)
 	if len(f.windowErrs) > 0 {
 		err := f.windowErrs[0]
 		f.windowErrs = f.windowErrs[1:]

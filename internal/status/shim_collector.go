@@ -15,6 +15,7 @@ import (
 
 // ShimFleetReader returns one already-validated durable roster view.
 type ShimFleetReader interface {
+	List() ([]string, error)
 	Read(string) (ShimFleetRecord, error)
 }
 
@@ -52,15 +53,14 @@ type ShimPresentationSource interface {
 	ObservePresentation(context.Context, string, []string, []ShimAgent) (ShimPresentationObservation, error)
 }
 
-// ShimCollector gathers runtime-authoritative compatibility status.
+// ShimCollector gathers runtime-authoritative status.
 type ShimCollector struct {
 	fleets       ShimFleetReader
 	roles        ShimRoleSource
 	presentation ShimPresentationSource
 }
 
-// NewShimCollector constructs the compatibility collector kept beside the
-// legacy tmux collector until PR 7.
+// NewShimCollector constructs the runtime status collector.
 func NewShimCollector(fleets ShimFleetReader, roles ShimRoleSource, presentation ShimPresentationSource) ShimCollector {
 	return ShimCollector{fleets: fleets, roles: roles, presentation: presentation}
 }
@@ -118,6 +118,31 @@ func (c ShimCollector) Collect(ctx context.Context, session string) (ShimReport,
 			report.Presentation = PresentationUnavailable
 		}
 		report.Note = observation.Note
+	}
+	return report, nil
+}
+
+// CollectAll enumerates every durable session entry. A per-entry read or
+// schema failure is rendered as that session's defect and is never skipped;
+// only failure to enumerate the sessions directory prevents a report.
+func (c ShimCollector) CollectAll(ctx context.Context) (ShimSessionsReport, error) {
+	if c.fleets == nil || c.roles == nil {
+		return ShimSessionsReport{}, errors.New("shim status collector requires fleet and role sources")
+	}
+	sessions, err := c.fleets.List()
+	if err != nil {
+		return ShimSessionsReport{}, err
+	}
+	report := ShimSessionsReport{Schema: 1, Sessions: make([]ShimReport, 0, len(sessions))}
+	for _, session := range sessions {
+		selected, collectErr := c.Collect(ctx, session)
+		if collectErr != nil {
+			selected = ShimReport{
+				Schema: 1, Session: session, Presentation: PresentationUnavailable,
+				Agents: []ShimAgent{}, Defect: collectErr.Error(),
+			}
+		}
+		report.Sessions = append(report.Sessions, selected)
 	}
 	return report, nil
 }

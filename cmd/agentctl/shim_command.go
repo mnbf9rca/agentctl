@@ -125,6 +125,17 @@ func hiddenShimInvalidRequest(stderr io.Writer, options hiddenShimOptions, err e
 }
 
 func hiddenShimFailure(stderr io.Writer, options hiddenShimOptions, err error) int {
+	var frame *shim.ProtocolFrameError
+	if errors.As(err, &frame) && frame.Peer == shim.ProtocolPeerClient {
+		switch frame.Direction {
+		case shim.ProtocolFrameRead:
+			fmt.Fprintf(stderr, "agentctl: could not read protocol frame from connected client: %q (protocol-frame-read-invalid)\n", errorText(frame.Err))
+			return exitTmux
+		case shim.ProtocolFrameWrite:
+			fmt.Fprintf(stderr, "agentctl: could not write protocol frame to connected client: %q (protocol-frame-write-failed)\n", errorText(frame.Err))
+			return exitTmux
+		}
+	}
 	var run *shim.LifecycleRunError
 	if errors.As(err, &run) {
 		if run.CleanupObservation == shim.ProcessAbsent && run.CleanupErr != nil && len(run.Remaining) > 0 {

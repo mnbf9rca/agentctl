@@ -24,6 +24,84 @@ const (
 	ShimProtocolIOTimeout    = 2 * time.Second
 )
 
+// ProtocolFrameDirection and ProtocolFramePeer form the closed transport
+// boundary vocabulary used by the exact §15.8 outcome map.
+type ProtocolFrameDirection string
+type ProtocolFramePeer string
+
+const (
+	ProtocolFrameRead  ProtocolFrameDirection = "read"
+	ProtocolFrameWrite ProtocolFrameDirection = "write"
+	ProtocolPeerShim   ProtocolFramePeer      = "shim"
+	ProtocolPeerClient ProtocolFramePeer      = "client"
+)
+
+// ProtocolFrameError preserves which connected peer and I/O direction failed
+// without conflating transport failure with JSON or schema validation.
+type ProtocolFrameError struct {
+	Direction ProtocolFrameDirection
+	Peer      ProtocolFramePeer
+	Err       error
+}
+
+// ProtocolPeerAbortError is the nonfatal transport fact for a client that
+// closes without a partial request, or closes while a response is being
+// written. It is distinct from a malformed partial frame.
+type ProtocolPeerAbortError struct {
+	Direction ProtocolFrameDirection
+	Err       error
+}
+
+func (e *ProtocolPeerAbortError) Error() string {
+	if e == nil || e.Err == nil {
+		return "connected client aborted the protocol round trip"
+	}
+	return e.Err.Error()
+}
+
+func (e *ProtocolPeerAbortError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// FrameReadError preserves byte progress so a zero-byte peer abort cannot be
+// confused with a malformed partial frame while retaining the exact message.
+type FrameReadError struct {
+	Phase   string
+	Read    int
+	Total   int
+	Err     error
+	Timeout bool
+}
+
+func (e *FrameReadError) Error() string {
+	if e.Timeout {
+		return fmt.Sprintf("frame read exceeded 2s during %s after %d of %d bytes", e.Phase, e.Read, e.Total)
+	}
+	if errors.Is(e.Err, io.EOF) {
+		return fmt.Sprintf("EOF after %d of %d %s bytes", e.Read, e.Total, e.Phase)
+	}
+	return fmt.Sprintf("frame read failed during %s after %d of %d bytes: %v", e.Phase, e.Read, e.Total, e.Err)
+}
+
+func (e *FrameReadError) Unwrap() error { return e.Err }
+
+func (e *ProtocolFrameError) Error() string {
+	if e == nil || e.Err == nil {
+		return "protocol frame transport failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *ProtocolFrameError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // Request is deliberately incapable of carrying PTY bytes or arguments.
 type Request struct {
 	Version   int    `json:"version"`
@@ -799,7 +877,7 @@ func WriteFrame(connection net.Conn, payload []byte) (int, error) {
 func ReadFrame(connection net.Conn) ([]byte, error) {
 	deadline := time.Now().Add(ShimProtocolIOTimeout)
 	if err := connection.SetReadDeadline(deadline); err != nil {
-		return nil, fmt.Errorf("frame read failed during header after 0 of %d bytes: %w", ShimFrameHeaderBytes, err)
+		return nil, &FrameReadError{Phase: "header", Total: ShimFrameHeaderBytes, Err: err}
 	}
 	var header [ShimFrameHeaderBytes]byte
 	if err := readFramePart(connection, header[:], "header", ShimFrameHeaderBytes); err != nil {
@@ -832,12 +910,9 @@ func readFramePart(connection net.Conn, target []byte, phase string, total int) 
 		}
 		var networkError net.Error
 		if errors.As(err, &networkError) && networkError.Timeout() {
-			return fmt.Errorf("frame read exceeded 2s during %s after %d of %d bytes", phase, read, total)
+			return &FrameReadError{Phase: phase, Read: read, Total: total, Err: err, Timeout: true}
 		}
-		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("EOF after %d of %d %s bytes", read, total, phase)
-		}
-		return fmt.Errorf("frame read failed during %s after %d of %d bytes: %w", phase, read, total, err)
+		return &FrameReadError{Phase: phase, Read: read, Total: total, Err: err}
 	}
 	return nil
 }

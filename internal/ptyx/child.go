@@ -35,6 +35,7 @@ type ExitObservation struct {
 	Observed bool
 	PID      int
 	ExitCode int
+	Signal   syscall.Signal
 	Err      error
 }
 
@@ -243,10 +244,15 @@ func (c *execChild) CloseMaster() error {
 
 func (c *execChild) observeWait(command *exec.Cmd) {
 	waitErr := command.Wait()
+	var signal syscall.Signal
+	if status, ok := command.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		signal = status.Signal()
+	}
 	c.exit = ExitObservation{
 		Observed: true,
 		PID:      c.pid,
 		ExitCode: command.ProcessState.ExitCode(),
+		Signal:   signal,
 		Err:      waitErr,
 	}
 	close(c.done)

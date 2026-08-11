@@ -113,6 +113,27 @@ func TestHiddenShimFailureUsesExactReadinessRows(t *testing.T) {
 	}
 }
 
+func TestHiddenShimFailureUsesExactConnectedClientFrameRows(t *testing.T) {
+	options := hiddenShimOptions{session: "fleet", role: "planner"}
+	for _, test := range []struct {
+		name      string
+		direction shim.ProtocolFrameDirection
+		cause     string
+		want      string
+	}{
+		{name: "read", direction: shim.ProtocolFrameRead, cause: "unexpected EOF", want: "agentctl: could not read protocol frame from connected client: \"unexpected EOF\" (protocol-frame-read-invalid)\n"},
+		{name: "write", direction: shim.ProtocolFrameWrite, cause: "broken pipe", want: "agentctl: could not write protocol frame to connected client: \"broken pipe\" (protocol-frame-write-failed)\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr strings.Builder
+			err := &shim.ProtocolFrameError{Direction: test.direction, Peer: shim.ProtocolPeerClient, Err: errors.New(test.cause)}
+			if got := hiddenShimFailure(&stderr, options, err); got != exitTmux || stderr.String() != test.want {
+				t.Fatalf("hiddenShimFailure() = %d, %q; want %d, %q", got, stderr.String(), exitTmux, test.want)
+			}
+		})
+	}
+}
+
 func TestParseHiddenShimCommandRejectsRawCommandsPayloadsAndMalformedIdentity(t *testing.T) {
 	tests := [][]string{
 		nil,

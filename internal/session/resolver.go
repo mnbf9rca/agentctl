@@ -1,4 +1,5 @@
-// Package session resolves an agentctl session name to an exact tmux session ID.
+// Package session selects a validated durable-fleet session name. Tmux is only
+// the final ambient-name fallback when no explicit or advisory name is set.
 package session
 
 import (
@@ -15,9 +16,8 @@ import (
 // LookupEnv is compatible with os.LookupEnv.
 type LookupEnv func(string) (string, bool)
 
-// Client is the tmux surface required for session resolution.
+// Client is the optional tmux surface used by the ambient-name fallback.
 type Client interface {
-	ListSessions(context.Context) ([]tmuxx.Session, error)
 	DisplayMessage(context.Context, tmuxx.PaneID) (string, error)
 }
 
@@ -43,8 +43,8 @@ func (e *UsageError) Unwrap() error {
 	return e.Err
 }
 
-// ResolutionError reports a validly executed resolution that did not produce
-// exactly one session.
+// ResolutionError reports that the permitted source chain did not produce a
+// validated session name.
 type ResolutionError struct {
 	Source  Source
 	Name    string
@@ -93,55 +93,39 @@ func New(client Client, lookupEnv LookupEnv) Resolver {
 	return Resolver{client: client, lookupEnv: lookupEnv}
 }
 
-// Resolve returns the one exact tmux session selected by the permitted sources.
-// A nil explicit value means --session was omitted; a non-nil empty value
-// preserves an explicitly supplied --session= usage error.
-func (r Resolver) Resolve(ctx context.Context, explicit *string) (tmuxx.Session, error) {
+// Select returns the validated session name chosen by the permitted source
+// chain. Explicit and AGENTCTL_SESSION inputs are selection facts only and do
+// not require a tmux presentation. The current-tmux fallback observes only the
+// displayed session name for the caller's validated pane ID.
+func (r Resolver) Select(ctx context.Context, explicit *string) (string, error) {
 	if explicit != nil {
 		if err := config.ValidateSessionName(*explicit); err != nil {
-			return tmuxx.Session{}, &UsageError{Err: err}
+			return "", &UsageError{Err: err}
 		}
-		return r.resolveName(ctx, *explicit)
+		return *explicit, nil
 	}
 
 	if value, set := r.lookupEnv("AGENTCTL_SESSION"); set && value != "" {
 		if err := config.ValidateSessionName(value); err != nil {
-			return tmuxx.Session{}, &ResolutionError{Source: SourceEnvironment, Name: value, Err: err}
+			return "", &ResolutionError{Source: SourceEnvironment, Name: value, Err: err}
 		}
-		return r.resolveName(ctx, value)
+		return value, nil
 	}
 
 	paneValue, insideTmux := r.lookupEnv("TMUX_PANE")
 	if !insideTmux {
-		return tmuxx.Session{}, &ResolutionError{}
+		return "", &ResolutionError{}
 	}
 	name, err := r.client.DisplayMessage(ctx, tmuxx.PaneID(paneValue))
 	if err != nil {
 		var invalidID *tmuxx.InvalidIDError
 		if errors.As(err, &invalidID) {
-			return tmuxx.Session{}, &ResolutionError{Source: SourceCurrent, Err: err}
+			return "", &ResolutionError{Source: SourceCurrent, Err: err}
 		}
-		return tmuxx.Session{}, tmuxx.ClassifyError(err)
+		return "", tmuxx.ClassifyError(err)
 	}
 	if err := config.ValidateSessionName(name); err != nil {
-		return tmuxx.Session{}, &ResolutionError{Source: SourceCurrent, Name: name, Err: err}
+		return "", &ResolutionError{Source: SourceCurrent, Name: name, Err: err}
 	}
-	return r.resolveName(ctx, name)
-}
-
-func (r Resolver) resolveName(ctx context.Context, name string) (tmuxx.Session, error) {
-	sessions, err := r.client.ListSessions(ctx)
-	if err != nil {
-		return tmuxx.Session{}, tmuxx.ClassifyError(err)
-	}
-	matches := make([]tmuxx.Session, 0, 1)
-	for _, candidate := range sessions {
-		if candidate.Name == name {
-			matches = append(matches, candidate)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0], nil
-	}
-	return tmuxx.Session{}, &ResolutionError{Name: name, Matches: matches}
+	return name, nil
 }

@@ -225,6 +225,50 @@ func TestShimRelaunchPersistsOverridesOnlyAfterOwnedShimIsObservedReady(t *testi
 	}
 }
 
+func TestShimRelaunchResolvesRelativeDirectoryOverrideBeforePresentationMutation(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		directory string
+		want      string
+	}{
+		{directory: ".", want: "/workspace/current"},
+		{directory: "..", want: "/workspace"},
+		{directory: "../override", want: "/workspace/override"},
+	} {
+		t.Run(test.directory, func(t *testing.T) {
+			events := &shimEventLog{}
+			records := &fakeShimFleetRecords{events: events, record: mustShimFleetRecord(t, "fleet", "/repo")}
+			presentation := &fakeShimPresentation{
+				events: events, found: &tmuxx.Session{ID: "$4", Name: "fleet"},
+				windows: []tmuxx.CreatedWindow{{WindowID: "@8", PaneID: "%10", PanePID: 5432}},
+			}
+			lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(5432, 7002)}}
+			inspector := &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}
+			dependencies := shimLaunchTestDependencies(events)
+			dependencies.Getwd = func() (string, error) { return "/workspace/current", nil }
+			dependencies.Stat = func(path string) (os.FileInfo, error) {
+				if path != test.want {
+					t.Fatalf("Stat(%q), want absolute override %q before presentation mutation", path, test.want)
+				}
+				return testFileInfo{mode: os.ModeDir | 0o755}, nil
+			}
+			relauncher := NewShimRelauncher(presentation, lifecycle, records, inspector, dependencies)
+
+			_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner", Directory: &test.directory})
+			if err != nil {
+				t.Fatalf("Relaunch() error = %v", err)
+			}
+			if records.replaced == nil || records.replaced.Directory != test.want {
+				t.Fatalf("replacement directory = %#v, want absolute override %q", records.replaced, test.want)
+			}
+			if !reflect.DeepEqual(presentation.directories, []string{test.want}) {
+				t.Fatalf("presentation directories = %#v, want exact tmux -c input %q", presentation.directories, test.want)
+			}
+		})
+	}
+}
+
 func TestShimRelaunchDefiniteFleetUpdateFailureStopsOwnedChildBeforeRemovingOwnedPresentation(t *testing.T) {
 	t.Parallel()
 

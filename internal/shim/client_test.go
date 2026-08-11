@@ -148,6 +148,51 @@ func TestShimClientRejectsForeignHelloBeforeSendingRequest(t *testing.T) {
 	}
 }
 
+func TestShimClientRejectsAnswererDisagreementBeforeSendingRequest(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatalf("openNamespaceRoots() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatalf("RolePath() error = %v", err)
+	}
+	t.Cleanup(func() { _ = path.Close() })
+	recordedPID := os.Getpid() + 1000
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: recordedPID, Nonce: "nonce", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatalf("AcquireClaim() error = %v", err)
+	}
+	t.Cleanup(func() { _ = claim.Close() })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	requestObserved := make(chan bool, 1)
+	go func() {
+		connection, _ := listener.AcceptUnix()
+		defer func() { _ = connection.Close() }()
+		hello, _ := EncodeHello()
+		_, _ = WriteFrame(connection, hello)
+		_ = connection.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		buffer := make([]byte, 1)
+		count, _ := connection.Read(buffer)
+		requestObserved <- count != 0
+	}()
+
+	_, err = NewClient(namespace).Observe(context.Background(), "fleet", "planner")
+	var disagreement *AnswererDisagreementError
+	if !errors.As(err, &disagreement) || disagreement.RecordedPID != recordedPID || disagreement.AnswererPID != os.Getpid() {
+		t.Fatalf("Observe() error = %T %v, want recorded %d/answerer %d disagreement", err, err, recordedPID, os.Getpid())
+	}
+	if <-requestObserved {
+		t.Fatal("client sent request bytes after answerer disagreement")
+	}
+}
+
 func TestShimClientGuardsLOCALPEERPIDBeforeSendingOperationRequest(t *testing.T) {
 	base := shortTempDir(t)
 	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
@@ -275,5 +320,78 @@ func TestShimClientCancellationClosesConnectedRequest(t *testing.T) {
 	}
 	if err := <-peerClosed; err == nil {
 		t.Fatal("server peer did not observe the cancelled client connection close")
+	}
+}
+
+func TestShimClientClassifiesConnectedFrameTransportFailures(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatalf("openNamespaceRoots() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+
+	for _, test := range []struct {
+		name      string
+		role      string
+		direction ProtocolFrameDirection
+		writeErr  error
+		serve     func(*net.UnixConn)
+	}{
+		{
+			name: "response read", role: "reader", direction: ProtocolFrameRead,
+			serve: func(connection *net.UnixConn) {
+				hello, _ := EncodeHello()
+				_, _ = WriteFrame(connection, hello)
+				_, _ = ReadFrame(connection)
+			},
+		},
+		{
+			name: "request write", role: "writer", direction: ProtocolFrameWrite, writeErr: errors.New("broken pipe"),
+			serve: func(connection *net.UnixConn) {
+				hello, _ := EncodeHello()
+				_, _ = WriteFrame(connection, hello)
+				var one [1]byte
+				_, _ = connection.Read(one[:])
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, pathErr := namespace.RolePath("fleet", test.role)
+			if pathErr != nil {
+				t.Fatalf("RolePath() error = %v", pathErr)
+			}
+			defer func() { _ = path.Close() }()
+			claim, claimErr := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "nonce", StateRoot: path.StateRoot})
+			if claimErr != nil {
+				t.Fatalf("AcquireClaim() error = %v", claimErr)
+			}
+			defer func() { _ = claim.Close() }()
+			listener, listenErr := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+			if listenErr != nil {
+				t.Fatalf("ListenUnix() error = %v", listenErr)
+			}
+			defer func() { _ = listener.Close() }()
+			serverDone := make(chan struct{})
+			go func() {
+				connection, acceptErr := listener.AcceptUnix()
+				if acceptErr == nil {
+					test.serve(connection)
+					_ = connection.Close()
+				}
+				close(serverDone)
+			}()
+
+			client := NewClient(namespace)
+			if test.writeErr != nil {
+				client.writeFrame = func(net.Conn, []byte) (int, error) { return 0, test.writeErr }
+			}
+			_, operationErr := client.DeliverOperation(context.Background(), "fleet", test.role, "clear")
+			var frame *ProtocolFrameError
+			if !errors.As(operationErr, &frame) || frame.Direction != test.direction || frame.Peer != ProtocolPeerShim {
+				t.Fatalf("DeliverOperation() error = %T %v, want %s-from-shim ProtocolFrameError", operationErr, operationErr, test.direction)
+			}
+			<-serverDone
+		})
 	}
 }

@@ -144,6 +144,38 @@ func TestShimCollectorPresentationIsAdditiveAndKeepsObservedNote(t *testing.T) {
 	}
 }
 
+func TestShimCollectorCollectAllReportsEveryDurableFleetIncludingUnreadableEntries(t *testing.T) {
+	t.Parallel()
+
+	reader := fakeShimFleetReader{
+		sessions: []string{"alpha", "broken"},
+		records: map[string]ShimFleetRecord{
+			"alpha": {
+				Version: 1, Session: "alpha", Directory: "/work", Roster: []string{"planner"},
+				Roles: map[string]ShimFleetRole{"planner": {Harness: "claude"}},
+			},
+		},
+		errors: map[string]error{"broken": errors.New("fleet.json is not a regular file")},
+	}
+	source := &fakeShimRoleSource{observations: map[string]ShimRoleObservation{
+		"planner": {Candidates: []RuntimeState{RuntimeStateMissing}, Confidence: ConfidenceUnanchored},
+	}}
+
+	got, err := NewShimCollector(reader, source, nil).CollectAll(context.Background())
+	if err != nil {
+		t.Fatalf("CollectAll() error = %v", err)
+	}
+	if len(got.Sessions) != 2 || got.Sessions[0].Session != "alpha" || got.Sessions[1].Session != "broken" {
+		t.Fatalf("CollectAll() sessions = %#v, want alpha then broken", got.Sessions)
+	}
+	if got.Sessions[0].Agents[0].Confidence != ConfidenceUnanchored {
+		t.Fatalf("alpha = %#v, durable enumeration without anchor must remain unanchored", got.Sessions[0])
+	}
+	if got.Sessions[1].Defect != "fleet.json is not a regular file" || got.Sessions[1].Presentation != PresentationUnavailable {
+		t.Fatalf("broken = %#v, want visible per-fleet defect", got.Sessions[1])
+	}
+}
+
 func TestRuntimeShimRoleSourceChecksAnchorRootBeforeDurableEnumeration(t *testing.T) {
 	t.Parallel()
 
@@ -461,11 +493,26 @@ func TestRuntimePresentationSourceSuppressesOnlyAWindowActuallyMatchedByRosterNa
 }
 
 type fakeShimFleetReader struct {
-	record ShimFleetRecord
-	err    error
+	record   ShimFleetRecord
+	err      error
+	sessions []string
+	records  map[string]ShimFleetRecord
+	errors   map[string]error
 }
 
-func (f fakeShimFleetReader) Read(string) (ShimFleetRecord, error) { return f.record, f.err }
+func (f fakeShimFleetReader) List() ([]string, error) {
+	return append([]string(nil), f.sessions...), nil
+}
+
+func (f fakeShimFleetReader) Read(session string) (ShimFleetRecord, error) {
+	if err := f.errors[session]; err != nil {
+		return ShimFleetRecord{}, err
+	}
+	if record, ok := f.records[session]; ok {
+		return record, nil
+	}
+	return f.record, f.err
+}
 
 type fakeShimRoleSource struct {
 	observations map[string]ShimRoleObservation

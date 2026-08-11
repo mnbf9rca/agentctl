@@ -12,7 +12,7 @@ import (
 // operator-provenance view.
 type ShimStatusFleetReader struct{ records ShimFleetRecords }
 
-// NewShimStatusFleetReader constructs the compatibility status adapter.
+// NewShimStatusFleetReader constructs the durable-fleet status adapter.
 func NewShimStatusFleetReader(records ShimFleetRecords) ShimStatusFleetReader {
 	return ShimStatusFleetReader{records: records}
 }
@@ -25,7 +25,7 @@ func (r ShimStatusFleetReader) Read(session string) (status.ShimFleetRecord, err
 	}
 	record, err := r.records.Read(session)
 	if err != nil {
-		return status.ShimFleetRecord{}, err
+		return status.ShimFleetRecord{}, fleetMissing(session, err)
 	}
 	converted := status.ShimFleetRecord{
 		Version: record.Version, Session: record.Session, Directory: record.Directory,
@@ -38,4 +38,16 @@ func (r ShimStatusFleetReader) Read(session string) (status.ShimFleetRecord, err
 		}
 	}
 	return converted, nil
+}
+
+// List preserves every durable entry name for per-fleet status collection.
+func (r ShimStatusFleetReader) List() ([]string, error) {
+	if r.records == nil {
+		return nil, errors.New("shim status fleet reader requires durable fleet records")
+	}
+	lister, ok := r.records.(interface{ List() ([]string, error) })
+	if !ok {
+		return nil, errors.New("durable fleet records do not support session enumeration")
+	}
+	return lister.List()
 }

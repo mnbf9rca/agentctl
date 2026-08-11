@@ -5,39 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 )
-
-// empirical floor from 2026-08-01 spike; tune only with #13 measurement evidence
-const payloadDelay = time.Second
 
 // ErrProcessUnavailable means ps could not provide a nonempty process identity.
 var ErrProcessUnavailable = errors.New("process identity unavailable")
-
-// DeliverPayload clears pending input, types one literal payload, waits for the
-// fixed package delay, and submits it. No partial send-keys API is exposed.
-func (c Client) DeliverPayload(ctx context.Context, paneID PaneID, payload string) error {
-	if err := validateID(string(paneID), '%'); err != nil {
-		return fmt.Errorf("deliver payload target: %w", err)
-	}
-	if _, err := c.tmuxOutput(ctx, "clear pane input", "send-keys", "-t", string(paneID), "C-u"); err != nil {
-		return err
-	}
-	if _, err := c.tmuxOutput(ctx, "type literal payload", "send-keys", "-t", string(paneID), "-l", "--", payload); err != nil {
-		return err
-	}
-
-	timer := time.NewTimer(payloadDelay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-	}
-
-	_, err := c.tmuxOutput(ctx, "submit payload", "send-keys", "-t", string(paneID), "Enter")
-	return err
-}
 
 // ProcessName returns the process executable reported by ps with exactly one
 // trailing newline removed.
