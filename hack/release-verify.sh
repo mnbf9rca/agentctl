@@ -855,27 +855,42 @@ task8_release_walkthrough() {
         ready_pid_file=$2
         sweeper=$3
         journal=$4
+        detach_gate=$5
+        detached_ready=$6
+        external_journal=$7
         /usr/bin/perl -MPOSIX -e '\''
-          POSIX::setsid() >= 0 or die "setsid: $!";
-          $SIG{TERM} = "IGNORE";
-          $SIG{HUP} = "IGNORE";
           open my $pid_file, ">", $ARGV[0] or die "pid file: $!";
           print {$pid_file} "$$\n" or die "pid write: $!";
           close $pid_file or die "pid close: $!";
+          while (!-e $ARGV[1]) { select undef, undef, undef, 0.01 }
+          POSIX::setsid() >= 0 or die "setsid: $!";
+          $SIG{TERM} = "IGNORE";
+          $SIG{HUP} = "IGNORE";
+          open my $ready_file, ">", $ARGV[2] or die "ready file: $!";
+          print {$ready_file} "ready\n" or die "ready write: $!";
+          close $ready_file or die "ready close: $!";
           while (1) { select undef, undef, undef, 1 }
-        '\'' "$raw_pid_file" &
+        '\'' "$raw_pid_file" "$detach_gate" "$detached_ready" &
         detached_pid=$!
         while [ ! -s "$raw_pid_file" ]; do sleep 0.01; done
         "$sweeper" record --pid-file "$raw_pid_file" --journal "$journal"
-        read -r recorded_pid <"$raw_pid_file"
-        printf "%s\n" "$recorded_pid" >"$ready_pid_file"
+        "$sweeper" record --pid-file "$raw_pid_file" --journal "$external_journal"
+        : >"$detach_gate"
+        while [ ! -s "$detached_ready" ]; do sleep 0.01; done
+        read -r recorded_identity <"$journal"
+        printf "%s\n" "$recorded_identity" >"$ready_pid_file"
         wait "$detached_pid"
       ' task8-blocker "$task8_root/task8-detached.pid" \
         "${AGENTCTL_TEST_TASK8_CHILD_PID_FILE:?missing Task 8 child PID file}" "$task8_sweeper" \
-        "$task8_root/owned-identities.txt" || return $?
+        "$task8_root/owned-identities.txt" "$task8_root/task8-detach-gate" \
+        "$task8_root/task8-detached-ready" \
+        "${AGENTCTL_TEST_TASK8_CHILD_IDENTITY_JOURNAL:?missing Task 8 external identity journal}" || return $?
     fi
   }
   task8_sweeper="$task8_root/shim-version-sweeper"
+  if [ -n "${AGENTCTL_TEST_TASK8_SWEEPER_BUILD_DELAY_SECONDS:-}" ]; then
+    sleep "$AGENTCTL_TEST_TASK8_SWEEPER_BUILD_DELAY_SECONDS"
+  fi
   task8_run "$artifact_dir/task8-sweeper-build.log" go build -o "$task8_sweeper" ./hack/fixtures/shim-version || die 'could not build Task 8 owned-process sweeper'
   if [ "${AGENTCTL_TEST_TASK8_PHASE_DRIVER:-0}" = 1 ]; then
     for task8_test_phase in roots surface skill matrix integration kernel safety archives metadata; do

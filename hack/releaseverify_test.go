@@ -1,17 +1,17 @@
 package hack_test
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
 func renderResults(t *testing.T, versions, artifactDir string) (string, error) {
@@ -160,51 +160,194 @@ func TestTask8SignalPreservesSignalStatusWhenCleanupFails(t *testing.T) {
 	}
 }
 
+type task8OwnedIdentity struct {
+	pid   int
+	token shim.StartToken
+}
+
 func interruptTask8Phase(t *testing.T, repository, current, artifactDir, phase string, cleanupFail bool) ([]byte, int, error) {
 	t.Helper()
 	pidFile := filepath.Join(artifactDir, "blocking-child-"+phase+".pid")
+	testRoot := t.TempDir()
+	identityJournal := filepath.Join(testRoot, "owned-identity.txt")
 	command := exec.Command("bash", "hack/release-verify.sh", "--task8", current, artifactDir)
 	command.Dir = repository
 	command.Env = append(os.Environ(),
 		"AGENTCTL_TEST_TASK8_PHASE_DRIVER=1",
 		"AGENTCTL_TEST_TASK8_BLOCK_PHASE="+phase,
 		"AGENTCTL_TEST_TASK8_CHILD_PID_FILE="+pidFile,
+		"AGENTCTL_TEST_TASK8_CHILD_IDENTITY_JOURNAL="+identityJournal,
 	)
+	if phase == "roots" {
+		command.Env = append(command.Env, "AGENTCTL_TEST_TASK8_SWEEPER_BUILD_DELAY_SECONDS=6")
+	}
 	if cleanupFail {
 		command.Env = append(command.Env, "AGENTCTL_TEST_TASK8_CLEANUP_FAIL=1")
 	}
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	outputFile, err := os.CreateTemp(testRoot, "task8-verifier-output-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = outputFile.Close() }()
+	command.Stdout = outputFile
+	command.Stderr = outputFile
+	readOutput := func() []byte {
+		t.Helper()
+		if err := outputFile.Sync(); err != nil {
+			t.Fatalf("sync Task 8 verifier output: %v", err)
+		}
+		payload, err := os.ReadFile(outputFile.Name())
+		if err != nil {
+			t.Fatalf("read Task 8 verifier output: %v", err)
+		}
+		return payload
+	}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	var childPID int
-	for time.Now().Before(deadline) {
-		contents, err := os.ReadFile(pidFile)
-		if err == nil {
-			childPID, err = strconv.Atoi(strings.TrimSpace(string(contents)))
-			if err != nil {
-				t.Fatalf("parse blocking child PID: %v", err)
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
+	timeout := time.NewTimer(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer timeout.Stop()
+	defer ticker.Stop()
+	var identity task8OwnedIdentity
+	for identity.pid == 0 {
+		select {
+		case err := <-waited:
+			cleanupErr := cleanupTask8IdentityJournal(identityJournal)
+			t.Fatalf("phase %s verifier exited before blocking child started: %v cleanup=%v output=%q", phase, err, cleanupErr, readOutput())
+		case <-timeout.C:
+			waitErr, cleanupErr := terminateTask8Verifier(command, waited, identityJournal, nil)
+			t.Fatalf("phase %s blocking child did not start within 30s: verifier=%v cleanup=%v output=%q", phase, waitErr, cleanupErr, readOutput())
+		case <-ticker.C:
+			contents, err := os.ReadFile(pidFile)
+			if err == nil {
+				if _, err := fmt.Sscanf(strings.TrimSpace(string(contents)), "%d %d %d", &identity.pid, &identity.token.Sec, &identity.token.Usec); err != nil || identity.pid <= 0 {
+					waitErr, cleanupErr := terminateTask8Verifier(command, waited, identityJournal, nil)
+					t.Fatalf("parse blocking child identity: %v; verifier=%v cleanup=%v", err, waitErr, cleanupErr)
+				}
+				continue
 			}
-			break
+			if !errors.Is(err, os.ErrNotExist) {
+				waitErr, cleanupErr := terminateTask8Verifier(command, waited, identityJournal, nil)
+				t.Fatalf("read blocking child identity: %v; verifier=%v cleanup=%v", err, waitErr, cleanupErr)
+			}
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("read blocking child PID: %v", err)
+	}
+	waitErr, cleanupErr := terminateTask8Verifier(command, waited, identityJournal, &identity)
+	if cleanupErr != nil {
+		t.Fatalf("terminate Task 8 verifier: %v", cleanupErr)
+	}
+	return readOutput(), identity.pid, waitErr
+}
+
+func terminateTask8Verifier(command *exec.Cmd, waited <-chan error, identityJournal string, identity *task8OwnedIdentity) (error, error) {
+	signalErr := command.Process.Signal(syscall.SIGTERM)
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	select {
+	case waitErr := <-waited:
+		journalErr := cleanupTask8IdentityJournal(identityJournal)
+		if signalErr != nil && !errors.Is(signalErr, os.ErrProcessDone) {
+			return waitErr, errors.Join(fmt.Errorf("signal verifier TERM: %w", signalErr), journalErr)
 		}
-		time.Sleep(10 * time.Millisecond)
+		return waitErr, journalErr
+	case <-timer.C:
+		var cleanupErrors []error
+		cleanupErrors = append(cleanupErrors, errors.New("verifier did not exit within 15s of TERM"))
+		journaled, journalErr := loadTask8OwnedIdentity(identityJournal)
+		if journalErr != nil && !errors.Is(journalErr, os.ErrNotExist) {
+			cleanupErrors = append(cleanupErrors, journalErr)
+		}
+		if journaled != nil {
+			identity = journaled
+		}
+		if identity != nil {
+			if err := killTask8OwnedIdentity(*identity); err != nil {
+				cleanupErrors = append(cleanupErrors, err)
+			}
+		}
+		if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("kill verifier process group: %w", err))
+		}
+		fallback := time.NewTimer(5 * time.Second)
+		defer fallback.Stop()
+		select {
+		case waitErr := <-waited:
+			return waitErr, errors.Join(cleanupErrors...)
+		case <-fallback.C:
+			cleanupErrors = append(cleanupErrors, errors.New("verifier process group was not reaped within 5s of SIGKILL"))
+			return nil, errors.Join(cleanupErrors...)
+		}
 	}
-	if childPID == 0 {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		t.Fatalf("phase %s blocking child did not start; output=%q", phase, output.Bytes())
+}
+
+func cleanupTask8IdentityJournal(path string) error {
+	identity, err := loadTask8OwnedIdentity(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("signal Task 8 verifier: %v", err)
+	if err != nil {
+		return err
 	}
-	err := command.Wait()
-	return output.Bytes(), childPID, err
+	if err := syscall.Kill(identity.pid, 0); errors.Is(err, syscall.ESRCH) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("observe journaled Task 8 identity %d after verifier exit: %w", identity.pid, err)
+	}
+	cleanupErr := killTask8OwnedIdentity(*identity)
+	return fmt.Errorf("journaled Task 8 identity %d survived verifier exit and required cleanup: %v", identity.pid, cleanupErr)
+}
+
+func loadTask8OwnedIdentity(path string) (*task8OwnedIdentity, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var identity task8OwnedIdentity
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(payload)), "%d %d %d", &identity.pid, &identity.token.Sec, &identity.token.Usec); err != nil {
+		return nil, fmt.Errorf("parse Task 8 owned identity journal %q: %w", path, err)
+	}
+	if identity.pid <= 0 {
+		return nil, fmt.Errorf("Task 8 owned identity journal %q has invalid PID %d", path, identity.pid)
+	}
+	return &identity, nil
+}
+
+func killTask8OwnedIdentity(identity task8OwnedIdentity) error {
+	observed, err := shim.ReadStartToken(identity.pid)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return fmt.Errorf("observe detached blocker %d before fallback SIGKILL: %w", identity.pid, err)
+	}
+	if !identity.token.Equal(observed) {
+		return fmt.Errorf("detached blocker %d identity changed; refusing fallback SIGKILL", identity.pid)
+	}
+	if err := syscall.Kill(identity.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("fallback SIGKILL detached blocker %d: %w", identity.pid, err)
+	}
+	return waitTestPIDAbsent(identity.pid, 2*time.Second)
+}
+
+func waitTestPIDAbsent(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("PID %d did not become ESRCH", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 var requiredProbeEvidence = map[string][]string{
