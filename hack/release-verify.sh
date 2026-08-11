@@ -12,6 +12,8 @@ Usage:
   hack/release-verify.sh --render-results VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --process-check VERSIONS_FILE ARTIFACT_DIR
   hack/release-verify.sh --assert-probe PROBE_NAME OUTPUT_FILE
+  hack/release-verify.sh --shim-version-matrix CURRENT_BINARY ARTIFACT_DIR
+  hack/release-verify.sh --task8 CURRENT_BINARY ARTIFACT_DIR
 
 Runs preflight and the four hack/probe-*.sh contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
@@ -33,6 +35,16 @@ from VERSIONS_FILE's claude_version= line). No append; testable.
 
 --assert-probe validates captured OUTPUT_FILE against the explicit contract
 for PROBE_NAME. It exits 1 and names the missing observation on failure.
+
+--shim-version-matrix separately builds the committed foreign-version binary,
+runs both protocol directions plus absent/matching controls against
+CURRENT_BINARY, and writes hashes, versions, and observed results to
+ARTIFACT_DIR.
+
+--task8 runs the automated 0.5 release-candidate checkpoint with isolated
+HOME/runtime/state roots. It records built-binary help and skill behavior, the
+second-binary skew matrix, live integration/kernel evidence, drift guards, and
+cleanup observations in ARTIFACT_DIR.
 EOF
 }
 
@@ -496,6 +508,10 @@ render_results() {
   printf -- '- Claude Code: `%s`\n' "$claude_version"
   printf -- '- codex-cli: `%s`\n' "$codex_version"
   printf -- '- Mode: `%s`; harness: `%s`\n' "$mode" "$harness"
+  evidence_scope=$(field evidence_scope "$metadata")
+  if [ -n "$evidence_scope" ]; then
+    printf -- '- Scope: %s\n' "$evidence_scope"
+  fi
   printf -- '- Artifact: `%s`\n' "$artifact_dir"
 
   if [ "$mode" = verify-live ]; then
@@ -701,6 +717,272 @@ exit=1" &&
   esac
 }
 
+task8_release_walkthrough() {
+  local current_binary=$1
+  local artifact_dir=$2
+  local task8_top task8_root runtime_root state_root task8_home task8_project task8_head task8_goreleaser_config task8_sweeper
+  local cleanup_status=0
+  local task8_cleaned=0
+  local task8_active_pid=0
+  local task8_active_pgid=0
+  local -a task8_archives
+
+  task8_top=$(git rev-parse --show-toplevel 2>/dev/null) || die 'not inside a git repository'
+  [ "$PWD" = "$task8_top" ] || die "run from the repo root: $task8_top"
+  current_binary=$(cd "$(dirname "$current_binary")" && pwd -P)/$(basename "$current_binary")
+  if [ -e "$artifact_dir" ]; then
+    [ -d "$artifact_dir" ] || die "artifact path is not a directory: $artifact_dir"
+    [ -z "$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || die "artifact directory is not empty: $artifact_dir"
+  else
+    mkdir -p "$artifact_dir" || die "could not create artifact directory: $artifact_dir"
+  fi
+  artifact_dir=$(cd "$artifact_dir" && pwd -P)
+  [ -x "$current_binary" ] || die "current binary is not executable: $current_binary"
+  chmod 0700 "$artifact_dir" || die "could not protect artifact directory: $artifact_dir"
+
+  task8_root=$(mktemp -d /tmp/a8.XXXXXX) || die 'could not create Task 8 root'
+  runtime_root="$task8_root/runtime"
+  state_root="$task8_root/state"
+  task8_home="$task8_root/home"
+  task8_project="$task8_root/project"
+  install -d -m 0700 "$runtime_root" "$state_root" "$task8_home" "$task8_project" || die 'could not create Task 8 roots'
+
+  task8_cleanup() {
+    if [ "$task8_cleaned" -eq 1 ]; then
+      return "$cleanup_status"
+    fi
+    task8_cleaned=1
+    if [ "$cleanup_status" -eq 0 ]; then
+      if ! rm -rf "$task8_root"; then
+        cleanup_status=1
+      fi
+      if [ -e "$task8_root" ]; then
+        cleanup_status=1
+      fi
+    fi
+    if [ "${AGENTCTL_TEST_TASK8_CLEANUP_FAIL:-0}" = 1 ]; then
+      cleanup_status=1
+    fi
+    if [ "$cleanup_status" -ne 0 ]; then
+      printf 'TASK8 CLEANUP FAIL root=%s\n' "$task8_root" >&2
+      return 1
+    fi
+    printf 'TASK8 CLEANUP PASS root=%s absent=true\n' "$task8_root" >"$artifact_dir/cleanup.txt"
+  }
+  # shellcheck disable=SC2329 # invoked indirectly by the signal and EXIT traps below.
+  task8_stop_active() {
+    local task8_stop_attempt
+    if [ "$task8_active_pid" -eq 0 ]; then
+      return 0
+    fi
+    kill -TERM -- "-$task8_active_pgid" 2>/dev/null || true
+    task8_stop_attempt=0
+    while [ "$task8_stop_attempt" -lt 20 ]; do
+      if ! kill -0 -- "-$task8_active_pgid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+      task8_stop_attempt=$((task8_stop_attempt + 1))
+    done
+    if kill -0 -- "-$task8_active_pgid" 2>/dev/null; then
+      kill -KILL -- "-$task8_active_pgid" 2>/dev/null || true
+    fi
+    wait "$task8_active_pid" 2>/dev/null || true
+    if kill -0 -- "-$task8_active_pgid" 2>/dev/null; then
+      cleanup_status=1
+      printf 'TASK8 ACTIVE PROCESS GROUP SURVIVED pgid=%s\n' "$task8_active_pgid" >&2
+    fi
+    task8_active_pid=0
+    task8_active_pgid=0
+  }
+  task8_run() {
+    local task8_log=$1
+    local task8_run_status
+    shift
+    set -m
+    "$@" >"$task8_log" 2>&1 &
+    task8_active_pid=$!
+    task8_active_pgid=$task8_active_pid
+    if wait "$task8_active_pid"; then
+      task8_run_status=0
+    else
+      task8_run_status=$?
+    fi
+    task8_active_pid=0
+    task8_active_pgid=0
+    set +m
+    return "$task8_run_status"
+  }
+  task8_sweep_owned() {
+    if [ ! -x "$task8_sweeper" ]; then
+      return 0
+    fi
+    if ! "$task8_sweeper" sweep --root "$task8_root" --result "$artifact_dir/owned-process-sweep.txt"; then
+      cleanup_status=1
+      return 1
+    fi
+  }
+  # shellcheck disable=SC2329 # invoked indirectly by the EXIT trap below.
+  task8_exit() {
+    local exit_status=$?
+    trap - EXIT HUP INT TERM
+    task8_stop_active
+    task8_sweep_owned || true
+    if ! task8_cleanup && [ "$exit_status" -eq 0 ]; then
+      exit_status=1
+    fi
+    exit "$exit_status"
+  }
+  # shellcheck disable=SC2329 # invoked indirectly by signal traps below.
+  task8_signal() {
+    local signal_status=$1
+    trap - EXIT HUP INT TERM
+    task8_stop_active
+    task8_sweep_owned || true
+    task8_cleanup || true
+    exit "$signal_status"
+  }
+  trap 'task8_exit' EXIT
+  trap 'task8_signal 129' HUP
+  trap 'task8_signal 130' INT
+  trap 'task8_signal 143' TERM
+  task8_phase() {
+    local phase=$1
+    if [ "${AGENTCTL_TEST_TASK8_BLOCK_PHASE:-}" = "$phase" ]; then
+      # shellcheck disable=SC2016 # Perl and child-shell variables deliberately expand in their processes.
+      task8_run "$artifact_dir/task8-blocking-phase.log" bash -c '
+        raw_pid_file=$1
+        ready_pid_file=$2
+        sweeper=$3
+        journal=$4
+        /usr/bin/perl -MPOSIX -e '\''
+          POSIX::setsid() >= 0 or die "setsid: $!";
+          $SIG{TERM} = "IGNORE";
+          $SIG{HUP} = "IGNORE";
+          open my $pid_file, ">", $ARGV[0] or die "pid file: $!";
+          print {$pid_file} "$$\n" or die "pid write: $!";
+          close $pid_file or die "pid close: $!";
+          while (1) { select undef, undef, undef, 1 }
+        '\'' "$raw_pid_file" &
+        detached_pid=$!
+        while [ ! -s "$raw_pid_file" ]; do sleep 0.01; done
+        "$sweeper" record --pid-file "$raw_pid_file" --journal "$journal"
+        read -r recorded_pid <"$raw_pid_file"
+        printf "%s\n" "$recorded_pid" >"$ready_pid_file"
+        wait "$detached_pid"
+      ' task8-blocker "$task8_root/task8-detached.pid" \
+        "${AGENTCTL_TEST_TASK8_CHILD_PID_FILE:?missing Task 8 child PID file}" "$task8_sweeper" \
+        "$task8_root/owned-identities.txt" || return $?
+    fi
+  }
+  task8_sweeper="$task8_root/shim-version-sweeper"
+  task8_run "$artifact_dir/task8-sweeper-build.log" go build -o "$task8_sweeper" ./hack/fixtures/shim-version || die 'could not build Task 8 owned-process sweeper'
+  if [ "${AGENTCTL_TEST_TASK8_PHASE_DRIVER:-0}" = 1 ]; then
+    for task8_test_phase in roots surface skill matrix integration kernel safety archives metadata; do
+      task8_phase "$task8_test_phase"
+    done
+    die "unknown Task 8 test phase: ${AGENTCTL_TEST_TASK8_BLOCK_PHASE:-absent}"
+  fi
+  task8_phase roots
+
+  printf '== Task 8: built release-candidate surface ==\n'
+  task8_run "$artifact_dir/current-version.txt" "$current_binary" version || die 'release candidate version failed'
+  task8_run "$artifact_dir/help.txt" "$current_binary" --help || die 'release candidate help failed'
+  task8_run "$artifact_dir/relaunch-help.txt" "$current_binary" relaunch --help || die 'release candidate relaunch help failed'
+  grep -q '  run ' "$artifact_dir/help.txt" || die 'release candidate help omits run'
+  if grep -q '__shim' "$artifact_dir/help.txt"; then
+    die 'release candidate help exposes __shim'
+  fi
+  grep -q 'ESRCH-backed stale durable child record' "$artifact_dir/relaunch-help.txt" || die 'relaunch help omits ESRCH contract'
+  if grep -q 'no-baseline' "$artifact_dir/relaunch-help.txt"; then
+    die 'relaunch help retains pre-shim no-baseline recovery'
+  fi
+  task8_run "$artifact_dir/go-version-m.txt" go version -m "$current_binary" || die 'could not read release candidate Go metadata'
+  grep -q 'golang.org/x/sys[[:space:]]\+v0.47.0' "$artifact_dir/go-version-m.txt" || die 'release candidate does not record golang.org/x/sys v0.47.0'
+  task8_head=$(git rev-parse HEAD) || die 'could not resolve current HEAD'
+  grep -q "vcs.revision=$task8_head" "$artifact_dir/go-version-m.txt" || die 'release candidate VCS revision differs from current HEAD'
+  grep -q 'vcs.modified=false' "$artifact_dir/go-version-m.txt" || die 'release candidate records a modified source tree'
+  task8_phase surface
+
+  printf '== Task 8: installed skill from release candidate ==\n'
+  task8_run "$artifact_dir/skill-install.txt" env HOME="$task8_home" AGENTCTL_RUNTIME_ROOT="$runtime_root" AGENTCTL_STATE_ROOT="$state_root" \
+    "$current_binary" skill install || die 'release candidate skill install failed'
+  task8_run "$artifact_dir/skill-status.txt" env HOME="$task8_home" AGENTCTL_RUNTIME_ROOT="$runtime_root" AGENTCTL_STATE_ROOT="$state_root" \
+    "$current_binary" skill status || die 'release candidate skill status failed'
+  task8_run "$artifact_dir/skill-claude.diff" diff -ru --exclude=.agentctl-skill.json "$task8_top/skills/agentctl" "$task8_home/.claude/skills/agentctl" || die 'installed Claude skill differs from source tree'
+  task8_run "$artifact_dir/skill-codex.diff" diff -ru --exclude=.agentctl-skill.json "$task8_top/skills/agentctl" "$task8_home/.agents/skills/agentctl" || die 'installed Codex skill differs from source tree'
+  task8_phase skill
+
+  printf '== Task 8: separately built protocol-skew matrix ==\n'
+  task8_run "$artifact_dir/shim-version-matrix.log" env AGENTCTL_SHIM_VERSION_OWNED_ROOT="$task8_root/matrix" \
+    "$task8_top/hack/release-verify.sh" \
+    --shim-version-matrix "$current_binary" "$artifact_dir/shim-version-matrix" || die 'Task 8 shim-version matrix failed'
+  task8_phase matrix
+
+  printf '== Task 8: live isolated layout/lifecycle evidence ==\n'
+  task8_run "$artifact_dir/integration.log" env AGENTCTL_INTEGRATION_RELEASE_CANDIDATE="$current_binary" \
+    AGENTCTL_INTEGRATION_PROJECT_DIR="$task8_project" AGENTCTL_INTEGRATION_OWNED_ROOT="$task8_root/integration" \
+    go test -tags integration ./cmd/agentctl -count=1 -v \
+    -run 'TestIntegration(ReleaseCandidateSelection|ReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory|ReleaseCandidateStatusReportsUnanchoredDurableRecord|ReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery|ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence|PublicForegroundRunUsesRuntimeWithoutTmux|PublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing|PublicAttachRefusesAbsentPresentationForDurableFleet)' \
+    || die 'Task 8 live integration evidence failed'
+  task8_phase integration
+
+  printf '== Task 8: kernel absence/refusal and raw-token evidence ==\n'
+  task8_run "$artifact_dir/kernel-utc-c.log" env TZ=UTC LC_ALL=C go test ./internal/shim -count=1 -v \
+    -run 'Test(ProcessObservationUsesESRCHAsTheSoleAbsencePermission|ReadStartTokenObservesRawDarwinKinfoProc|ProcessObservationLiveForeignProcessAndReapedAbsence|LocalPeerPIDObservesConnectedAnswerer|ShimClientRejectsAnswererDisagreementBeforeSendingRequest)' \
+    || die 'Task 8 UTC/C kernel evidence failed'
+  task8_run "$artifact_dir/kernel-auckland-utf8.log" env TZ=Pacific/Auckland LC_ALL=en_US.UTF-8 go test ./internal/shim -count=1 -v \
+    -run 'Test(ReadStartTokenObservesRawDarwinKinfoProc|ProcessObservationLiveForeignProcessAndReapedAbsence)' \
+    || die 'Task 8 timezone/locale raw-token evidence failed'
+  task8_phase kernel
+  task8_run "$artifact_dir/fail-closed-safety.log" go test ./internal/shim ./internal/fleet -count=1 -v \
+    -run 'Test(ShimServerRefusesIdentityAndReadinessBeforePTYMutation|ShimRelaunchRefusesEveryNonAbsentRuntimeStateBeforeMutation|ShimRelaunchRemovesStaleRecordOnlyAfterFreshESRCHThenStartsOneShim|RuntimeShimRoleInspectorNeverAutoDeletesDeadChildStarting)' \
+    || die 'Task 8 readiness/orphan/relaunch safety evidence failed'
+
+  printf '== Task 8: structural, archive-license, and skill drift guards ==\n'
+  task8_run "$artifact_dir/structural-archive.log" go test ./internal/structural ./hack -count=1 \
+    -run 'Test(Production|VerifyReleaseArchives|ShimVersionFixtureExercisesBothBuiltArtifacts)' \
+    || die 'Task 8 structural/archive fixture gates failed'
+  task8_run "$artifact_dir/skill-drift.log" go test ./cmd/agentctl -count=1 -v \
+    -run 'Test(HiddenShimRouteIsAbsentFromAgentFacingInventories|DocumentedAgentCommandContract|ParsedCommandRegistryCouplesParserAndAgentDocumentation|ParsedCommandRegistryProjectsRegisteredOptions|ExitCodeTableMatchesConstants|StatusStatesMatch|RunLaunchPrintsSkillSkewNoticesAfterShimSuccess)' \
+    || die 'Task 8 skill drift gates failed'
+  task8_phase safety
+
+  printf '== Task 8: actual snapshot archive license contents ==\n'
+  task8_goreleaser_config="$task8_root/goreleaser.yaml"
+  awk -v task8_dist="$task8_root/dist" '
+    { print }
+    $0 == "project_name: agentctl" { print "dist: \"" task8_dist "\"" }
+  ' "$task8_top/.goreleaser.yaml" >"$task8_goreleaser_config" || die 'could not create isolated goreleaser configuration'
+  task8_run "$artifact_dir/goreleaser-snapshot.log" goreleaser release --config "$task8_goreleaser_config" --snapshot --clean --skip=notarize || die 'Task 8 snapshot release failed'
+  task8_archives=("$task8_root"/dist/*.tar.gz)
+  [ -e "${task8_archives[0]}" ] || die 'Task 8 snapshot produced no tar.gz archives'
+  task8_run "$artifact_dir/archive-verification.log" "$task8_top/hack/verify-release-archives.sh" "${task8_archives[@]}" || die 'Task 8 actual archive verification failed'
+  task8_phase archives
+
+  {
+    printf 'mode=task8-automated-release-candidate\n'
+    printf 'current_binary=%s\n' "$current_binary"
+    printf 'runtime_root=%s\n' "$runtime_root"
+    printf 'state_root=%s\n' "$state_root"
+    printf 'home=%s\n' "$task8_home"
+    printf 'project=%s\n' "$task8_project"
+    printf 'go=%s\n' "$(go version)"
+    printf 'darwin=%s\n' "$(sw_vers -productVersion)"
+    printf 'tmux=%s\n' "$(tmux -V)"
+    printf 'tmux_scope=integration tests use fixture-owned named sockets only\n'
+    printf 'skill_pairing=release-candidate install matches source tree for claude and codex\n'
+    printf 'r23=verified landed agent-facing surface; no duplicate implementation\n'
+    printf 'r23a=verified RuntimeStates drift fixture; no duplicate implementation\n'
+  } >"$artifact_dir/metadata.txt"
+  task8_phase metadata
+
+  task8_sweep_owned || die 'Task 8 owned-process sweep failed'
+  task8_cleanup
+  trap - EXIT HUP INT TERM
+  printf 'TASK8 RELEASE WALKTHROUGH PASS evidence=%s\n' "$artifact_dir"
+}
+
 # Pure, testable subcommands are handled before the live-environment flow.
 # handle them before any of the interactive/live-environment flow below.
 if [ "${1:-}" = '--render-results' ]; then
@@ -720,6 +1002,24 @@ if [ "${1:-}" = '--assert-probe' ]; then
   [ -r "$3" ] || die "cannot read probe output: $3"
   probe_out=$(cat "$3")
   assert_probe_output "$2" "$probe_out" && exit 0 || exit 1
+fi
+
+if [ "${1:-}" = '--shim-version-matrix' ]; then
+  [ "$#" -eq 3 ] || die '--shim-version-matrix requires CURRENT_BINARY ARTIFACT_DIR'
+  matrix_top=$(git rev-parse --show-toplevel 2>/dev/null) || die 'not inside a git repository'
+  [ "$PWD" = "$matrix_top" ] || die "run from the repo root: $matrix_top"
+  [ -x "$2" ] || die "current binary is not executable: $2"
+  install -d -m 0700 "$3" || die "could not create artifact directory: $3"
+  fixture_binary="$3/shim-version-fixture"
+  go build -o "$fixture_binary" ./hack/fixtures/shim-version || die 'could not build shim-version fixture'
+  "$fixture_binary" matrix --current-binary "$2" --artifact-dir "$3"
+  exit 0
+fi
+
+if [ "${1:-}" = '--task8' ]; then
+  [ "$#" -eq 3 ] || die '--task8 requires CURRENT_BINARY ARTIFACT_DIR'
+  task8_release_walkthrough "$2" "$3"
+  exit 0
 fi
 
 if [ "${1:-}" = '--help' ] || [ "${1:-}" = '-h' ]; then

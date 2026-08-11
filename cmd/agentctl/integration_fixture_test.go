@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
@@ -29,6 +31,11 @@ const (
 	integrationAgentctlEnv   = "AGENTCTL_INTEGRATION_AGENTCTL_BINARY"
 	integrationOwnedPIDsEnv  = "AGENTCTL_INTEGRATION_OWNED_PIDS"
 	integrationRawStubEnv    = "AGENTCTL_INTEGRATION_RAW_STUB"
+	integrationCandidateEnv  = "AGENTCTL_INTEGRATION_RELEASE_CANDIDATE"
+	integrationRealTMUXEnv   = "AGENTCTL_INTEGRATION_REAL_TMUX"
+	integrationTMUXSocketEnv = "AGENTCTL_INTEGRATION_TMUX_SOCKET"
+	integrationTMUXTmpEnv    = "AGENTCTL_INTEGRATION_TMUX_TMPDIR"
+	integrationProjectEnv    = "AGENTCTL_INTEGRATION_PROJECT_DIR"
 )
 
 type integrationResult struct {
@@ -143,6 +150,30 @@ func TestIntegrationFixtureRemovesSocketDirectory(t *testing.T) {
 	}
 }
 
+func TestIntegrationReleaseCandidateSelection(t *testing.T) {
+	candidate := os.Getenv(integrationCandidateEnv)
+	if candidate == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	fixture := newIntegrationFixtureWithoutServer(t)
+	resolved, err := filepath.Abs(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixture.agentctlPath != resolved {
+		t.Fatalf("fixture agentctl path = %q, want supplied candidate %q", fixture.agentctlPath, resolved)
+	}
+	contents, err := os.ReadFile(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := fixture.runAgentctl("version")
+	if result.exitCode != 0 || result.stdout == "" || result.stderr != "" {
+		t.Fatalf("supplied candidate version = %#v", result)
+	}
+	t.Logf("release candidate path=%s sha256=%x version=%s", resolved, sha256.Sum256(contents), strings.TrimSpace(result.stdout))
+}
+
 func (r *socketRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
 	if executable == "tmux" {
 		r.failureMu.Lock()
@@ -233,6 +264,9 @@ func TestMain(m *testing.M) {
 	case "claude", "codex":
 		integrationMarkerMain()
 		return
+	case "tmux":
+		integrationTMUXMain()
+		return
 	}
 	if os.Getenv(integrationShimBinaryEnv) == "1" && len(os.Args) > 1 && os.Args[1] == "__shim" {
 		os.Setenv(integrationRawStubEnv, "1")
@@ -247,6 +281,22 @@ func TestMain(m *testing.M) {
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func integrationTMUXMain() {
+	realTMUX := os.Getenv(integrationRealTMUXEnv)
+	socket := os.Getenv(integrationTMUXSocketEnv)
+	tmpDir := os.Getenv(integrationTMUXTmpEnv)
+	if realTMUX == "" || socket == "" || tmpDir == "" {
+		fmt.Fprintln(os.Stderr, "integration tmux stub: incomplete private socket environment")
+		os.Exit(96)
+	}
+	arguments := append([]string{realTMUX, "-L", socket}, os.Args[1:]...)
+	environment := environmentWith(os.Environ(), "TMUX_TMPDIR", tmpDir)
+	if err := syscall.Exec(realTMUX, arguments, environment); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(97)
+	}
 }
 
 func integrationAMQMain() {
@@ -344,7 +394,12 @@ parsedOptions:
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(89)
 	}
-	if _, err := fmt.Fprintf(pidRecord, "%d\n", os.Getpid()); err != nil {
+	token, err := shim.ReadStartToken(os.Getpid())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(89)
+	}
+	if _, err := fmt.Fprintf(pidRecord, "%d %d %d\n", os.Getpid(), token.Sec, token.Usec); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(89)
 	}
@@ -360,6 +415,9 @@ parsedOptions:
 	}
 	os.Setenv("AGENTCTL_STUB_ROLE", role)
 	os.Setenv(integrationMarkerEnv, "1")
+	if os.Getenv(integrationCandidateEnv) != "" {
+		os.Setenv(integrationRawStubEnv, "1")
+	}
 	os.Setenv(integrationCaptureEnv, filepath.Join(os.Getenv("AGENTCTL_STUB_CAPTURE_DIR"), role+".input"))
 	if err := syscall.Exec(harnessPath, append([]string{harnessPath}, harnessArguments...), os.Environ()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -424,15 +482,15 @@ func newIntegrationFixtureWithServer(t *testing.T, bootstrapServer bool) *integr
 
 	socket := "agentctl-test-" + randomHex(t, 8)
 	runner := &socketRunner{tmuxPath: tmuxPath, socket: socket, tmuxTmpDir: shortTmuxTempDir(t)}
+	shimRoot := shortShimTempDir(t)
 	fixture := &integrationFixture{
 		t:              t,
 		runner:         runner,
 		client:         tmuxx.New(runner),
 		invocations:    filepath.Join(t.TempDir(), "amq-invocations.tsv"),
 		captureDir:     t.TempDir(),
-		ownedChildPIDs: filepath.Join(t.TempDir(), "owned-child-pids.txt"),
+		ownedChildPIDs: filepath.Join(shimRoot, "owned-child-pids.txt"),
 	}
-	shimRoot := shortShimTempDir(t)
 	fixture.runtimeRoot = filepath.Join(shimRoot, "r")
 	fixture.stateRoot = filepath.Join(shimRoot, "s")
 	for _, root := range []string{fixture.runtimeRoot, fixture.stateRoot} {
@@ -465,7 +523,13 @@ func newIntegrationFixtureWithServer(t *testing.T, bootstrapServer bool) *integr
 
 func shortShimTempDir(t *testing.T) string {
 	t.Helper()
-	directory, err := os.MkdirTemp("/tmp", "a5i-")
+	parent := os.Getenv("AGENTCTL_INTEGRATION_OWNED_ROOT")
+	if parent == "" {
+		parent = "/tmp"
+	} else if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("create integration-owned root: %v", err)
+	}
+	directory, err := os.MkdirTemp(parent, "a5i-")
 	if err != nil {
 		t.Fatalf("create private shim temp directory: %v", err)
 	}
@@ -519,11 +583,30 @@ func (f *integrationFixture) installStubs() {
 		f.t.Fatalf("resolve test binary: %v", err)
 	}
 	f.agentctlPath = testBinary
+	if candidate := os.Getenv(integrationCandidateEnv); candidate != "" {
+		candidate, err = filepath.Abs(candidate)
+		if err != nil {
+			f.t.Fatalf("resolve integration release candidate: %v", err)
+		}
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			f.t.Fatalf("integration release candidate %q is not executable: %v", candidate, err)
+		}
+		f.agentctlPath = candidate
+	}
 
 	for _, executable := range []string{"amq", "claude", "codex"} {
 		if err := os.Link(testBinary, filepath.Join(binDir, executable)); err != nil {
 			f.t.Fatalf("install %s integration stub: %v", executable, err)
 		}
+	}
+	if f.agentctlPath != testBinary {
+		if err := os.Link(testBinary, filepath.Join(binDir, "tmux")); err != nil {
+			f.t.Fatalf("install tmux integration stub: %v", err)
+		}
+		f.t.Setenv(integrationRealTMUXEnv, f.runner.tmuxPath)
+		f.t.Setenv(integrationTMUXSocketEnv, f.runner.socket)
+		f.t.Setenv(integrationTMUXTmpEnv, f.runner.tmuxTmpDir)
 	}
 
 	f.t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -554,25 +637,49 @@ func (f *integrationFixture) cleanupOwnedChildren() {
 		f.t.Errorf("read owned child PIDs: %v", err)
 		return
 	}
-	var pids []int
+	type ownedIdentity struct {
+		pid   int
+		token shim.StartToken
+	}
+	var identities []ownedIdentity
 	for _, line := range nonemptyLines(payload) {
-		var pid int
-		if _, err := fmt.Sscanf(line, "%d", &pid); err != nil || pid <= 0 {
+		var identity ownedIdentity
+		if _, err := fmt.Sscanf(line, "%d %d %d", &identity.pid, &identity.token.Sec, &identity.token.Usec); err != nil || identity.pid <= 0 {
 			f.t.Errorf("parse owned child PID %q: %v", line, err)
 			continue
 		}
-		pids = append(pids, pid)
+		identities = append(identities, identity)
 	}
-	for _, pid := range pids {
+	for _, identity := range identities {
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			err := syscall.Kill(pid, 0)
+			err := syscall.Kill(identity.pid, 0)
 			if errors.Is(err, syscall.ESRCH) {
 				break
 			}
+			if err != nil {
+				f.t.Errorf("observe owned child PID %d during fixture teardown: %v", identity.pid, err)
+				break
+			}
 			if !time.Now().Before(deadline) {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-				f.t.Errorf("owned child PID %d survived fixture teardown and required SIGKILL", pid)
+				observed, tokenErr := shim.ReadStartToken(identity.pid)
+				if tokenErr != nil {
+					if !errors.Is(tokenErr, syscall.ESRCH) {
+						f.t.Errorf("owned child PID %d start token could not be observed; refusing SIGKILL: %v", identity.pid, tokenErr)
+					}
+					break
+				}
+				if !identity.token.Equal(observed) {
+					f.t.Errorf("owned child PID %d was reused; refusing SIGKILL: recorded=%#v observed=%#v", identity.pid, identity.token, observed)
+					break
+				}
+				if err := syscall.Kill(identity.pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					f.t.Errorf("SIGKILL token-matched owned child PID %d: %v", identity.pid, err)
+					break
+				}
+				if err := waitIntegrationPIDAbsent(identity.pid, time.Second); err != nil {
+					f.t.Errorf("owned child PID %d survived token-matched SIGKILL: %v", identity.pid, err)
+				}
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
@@ -580,12 +687,57 @@ func (f *integrationFixture) cleanupOwnedChildren() {
 	}
 }
 
+func waitIntegrationPIDAbsent(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return errors.New("kill(pid, 0) did not return ESRCH")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult {
 	f.t.Helper()
+	if f.agentctlPath != mustIntegrationTestBinary(f.t) {
+		command := exec.Command(f.agentctlPath, arguments...)
+		command.Env = os.Environ()
+		command.Dir = os.Getenv(integrationProjectEnv)
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		err := command.Run()
+		exitCode := 0
+		if err != nil {
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) {
+				f.t.Fatalf("run release candidate %v: %v", arguments, err)
+			}
+			exitCode = exitError.ExitCode()
+		}
+		return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := runWithRunner(context.Background(), arguments, &stdout, &stderr, f.runner, os.LookupEnv)
 	return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func mustIntegrationTestBinary(t *testing.T) string {
+	t.Helper()
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve integration test binary: %v", err)
+	}
+	return path
 }
 
 func (f *integrationFixture) createSentinelSession(name string) {

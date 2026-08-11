@@ -1,5 +1,6 @@
 date_utc=2026-08-03T14:10:00Z
 mode=verify-live
+evidence_scope=retired pre-0.5 Parts A-C fixture; not 0.5 release evidence
 harness=both
 probes=all four completed, no surviving throwaway server
 part_a_result=PASS — automated probes and isolation checks completed

@@ -40,6 +40,7 @@ func TestIntegrationPublicForegroundRunUsesRuntimeWithoutTmux(t *testing.T) {
 	var output bytes.Buffer
 	command := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
 		"run", "--session", "direct", "--role", "planner", "--harness", "claude")
+	command.Dir = os.Getenv(integrationProjectEnv)
 	command.Env = environmentWith(os.Environ(), integrationAgentctlEnv, "1")
 	command.Stdin = input
 	command.Stdout = &output
@@ -102,6 +103,7 @@ func TestIntegrationPublicForegroundRunRelaysCtrlCToNestedPTYAndCleansUp(t *test
 	var output bytes.Buffer
 	command := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
 		"run", "--session", "direct-signal", "--role", "planner", "--harness", "claude")
+	command.Dir = os.Getenv(integrationProjectEnv)
 	command.Env = environmentWith(os.Environ(), integrationAgentctlEnv, "1")
 	command.Stdin = input
 	command.Stdout = &output
@@ -141,6 +143,105 @@ func TestIntegrationPublicForegroundRunRelaysCtrlCToNestedPTYAndCleansUp(t *test
 	cleanedNewFleet := statusResult.exitCode == exitSession && strings.Contains(statusResult.stderr, `has no durable fleet configuration`)
 	if !cleanedRole && !cleanedNewFleet {
 		t.Fatalf("status after Ctrl-C = %#v, want cleaned missing role or cleaned newly owned fleet", statusResult)
+	}
+}
+
+func TestIntegrationReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory(t *testing.T) {
+	if os.Getenv(integrationCandidateEnv) == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	fixture := newIntegrationFixtureWithoutServer(t)
+	scriptPath, err := exec.LookPath("script")
+	if err != nil {
+		t.Skipf("foreground integration requires script PTY wrapper: %v", err)
+	}
+	project := os.Getenv(integrationProjectEnv)
+	if project == "" {
+		project = t.TempDir()
+	}
+	type foregroundProcess struct {
+		command  *exec.Cmd
+		input    *os.File
+		keepOpen *os.File
+		output   *bytes.Buffer
+		waited   bool
+	}
+	start := func(role, directory string) *foregroundProcess {
+		t.Helper()
+		input, keepOpen, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := &bytes.Buffer{}
+		command := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
+			"run", "--session", "direct-roster", "--role", role, "--harness", "claude")
+		command.Dir = directory
+		command.Env = os.Environ()
+		command.Stdin = input
+		command.Stdout = output
+		command.Stderr = output
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		process := &foregroundProcess{command: command, input: input, keepOpen: keepOpen, output: output}
+		t.Cleanup(func() {
+			_ = input.Close()
+			_ = keepOpen.Close()
+			if !process.waited && command.Process != nil {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		})
+		return process
+	}
+	waitRunningRoles := func(count int) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			result := fixture.runAgentctl("status", "--session", "direct-roster", "--json")
+			if result.exitCode == exitOK && strings.Count(result.stdout, `"state":"running"`) == count {
+				return
+			}
+			if !time.Now().Before(deadline) {
+				t.Fatalf("direct roster did not reach %d running roles: %#v", count, result)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+
+	first := start("planner", project)
+	waitRunningRoles(1)
+	second := start("coder", project)
+	waitRunningRoles(2)
+	fixture.waitStubInvocations(2)
+
+	other := t.TempDir()
+	refused := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
+		"run", "--session", "direct-roster", "--role", "reviewer", "--harness", "claude")
+	refused.Dir = other
+	refused.Env = os.Environ()
+	refusalOutput, refusalErr := refused.CombinedOutput()
+	var refusalExit *exec.ExitError
+	if !errors.As(refusalErr, &refusalExit) || refusalExit.ExitCode() != exitUnsafe {
+		t.Fatalf("different-directory run error = %v output=%q, want exit %d", refusalErr, refusalOutput, exitUnsafe)
+	}
+	for _, want := range []string{project, other, "fleet-directory-disagreement", "no role was started or durable record mutated"} {
+		if !strings.Contains(string(refusalOutput), want) {
+			t.Fatalf("different-directory refusal %q omits %q", refusalOutput, want)
+		}
+	}
+	if got := len(fixture.stubInvocations()); got != 2 {
+		t.Fatalf("stub invocations after refused extension = %d, want 2", got)
+	}
+
+	if killed := fixture.runAgentctl("kill", "--session", "direct-roster"); killed.exitCode != exitOK {
+		t.Fatalf("kill extended foreground roster = %#v", killed)
+	}
+	for _, process := range []*foregroundProcess{first, second} {
+		if err := process.command.Wait(); err != nil {
+			t.Fatalf("foreground process exit: %v; output=%q", err, process.output.String())
+		}
+		process.waited = true
 	}
 }
 
@@ -269,6 +370,187 @@ func TestIntegrationPublicAttachRefusesAbsentPresentationForDurableFleet(t *test
 	want := "agentctl: refusing to attach session \"no-ui\"; no tmux presentation was observed; status and control remain available without tmux\n"
 	if result.exitCode != exitSession || result.stdout != "" || result.stderr != want {
 		t.Fatalf("attach without presentation = %#v, want exit 3 and %q", result, want)
+	}
+}
+
+func TestIntegrationReleaseCandidateStatusReportsUnanchoredDurableRecord(t *testing.T) {
+	if os.Getenv(integrationCandidateEnv) == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	fixture := newIntegrationFixtureWithoutServer(t)
+	namespace, records, _, _ := fixture.shimStack(t)
+	record, err := fleet.NewShimFleetRecord("unanchored", fixture.captureDir, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := records.Create(record); err != nil {
+		t.Fatal(err)
+	}
+	path, err := namespace.RolePath("unanchored", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shim.WriteRecord(path, shim.NewChildStartingRecord("unanchored", "planner", os.Getpid(), "durable-only")); err != nil {
+		_ = path.Close()
+		t.Fatal(err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := fixture.runAgentctl("status", "--session", "unanchored", "--json")
+	if result.exitCode != exitOK || result.stderr != "" {
+		t.Fatalf("unanchored candidate status = %#v", result)
+	}
+	if !strings.Contains(result.stdout, `"confidence":"unanchored"`) || strings.Contains(result.stdout, `"confidence":"anchored"`) {
+		t.Fatalf("unanchored candidate status = %q", result.stdout)
+	}
+}
+
+func TestIntegrationReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery(t *testing.T) {
+	if os.Getenv(integrationCandidateEnv) == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	fixture := newIntegrationFixture(t)
+	launched := fixture.runAgentctl("launch", "--session", "candidate-layout", "--roles", "planner:claude,coder:codex")
+	if launched.exitCode != exitOK {
+		t.Fatalf("candidate launch = %#v", launched)
+	}
+	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
+	report := func() statuspkg.ShimReport {
+		t.Helper()
+		result := fixture.runAgentctl("status", "--session", "candidate-layout", "--json")
+		if result.exitCode != exitOK || result.stderr != "" {
+			t.Fatalf("candidate status = %#v", result)
+		}
+		var decoded statuspkg.ShimReport
+		if err := json.Unmarshal([]byte(result.stdout), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	initial := report()
+	identities := map[string][2]int{}
+	for _, agent := range initial.Agents {
+		if agent.ShimPID <= 0 || agent.ChildPID <= 0 || agent.State != statuspkg.RuntimeStateRunning {
+			t.Fatalf("initial candidate status agent = %#v", agent)
+		}
+		identities[agent.Role] = [2]int{agent.ShimPID, agent.ChildPID}
+	}
+	assertIdentity := func(stage string) {
+		t.Helper()
+		observed := report()
+		if len(observed.Agents) != 2 {
+			t.Fatalf("%s candidate agents = %#v", stage, observed.Agents)
+		}
+		for _, agent := range observed.Agents {
+			want, ok := identities[agent.Role]
+			if !ok || agent.ShimPID <= 0 || agent.ChildPID <= 0 || agent.State != statuspkg.RuntimeStateRunning ||
+				agent.ShimPID != want[0] || agent.ChildPID != want[1] {
+				t.Fatalf("%s candidate identity = %#v, want %#v", stage, agent, want)
+			}
+		}
+	}
+	deliver := func(stage, operation, role, wantInput string) {
+		t.Helper()
+		result := fixture.runAgentctl(operation, "--session", "candidate-layout", role)
+		if result.exitCode != exitOK || !strings.Contains(result.stderr, "observed submit") {
+			t.Fatalf("%s candidate %s = %#v", stage, operation, result)
+		}
+		fixture.waitRoleInput(role, wantInput)
+	}
+
+	session := fixture.presentationSession("candidate-layout")
+	panes := fixture.shimPresentationPanes(session.ID)
+	plannerPane := panes["planner"]
+	coderPane := panes["coder"]
+	fixture.tmuxOutput("join-pane", "-d", "-s", string(coderPane.ID), "-t", string(plannerPane.ID))
+	assertIdentity("after join-pane")
+	deliver("after join-pane", "clear", "planner", "\x15/clear\n")
+	brokenWindow := trimIntegrationLine(string(fixture.tmuxOutput("break-pane", "-d", "-s", string(coderPane.ID), "-P", "-F", "#{window_id}")))
+	assertIdentity("after break-pane")
+	deliver("after break-pane", "compact", "coder", "\x15/compact\n")
+	fixture.tmuxOutput("swap-pane", "-d", "-s", string(coderPane.ID), "-t", string(plannerPane.ID))
+	assertIdentity("after swap-pane")
+	deliver("after swap-pane", "compact", "planner", "\x15/clear\n\x15/compact\n")
+	fixture.tmuxOutput("move-window", "-s", brokenWindow, "-t", string(session.ID)+":9")
+	assertIdentity("after move-window")
+	deliver("after move-window", "clear", "coder", "\x15/compact\n\x15/clear\n")
+
+	if killed := fixture.runAgentctl("kill", "--session", "candidate-layout"); killed.exitCode != exitOK {
+		t.Fatalf("candidate layout kill = %#v", killed)
+	}
+}
+
+func TestIntegrationReleaseCandidateCrashRelaunchAndKillUseObservedAbsence(t *testing.T) {
+	if os.Getenv(integrationCandidateEnv) == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	fixture := newIntegrationFixture(t)
+	launched := fixture.runAgentctl("launch", "--session", "candidate-relaunch", "--roles", "planner:claude")
+	if launched.exitCode != exitOK {
+		t.Fatalf("candidate launch = %#v", launched)
+	}
+	fixture.waitStubInvocations(1)
+	statusAgent := func() (statuspkg.ShimAgent, integrationResult) {
+		t.Helper()
+		result := fixture.runAgentctl("status", "--session", "candidate-relaunch", "--json")
+		if result.stdout == "" {
+			return statuspkg.ShimAgent{}, result
+		}
+		var report statuspkg.ShimReport
+		if err := json.Unmarshal([]byte(result.stdout), &report); err != nil || len(report.Agents) != 1 {
+			t.Fatalf("decode candidate status %q: %v", result.stdout, err)
+		}
+		return report.Agents[0], result
+	}
+	initial, initialResult := statusAgent()
+	if initialResult.exitCode != exitOK || initial.ShimPID <= 0 || initial.ChildPID <= 0 || initial.State != statuspkg.RuntimeStateRunning {
+		t.Fatalf("initial candidate status = %#v, %#v", initial, initialResult)
+	}
+	if err := syscall.Kill(initial.ShimPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	var crashed statuspkg.ShimAgent
+	childAbsent := false
+	for time.Now().Before(deadline) {
+		crashed, _ = statusAgent()
+		if crashed.State == statuspkg.RuntimeStateMissing {
+			t.Fatalf("candidate called crashed role missing before relaunch: %#v", crashed)
+		}
+		if err := syscall.Kill(initial.ChildPID, 0); errors.Is(err, syscall.ESRCH) {
+			childAbsent = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !childAbsent {
+		t.Fatalf("crashed candidate child PID %d was not observed ESRCH; last status %#v", initial.ChildPID, crashed)
+	}
+
+	relaunched := fixture.runAgentctl("relaunch", "--session", "candidate-relaunch", "planner")
+	if relaunched.exitCode != exitOK {
+		t.Fatalf("candidate relaunch = %#v", relaunched)
+	}
+	fixture.waitStubInvocations(2)
+	running, runningResult := statusAgent()
+	if runningResult.exitCode != exitOK || running.State != statuspkg.RuntimeStateRunning || running.ShimPID <= 0 || running.ChildPID <= 0 || running.ShimPID == initial.ShimPID {
+		t.Fatalf("candidate status after relaunch = %#v, %#v", running, runningResult)
+	}
+	if killed := fixture.runAgentctl("kill", "--session", "candidate-relaunch"); killed.exitCode != exitOK {
+		t.Fatalf("candidate kill = %#v", killed)
+	}
+	if err := syscall.Kill(running.ChildPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("candidate child after kill(%d, 0) = %v, want ESRCH", running.ChildPID, err)
+	}
+	if fixture.hasSession("candidate-relaunch") {
+		t.Fatal("candidate presentation survived observed kill cleanup")
+	}
+	after := fixture.runAgentctl("status", "--session", "candidate-relaunch")
+	if after.exitCode != exitSession || !strings.Contains(after.stderr, "has no durable fleet configuration") {
+		t.Fatalf("candidate status after kill = %#v", after)
 	}
 }
 

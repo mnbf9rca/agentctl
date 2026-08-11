@@ -1,13 +1,17 @@
 package hack_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func renderResults(t *testing.T, versions, artifactDir string) (string, error) {
@@ -70,6 +74,137 @@ func processCheck(t *testing.T, versions, artifactDir string) (string, error) {
 	cmd := exec.Command("./release-verify.sh", "--process-check", versions, artifactDir)
 	out, err := cmd.Output()
 	return string(out), err
+}
+
+func TestTask8RejectsNonemptyEvidenceDirectoryBeforeRunningCandidate(t *testing.T) {
+	artifactDir := t.TempDir()
+	sentinel := filepath.Join(artifactDir, "sentinel")
+	writeTestFile(t, sentinel, []byte("preserve\n"), 0o600)
+	current, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "hack/release-verify.sh", "--task8", current, artifactDir)
+	command.Dir = repository
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Task 8 accepted stale evidence directory:\n%s", output)
+	}
+	if !strings.Contains(string(output), "artifact directory is not empty") {
+		t.Fatalf("Task 8 rejection = %q", output)
+	}
+	if got := readTestFile(t, sentinel); got != "preserve\n" {
+		t.Fatalf("stale evidence sentinel changed to %q", got)
+	}
+}
+
+func TestTask8SignalsPreserveFailureAndCleanExactlyOnceAtEveryPhase(t *testing.T) {
+	current, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []string{"roots", "surface", "skill", "matrix", "integration", "kernel", "safety", "archives", "metadata"} {
+		t.Run(phase, func(t *testing.T) {
+			artifactDir := t.TempDir()
+			output, childPID, err := interruptTask8Phase(t, repository, current, artifactDir, phase, false)
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 143 {
+				t.Fatalf("phase %s interruption error = %v output=%q, want exit 143", phase, err, output)
+			}
+			if strings.Contains(string(output), "TASK8 RELEASE WALKTHROUGH PASS") {
+				t.Fatalf("phase %s interruption claimed walkthrough pass:\n%s", phase, output)
+			}
+			cleanup := readTestFile(t, filepath.Join(artifactDir, "cleanup.txt"))
+			if !strings.Contains(cleanup, "TASK8 CLEANUP PASS") || strings.Count(cleanup, "TASK8 CLEANUP PASS") != 1 {
+				t.Fatalf("phase %s cleanup = %q", phase, cleanup)
+			}
+			if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("phase %s blocking child %d remains after interruption: %v", phase, childPID, err)
+			}
+			root := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(cleanup), "TASK8 CLEANUP PASS root="), " absent=true")
+			if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("phase %s Task 8 root %q remains after interruption: %v", phase, root, err)
+			}
+		})
+	}
+}
+
+func TestTask8SignalPreservesSignalStatusWhenCleanupFails(t *testing.T) {
+	current, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := t.TempDir()
+	output, childPID, err := interruptTask8Phase(t, repository, current, artifactDir, "roots", true)
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 143 {
+		t.Fatalf("cleanup-failure interruption error = %v output=%q, want exit 143", err, output)
+	}
+	if !strings.Contains(string(output), "TASK8 CLEANUP FAIL") || strings.Contains(string(output), "TASK8 RELEASE WALKTHROUGH PASS") {
+		t.Fatalf("cleanup-failure output = %q", output)
+	}
+	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("cleanup-failure blocking child %d remains after interruption: %v", childPID, err)
+	}
+}
+
+func interruptTask8Phase(t *testing.T, repository, current, artifactDir, phase string, cleanupFail bool) ([]byte, int, error) {
+	t.Helper()
+	pidFile := filepath.Join(artifactDir, "blocking-child-"+phase+".pid")
+	command := exec.Command("bash", "hack/release-verify.sh", "--task8", current, artifactDir)
+	command.Dir = repository
+	command.Env = append(os.Environ(),
+		"AGENTCTL_TEST_TASK8_PHASE_DRIVER=1",
+		"AGENTCTL_TEST_TASK8_BLOCK_PHASE="+phase,
+		"AGENTCTL_TEST_TASK8_CHILD_PID_FILE="+pidFile,
+	)
+	if cleanupFail {
+		command.Env = append(command.Env, "AGENTCTL_TEST_TASK8_CLEANUP_FAIL=1")
+	}
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var childPID int
+	for time.Now().Before(deadline) {
+		contents, err := os.ReadFile(pidFile)
+		if err == nil {
+			childPID, err = strconv.Atoi(strings.TrimSpace(string(contents)))
+			if err != nil {
+				t.Fatalf("parse blocking child PID: %v", err)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read blocking child PID: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if childPID == 0 {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+		t.Fatalf("phase %s blocking child did not start; output=%q", phase, output.Bytes())
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal Task 8 verifier: %v", err)
+	}
+	err := command.Wait()
+	return output.Bytes(), childPID, err
 }
 
 var requiredProbeEvidence = map[string][]string{

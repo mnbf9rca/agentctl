@@ -5,6 +5,7 @@
 - Claude Code: `2.1.220 (Claude Code)`
 - codex-cli: `codex-cli 0.146.0 (research preview)`
 - Mode: `verify-live`; harness: `both`
+- Scope: retired pre-0.5 Parts A-C fixture; not 0.5 release evidence
 - Artifact: `testdata/release-verify-live-artifact`
 - Part A: PASS — automated probes and isolation checks completed
 - Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
