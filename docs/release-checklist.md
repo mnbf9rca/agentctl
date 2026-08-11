@@ -5,7 +5,7 @@
 - Start at the repository root on the exact 0.5.0 release candidate. The worktree
   must be clean. Stop every pre-0.5 agentctl fleet first; 0.5 does not migrate it.
 - Use macOS and iTerm2. Install `make`, Go, `tmux`, `claude`, `codex`, `amq`, and
-  `install`.
+  the `install(1)` utility.
 - Sign in to Claude Code and Codex. Make sure SSH signing works and another
   person is available to review the evidence PR.
 
@@ -41,6 +41,9 @@ follow the numbered prompts it prints.
    results block and record the final verdict. Put it in a signed, ready PR. Wait
    for that PR's own green CI run and another person's review. Approve the
    signing prompt when it appears. Do not merge your own PR.
+7. After promotion, open the `Release` workflow's `notary-check` log. Confirm it
+   printed `notarization accepted`. `notarization still pending; re-check
+   manually` also exits 0 and is not acceptance.
 
 ## Evidence
 
@@ -50,3 +53,10 @@ results name the exact `verify-live` path. An exit-0 run adds one dated block be
 `## Results history` in
 [`docs/release-verification-notes.md`](release-verification-notes.md). Review and
 commit that block without copying credentials or full terminal transcripts.
+
+Promotion lives in the
+[release-promotion PR template](../.github/PULL_REQUEST_TEMPLATE/release-promotion.md).
+The template names [`hack/next-version.sh`](../hack/next-version.sh) as the
+version source, and the
+[promotion form check](../.github/workflows/promotion-form-check.yml) checks the
+handoff.
