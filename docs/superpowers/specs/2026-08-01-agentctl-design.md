@@ -140,7 +140,8 @@ further is printed.
 ```
 agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
 agentctl launch  --session S --from-template FILE [--roles R:H,...] [--models R:M,...] [--efforts R:L,...] [--dir PATH]
-agentctl relaunch [--session S] [--harness H] [--model M] [--dir PATH] ROLE
+agentctl run --session S --role R --harness H [--model M] [--effort L]
+agentctl relaunch [--session S] [--harness H] [--model M] [--effort L] [--dir PATH] ROLE
 agentctl attach   [--session S]
 agentctl status   [--session S | --all] [--json]
 agentctl clear    [--session S] ROLE
@@ -157,7 +158,10 @@ flag may add roles beside it (§6.9). Without a template, `--roles` remains requ
 are written separately above rather than as one line with everything bracketed, because a single line cannot express
 "one of these two is required" without saying it in prose anyway.
 
-**`status` never narrows silently.** Bare `agentctl status` reports **every** session on the tmux server (§6.3.1).
+At the §15 cutover, `run` is the exact foreground, no-tmux form above. All three identity flags are required and
+`--dir` is rejected; the observed cwd is the session-wide durable fleet directory (§15.7).
+
+**`status` never narrows silently.** Bare `agentctl status` reports **every durable fleet** (§15.6).
 Ambient context — `AGENTCTL_SESSION`, or the tmux session the caller happens to be sitting in — does not select a
 target for `status` and never reduces its output to one fleet; it may only *mark* which session the caller is in.
 Only an explicit `--session S` narrows the report to one session, because only that is the operator saying which fleet
@@ -167,13 +171,18 @@ There is no `--all` flag. It existed to make the listing reachable from inside t
 always resolved; a bare `status` that always lists makes it redundant, and a flag that changes nothing invites the
 reader to believe it changes something.
 
-`clear`, `compact`, `kill` and `attach` are unaffected: each acts on exactly one target, so each still resolves one
+`relaunch`, `clear`, `compact`, `kill` and `attach` each act on exactly one target, so each resolves one
 through the full §4.1 chain.
 
 ### 4.1 Session resolution
 
-Precedence for non-launch commands: explicit `--session` > `AGENTCTL_SESSION` > the current tmux session. `launch`
-always requires an explicit `--session` and never invokes the resolver at all.
+Precedence for acting commands other than `launch`/`run`: explicit `--session` > `AGENTCTL_SESSION` > the current tmux
+session. `launch` and `run` always require an explicit `--session` and never invoke the resolver.
+
+At the §15 cutover, explicit and environment sources are validated selection facts and do not require a tmux session
+of the same name. Only the current-tmux fallback calls `display-message` for the validated `TMUX_PANE`; its returned
+validated name is selected directly. Runtime commands subsequently open the durable fleet and role namespace. The
+pre-cutover list/exact-match rules below remain historical detail for §§1–14 and are superseded by this paragraph.
 
 **Empty is not the same as absent.** `--session=` (explicitly supplied, empty) is a usage error → exit 2, with **no**
 fallback: the user named the source, so falling through would substitute a session they did not ask for.
@@ -199,7 +208,7 @@ Session-name candidates are validated by `config.ValidateSessionName` — one va
 sources. `TMUX_PANE` is the exception in *what* is checked, not in how it is classified: it carries a pane ID rather
 than a session name, so it is validated as one, and an invalid value is still an invalid source the user set.
 
-**`status` does not consult the ambient sources at all.** The matrix above governs `clear`, `compact`, `kill` and
+**`status` does not consult the ambient sources at all.** The matrix above governs `relaunch`, `clear`, `compact`, `kill` and
 `attach` — commands that must end up holding exactly one target. `status` describes rather than acts, so it takes only
 an explicit `--session`; `AGENTCTL_SESSION` and the current tmux session neither select for it nor fail it. When no
 `--session` is given it reports the listing (§6.3.1), whatever the environment says.
@@ -1335,6 +1344,10 @@ or match by renaming an executable.
 
 ## 9. Exit codes
 
+At the 0.5.0 atomic cutover, §15.8 is the complete public exit map, including foreground child outcomes,
+runtime/shim refusal classes, retained ownership, and `fleet-directory-disagreement`. The pre-cutover derivation below
+is retained only as history where §15 does not supersede it.
+
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 8's claim extends from "the session this invocation created was removed" to "**what this invocation created**
 was removed": `launch` rolls back a session, `relaunch` rolls back the single window it created (§6.8).
@@ -1441,11 +1454,9 @@ Authoritative answers to implementation questions raised during Wave 1. These bi
 
 1. **Window-command assembly site.** Assembly remains confined to `internal/fleet` as the string
    `"exec " + shellq.Join(argv)`: `shellq` quotes and joins, `fleet` prepends the unquoted `exec` shell keyword, and
-   the result is passed to `tmuxx`. During PR 5's pre-cutover compatibility stage, the complete authorized set is
-   exactly `internal/fleet/fleet.go:agentCommand` for the shipped direct-harness argv and
-   `internal/fleet/shim.go:shimWindowCommand` for the hidden-shim argv. The structural guard pins both named sites and
-   rejects a third, indirection, or a move/rename. PR 7 removes the legacy site at the atomic cutover and restores the
-   one-site invariant. No other package may compose shell-interpreted strings.
+   the result is passed to `tmuxx`. The shipped authorized set is exactly one site:
+   `internal/fleet/shim.go:shimWindowCommand` for the hidden-shim argv. The structural guard pins that named site and
+   rejects a second, indirection, or a move/rename. No other package may compose shell-interpreted strings.
 2. **`shellq.Quote` is total.** Safe for arbitrary bytes with no validated-input precondition (defense in depth, independent of `internal/config`). Sole documented exclusion: NUL, which cannot exist in an argv element; the fuzz round-trip property skips inputs containing `\x00`.
 3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
 4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
@@ -1719,8 +1730,9 @@ present-window state; a general `restart` command would be filed separately if d
 
 ## 15. Approved 0.5.0 per-agent shim contract
 
-This section supersedes the tmux-window identity and direct `send-keys` parts of §§1–14 at the atomic 0.5.0 cutover.
-Until that cutover, the earlier sections describe shipped behavior; §15.6's interim diagnostic ships ahead of it. The
+This section supersedes the tmux-window identity and direct `send-keys` parts of §§1–14. The atomic 0.5.0 public
+cutover is shipped: runtime shims are the sole production identity and delivery plane, while tmux is optional
+presentation. The
 [options paper](2026-08-09-issue-182-identity-delivery-options.md) is rationale and evidence only. Option S is selected
 and no behavioral branch remains open. An empirical invalidation would require a new approved design delta before the
 paper's Option A fallback could replace this contract.
@@ -1736,12 +1748,21 @@ decoder field can represent payload bytes, raw keys, slash commands, arguments, 
 caller text. The exact §15.5 schema is not broadened. The shim is the sole writer to the harness PTY, serializing
 relayed operator input and registered control bytes at one point.
 
-tmux becomes optional presentation and fleet-launch plumbing. `launch` may create tmux windows whose command starts
+tmux is optional presentation and fleet-launch plumbing. `launch` may create tmux windows whose command starts
 the shim, `attach` remains tmux-only, and tmux observations may enrich status, but no tmux session/window/pane name,
 option, layout, or process row establishes role identity or permits delivery. `agentctl run` starts one foreground
 role without tmux. The internal shim entrypoint is hidden from public help, `commandUsage`, the embedded skill, and
-agent-facing inventories. No migration or dual dialect is supported; PR 7 switches production paths atomically and
-protocol version skew fails closed.
+agent-facing inventories. No migration or dual dialect is supported; the public production paths switch atomically
+and protocol version skew fails closed.
+
+The public foreground syntax is exactly:
+
+```text
+agentctl run --session SESSION --role ROLE --harness HARNESS [--model MODEL] [--effort EFFORT]
+```
+
+All three identity flags are required. `--dir`, positional child commands, payloads, raw keys, and environment
+overrides are rejected. The runner uses the caller's already-observed cwd and the same lifecycle server as tmux launch.
 
 The hidden argv is exactly:
 
@@ -1751,8 +1772,8 @@ agentctl __shim --session SESSION --role ROLE --harness HARNESS [--model MODEL] 
 
 It accepts no positional child command, payload, raw key, environment override, directory, or arbitrary argument.
 The handler validates every supplied value, reconstructs the unchanged child argv through `harness.AgentArgv`, and
-inherits its already-selected working directory and environment. This route exists only so later fleet wiring can
-start the current executable; it is not a public lifecycle command and does not appear in any command inventory.
+inherits its already-selected working directory and environment. Fleet wiring starts the current executable through
+this route; it is not a public lifecycle command and does not appear in any command inventory.
 
 | Package | Approved responsibility |
 |---|---|
@@ -1762,7 +1783,7 @@ start the current executable; it is not a public lifecycle command and does not 
 | `internal/status` | runtime-first enumeration and §15.6 precedence; tmux presentation is additive only |
 | `internal/control` | closed operation registry and shim client dispatch; no caller-payload-bearing delivery API |
 | `internal/tmuxx` | optional presentation/create/attach/kill operations only; production payload delivery is removed |
-| `internal/target` | retained through compile-safe adapters, then removed in PR 7 according to §15.5 |
+| `internal/target` | removed; no production or compatibility target-chain package remains |
 
 `launch`, `relaunch`, `kill`, `status`, `clear`, and `compact` do not use tmux as identity or delivery evidence.
 `attach` requires an observed tmux presentation and otherwise uses §15.7's factual refusal.
@@ -1861,6 +1882,21 @@ A definite replacement failure writes no fleet change and enters the owned-role 
 sync failure is `RecordCommitUncertainError` with phase `fleet-config`: the ready role, presentation, and visible fleet
 record are retained, with no retry or cleanup. This session mutation flock is not role ownership; only the role
 lockfile's lifetime flock establishes role ownership.
+
+Foreground `run` composes the same record without tmux. For an absent session it creates the complete one-role fleet
+record before starting the role. For an existing fleet it reads the record first and requires the caller's observed
+cwd to equal the record's one session-wide `directory` byte-for-byte. A mismatch refuses before role start, claim,
+presentation, or record mutation and renders both paths through the `fleet-directory-disagreement` row. The version-1
+schema continues to have exactly one session-wide directory; per-role directories require a future approved schema
+and behavior delta.
+
+When the directory agrees, `run` starts the requested role and waits for the same readiness fact as tmux launch. Only
+after readiness does it use the session mutation flock to extend an absent roster role in declaration order or replace
+that role's stored harness/model/effort. A definite fleet-record mutation failure stops only the newly owned role and
+uses the ordinary owned-cleanup rules. A `fleet-config` commit uncertainty retains the ready role and visible record,
+performs no stop/retry/removal, and waits for the foreground child before returning the uncertainty. A failure before
+readiness leaves an existing fleet record unchanged; if this invocation created the one-role fleet record, cleanup
+removes it only after owned role absence is observed.
 
 ### 15.3 Ownership instant and complete failure/rollback rules
 
@@ -2112,7 +2148,8 @@ shim PIDs, or local and recorded roots as applicable. A same-user concurrent los
 row; already-observed answerer or state-root disagreement remains the factual family. Provenance: planner R19,
 2026-08-10/11.
 
-Before cutover, the tmux collector emits one optional objective report field/table line. Trigger only when every
+The runtime collector's optional presentation observer preserves one objective report field/table line from the
+pre-cutover incident diagnostic. Trigger only when every
 roster role is `missing`, exactly one window has empty `@agentctl_role`, and that window has exactly N panes where N is
 roster size. Below, above, multiple role-less windows, or any window whose actual name matches a roster role suppress
 it. Stale `@agentctl_role` metadata on a differently named window is presentation metadata and does not establish such
@@ -2126,11 +2163,10 @@ The human table emits this exact note immediately after the corresponding sessio
 session's rows. JSON carries the same optional `"note"` on that session object. This names no cause: a role-less
 roster-sized window is not proof that panes were joined or that it contains the missing harnesses.
 
-PR 6 lands this contract beside the legacy collector as `RuntimeShimRoleSource`, `ShimCollector`,
-`RuntimePresentationSource`, `WriteShimTable`, and `WriteShimJSON`. The runtime source opens the volatile role side
-before the durable side; its no-lockfile fallback is unanchored by construction. `ShimStatusFleetReader` adapts the
-durable fleet roster without converting its operator-selected fields into runtime evidence. PR 7 owns the atomic CLI
-selection of these compatibility implementations.
+The shipped path uses `RuntimeShimRoleSource`, `ShimCollector`, `RuntimePresentationSource`, `WriteShimTable`, and
+`WriteShimJSON`. The runtime source opens the volatile role side before the durable side; its no-lockfile fallback is
+unanchored by construction. `ShimStatusFleetReader` adapts the durable fleet roster without converting its
+operator-selected fields into runtime evidence. The legacy tmux identity collector and renderer are removed.
 
 ### 15.7 Command outcomes and attach limitation
 
@@ -2139,6 +2175,18 @@ Tmux launch uses the single §12.1 shell site to start the hidden shim; foregrou
 `relaunch` requires §15.4 absence permission and never starts beside orphan, indeterminate, disagreement, or
 could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
 cleanup remains reported.
+
+Foreground `run` creates or extends the durable fleet according to §15.2, starts the same resident server and harness
+argv as tmux launch, and connects the caller's terminal streams directly to the nested PTY. It creates no shell,
+viewer, tmux server, session, window, or pane. The command remains in the foreground through child exit and forwards
+terminal signal/resize behavior through the shared PTY lifecycle. Its exact syntax is §15.1; the cwd is observed before
+runtime mutation and is not caller-overridable.
+
+For an existing fleet whose stored directory differs from that cwd, the exact refusal is:
+
+```text
+agentctl: refusing to run role "ROLE" in session "SESSION"; durable fleet directory "STORED" differs from current working directory "CURRENT"; no role was started or durable record mutated (fleet-directory-disagreement)
+```
 
 `kill` observes optional presentation by exact session name before role mutation and retains that observation's typed
 session ID. Only after every required child exit/absence fact does it attempt `kill-session -t SID` exactly once. Tmux
@@ -2225,6 +2273,7 @@ sole successful status output and therefore add no diagnostic line.
 | `answerer-disagreement-pid` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; lockfile shim PID RECORDED differs from connected LOCAL_PEERPID ANSWERER (answerer-disagreement)` |
 | `answerer-disagreement-claim` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; LOCAL_PEERPID ANSWERER answered without the matching held role claim (answerer-disagreement)` |
 | `state-root-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; resolved state root LOCAL_ROOT differs from lockfile-recorded state root RECORDED_ROOT (state-root-disagreement)` |
+| `fleet-directory-disagreement` | 5 | `agentctl: refusing to run role ROLE in session SESSION; durable fleet directory STORED differs from current working directory CURRENT; no role was started or durable record mutated (fleet-directory-disagreement)` |
 | `present-token-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; child PID CHILD start token OBSERVED_TOKEN differs from recorded token RECORDED_TOKEN (present-token-disagreement)` |
 | `present-not-ours` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; kill(CHILD, 0) returned EPERM (present-not-ours)` |
 | `shim-stopping` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM state is STATE for child PID CHILD; no PTY input was written (shim-stopping)` |
@@ -2283,20 +2332,16 @@ readiness`. This makes cleanup outcome, rather than the initiating observation e
 
 ### 15.9 External calls and dependency boundary
 
-Production invokes no shell beyond the existing tmux window-command site. Canonical future boundaries are optional
+Production invokes no shell beyond the one tmux window-command site. Shipped boundaries are optional
 tmux presentation/create/attach/kill argv through `internal/tmuxx.Runner`; one ancestry snapshot
 `ps -eo pid=,ppid=` through that Runner's `tmuxx.ParentPIDs` wrapper; PTY child start through a narrow interface receiving only harness/AMQ argv;
 and Darwin syscalls for `flock`, `LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` tokens.
 
-`golang.org/x/sys/unix` is approved only for PR 2's lock/socket/process syscalls. Dependency admission is staged
-(reviewer-recommended and planner-approved during PR 2 review). **Stage 1, PR 2:** the module is required and
-tidy-stable, its source is exercised by `internal/shim` tests, govulncheck and Dependabot cover it, and its upstream
-license ships in every release archive. Because no production path imports `internal/shim` yet, the release binary
-does not link `x/sys`; PR 2 records that fact with `go version -m` and must not claim binary linkage. **Stage 2:** the
-first PR whose production path imports `internal/shim` begins binary linkage and must provide `go version -m`
-evidence showing `golang.org/x/sys` in the release binary. That evidence is a mandatory rider on the first production
-importer and cannot be deferred or dropped. PR 1 adds no dependency, module, license, or archive change. PR 3's PTY
-lane is standard-library-only.
+`golang.org/x/sys/unix` is restricted to the Darwin lock/socket/process syscalls above. The staged admission is
+complete: source tests, pinned govulncheck, Dependabot, and archive-license checks cover v0.47.0, and the production
+binary imports the shim path. `go version -m` on the built Darwin binary must record
+`golang.org/x/sys v0.47.0`; release archives must include its upstream license. The PTY implementation remains
+standard-library-only.
 
 ### 15.10 Evidence, tests, and numbered security trace
 
@@ -2315,11 +2360,10 @@ disagreement; (3) §15.2 roots/caps; (4) §§15.1/15.7 operation names; (5) §15
 factual delivery; (10) §§15.5/15.8 version-first refusal. Every implementation PR cites applicable rows; none may
 reopen semantics without an approved design delta.
 
-PR 6 adds structural drift guards for the exact four-field `Request` and empty payloads on every
-`OperationControl` registry entry. Its review evidence mutation-adds a fifth `Payload` field and a non-empty
-`observe` payload separately; each mutant must fail its named invariant before the source is restored. A separate
-transitional inventory pins the sole legacy `internal/target` import and `tmuxx.DeliverPayload` call until PR 7
-removes both.
+Structural drift guards pin the exact four-field `Request`, empty payloads on every `OperationControl` registry entry,
+zero production `internal/target` imports, zero `tmuxx.DeliverPayload` calls, zero production `send-keys`, and the
+single `shimWindowCommand` shell-composition site. Review evidence mutation-adds a fifth `Payload` field and a
+non-empty `observe` payload separately; each mutant fails its named invariant before source restoration.
 
 Gate S runs after PRs 2 and 3 and before PR 4. It records `PASS` only if the merged Darwin evidence satisfies the
 approved `flock`, `LOCAL_PEERPID`, raw `kinfo_proc` token, state-root disagreement, fully resolved socket-length,

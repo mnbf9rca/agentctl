@@ -378,18 +378,61 @@ func (s *ShimFleetRecordStore) Read(session string) (ShimFleetRecord, error) {
 	return s.readLocked(session)
 }
 
+// List returns every durable sessions-directory entry in lexical order. It
+// deliberately does not open, validate, lock, heal, or remove any entry;
+// callers perform per-entry reads so malformed trees remain reportable facts.
+func (s *ShimFleetRecordStore) List() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions == nil {
+		return nil, errors.New("fleet record store is closed")
+	}
+	directory, err := s.sessions.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	names, readErr := directory.Readdirnames(-1)
+	closeErr := directory.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // ReplaceOwned performs one version-checked session-record read/modify/write
 // while holding a nonblocking session-directory flock only for the mutation.
 // The role-lifetime ownership arbiter remains the separate role lockfile.
 func (s *ShimFleetRecordStore) ReplaceOwned(expected, replacement ShimFleetRecord) error {
+	return s.replaceOwned(expected, replacement, false)
+}
+
+// ExtendOwned appends exactly one role to an unchanged roster under the same
+// session-scoped mutation flock and version-checked commit as ReplaceOwned.
+func (s *ShimFleetRecordStore) ExtendOwned(expected, replacement ShimFleetRecord) error {
+	return s.replaceOwned(expected, replacement, true)
+}
+
+func (s *ShimFleetRecordStore) replaceOwned(expected, replacement ShimFleetRecord, extend bool) error {
 	if err := validateShimFleetRecord(expected); err != nil {
 		return err
 	}
 	if err := validateShimFleetRecord(replacement); err != nil {
 		return err
 	}
-	if expected.Session != replacement.Session || expected.Version != replacement.Version || !reflect.DeepEqual(expected.Roster, replacement.Roster) {
-		return errors.New("fleet replacement must retain version, session, and roster")
+	if expected.Session != replacement.Session || expected.Version != replacement.Version {
+		return errors.New("fleet replacement must retain version and session")
+	}
+	if extend {
+		if len(replacement.Roster) != len(expected.Roster)+1 || !reflect.DeepEqual(replacement.Roster[:len(expected.Roster)], expected.Roster) {
+			return errors.New("fleet extension must append exactly one role to the existing roster")
+		}
+		added := replacement.Roster[len(expected.Roster)]
+		if _, existed := expected.Roles[added]; existed {
+			return errors.New("fleet extension role already exists")
+		}
+	} else if !reflect.DeepEqual(expected.Roster, replacement.Roster) {
+		return errors.New("fleet replacement must retain roster")
 	}
 	payload, err := marshalShimFleetRecord(replacement)
 	if err != nil {

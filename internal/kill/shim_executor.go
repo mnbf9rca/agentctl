@@ -6,14 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-// ShimExecutor is the explicitly named runtime-backed compatibility
-// implementation. The legacy Executor remains unchanged until CLI cutover.
+// ShimExecutor is the runtime-backed kill implementation used by the public
+// CLI.
 type ShimExecutor struct {
 	lifecycle    fleet.ShimLifecycle
 	records      fleet.ShimFleetRecords
@@ -54,10 +55,11 @@ func (e *ShimKillPresentationRetainedError) Unwrap() error {
 // ShimKillRefusalError reports a role state that cannot safely enter stop or
 // cleanup. No role is stopped before the whole roster passes this gate.
 type ShimKillRefusalError struct {
-	Session string
-	Role    string
-	Outcome shim.Outcome
-	Cause   error
+	Session     string
+	Role        string
+	Outcome     shim.Outcome
+	Cause       error
+	Observation fleet.ShimRoleObservation
 }
 
 func (e *ShimKillRefusalError) Error() string {
@@ -83,8 +85,7 @@ func (e *ShimKillRetainedError) Error() string {
 
 func (e *ShimKillRetainedError) Unwrap() error { return e.Cause }
 
-// NewShimExecutor constructs the compatibility implementation without
-// changing New or the current CLI's kill dependency.
+// NewShimExecutor constructs the runtime-backed kill implementation.
 func NewShimExecutor(
 	lifecycle fleet.ShimLifecycle,
 	records fleet.ShimFleetRecords,
@@ -103,6 +104,9 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 	}
 	record, err := e.records.Read(session)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ShimKillResult{}, &fleet.ShimFleetMissingError{Session: session}
+		}
 		return ShimKillResult{}, err
 	}
 	presentationSession, presentationPresent, err := e.presentation.FindPresentationSession(ctx, session)
@@ -120,7 +124,7 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 		case shim.OutcomeRunning, shim.OutcomeStarting, shim.OutcomeMissing, shim.OutcomeStaleRecord:
 		default:
 			return ShimKillResult{}, &ShimKillRefusalError{
-				Session: session, Role: role, Outcome: observation.Outcome, Cause: observation.Cause,
+				Session: session, Role: role, Outcome: observation.Outcome, Cause: observation.Cause, Observation: observation,
 			}
 		}
 	}
@@ -134,6 +138,21 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 		response, err := e.lifecycle.Stop(ctx, session, role)
 		if err != nil {
 			return result, err
+		}
+		if response.Outcome == shim.OutcomeStopAlreadyStopping {
+			observation := fleet.ShimRoleObservation{Outcome: response.Outcome}
+			if response.State != nil {
+				observation.State = *response.State
+			}
+			if response.ShimPID != nil {
+				observation.ShimPID = *response.ShimPID
+			}
+			if response.ChildPID != nil {
+				observation.ChildPID = *response.ChildPID
+			}
+			return result, &ShimKillRefusalError{
+				Session: session, Role: role, Outcome: response.Outcome, Observation: observation,
+			}
 		}
 		if response.Outcome != shim.OutcomeStopChildExited || response.SignalAttempted == nil || !*response.SignalAttempted || response.Signal == nil || *response.Signal != "SIGHUP" || response.ChildExitObserved == nil || !*response.ChildExitObserved {
 			retained := &ShimKillRetainedError{Session: session, Role: role}
@@ -163,8 +182,10 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 			return result, err
 		}
 		if !fresh.MayReportAbsent() {
+			outcome := outcomeFromKillProcess(fresh.Observation)
 			return result, &ShimKillRefusalError{
-				Session: session, Role: role, Outcome: outcomeFromKillProcess(fresh.Observation), Cause: fresh.Err,
+				Session: session, Role: role, Outcome: outcome, Cause: fresh.Err,
+				Observation: fleet.ShimRoleObservation{Outcome: outcome, ChildPID: observation.ChildPID, Cause: fresh.Err},
 			}
 		}
 	}

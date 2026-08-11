@@ -13,6 +13,46 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
+func TestExecutePresentationAttachesObservedPresentationWithoutLegacyMetadataGates(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(
+		tmuxx.Response{Stdout: []byte("$4\tfleet\n")},
+		tmuxx.Response{Stdout: []byte("@1\tplanner\t\t\t\t\t\t\n")},
+		tmuxx.Response{},
+	)
+	var output bytes.Buffer
+	target, err := New(tmuxx.New(runner), mapLookup(map[string]string{"TERM_PROGRAM": "iTerm.app"})).ExecutePresentation(context.Background(), "fleet", &output)
+	if err != nil {
+		t.Fatalf("ExecutePresentation() error = %v", err)
+	}
+	if target != (tmuxx.Session{ID: "$4", Name: "fleet"}) {
+		t.Fatalf("ExecutePresentation() target = %#v", target)
+	}
+	wantCalls := []tmuxx.Call{
+		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
+		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
+		{Executable: "tmux", Args: []string{"-CC", "attach-session", "-t", "$4"}},
+	}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("Calls = %#v, want presentation-only argv %#v", runner.Calls, wantCalls)
+	}
+}
+
+func TestExecutePresentationRefusesObservedAbsenceWithTypedFact(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$7\tother\n")})
+	_, err := New(tmuxx.New(runner), mapLookup(map[string]string{"TERM_PROGRAM": "iTerm.app"})).ExecutePresentation(context.Background(), "fleet", io.Discard)
+	var missing *NoPresentationError
+	if !errors.As(err, &missing) || missing.Session != "fleet" {
+		t.Fatalf("ExecutePresentation() error = %T %v, want *NoPresentationError for fleet", err, err)
+	}
+	if len(runner.Calls) != 1 {
+		t.Fatalf("Calls = %#v, absence must not attach", runner.Calls)
+	}
+}
+
 func TestCheckEnvironmentAcceptsITermOutsideTmuxWithoutRunningCommands(t *testing.T) {
 	t.Parallel()
 

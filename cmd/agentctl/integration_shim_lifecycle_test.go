@@ -3,10 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -16,8 +20,116 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/shim"
+	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
+
+func TestIntegrationPublicForegroundRunUsesRuntimeWithoutTmux(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+	scriptPath, err := exec.LookPath("script")
+	if err != nil {
+		t.Skipf("foreground integration requires script PTY wrapper: %v", err)
+	}
+	input, keepOpen, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer keepOpen.Close()
+	var output bytes.Buffer
+	command := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
+		"run", "--session", "direct", "--role", "planner", "--harness", "claude")
+	command.Env = environmentWith(os.Environ(), integrationAgentctlEnv, "1")
+	command.Stdin = input
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start public foreground run: %v", err)
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	var observations []string
+	lastObservation := ""
+	for {
+		statusResult := fixture.runAgentctl("status", "--session", "direct", "--json")
+		observation := fmt.Sprintf("exit=%d stdout=%s stderr=%s invocations=%d", statusResult.exitCode, strings.TrimSpace(statusResult.stdout), strings.TrimSpace(statusResult.stderr), len(fixture.stubInvocations()))
+		if observation != lastObservation {
+			observations = append(observations, observation)
+			lastObservation = observation
+		}
+		if statusResult.exitCode == exitOK && strings.Contains(statusResult.stdout, `"state":"running"`) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			_ = command.Process.Kill()
+			t.Fatalf("foreground role did not become runtime-running; observations=%#v output=%q", observations, output.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, present, err := fixture.client.FindPresentationSession(context.Background(), "direct"); err != nil || present {
+		t.Fatalf("foreground presentation = present %t, error %v; want gone", present, err)
+	}
+	cleared := fixture.runAgentctl("clear", "--session", "direct", "planner")
+	if cleared.exitCode != exitOK {
+		t.Fatalf("foreground clear = %#v", cleared)
+	}
+	fixture.waitRoleInput("planner", "\x15/clear\n")
+	killed := fixture.runAgentctl("kill", "--session", "direct")
+	if killed.exitCode != exitOK {
+		t.Fatalf("foreground kill = %#v", killed)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("foreground process exit: %v; output=%q", err, output.String())
+	}
+	if !strings.Contains(output.String(), "foreground role \"planner\" in session \"direct\" exited with status 0") {
+		t.Fatalf("foreground output=%q, want observed exit status", output.String())
+	}
+}
+
+func TestIntegrationPublicShimCommandsSurvivePresentationLayoutChanges(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launched := fixture.runAgentctl("launch", "--session", "public-layout", "--roles", "planner:claude,coder:codex")
+	if launched.exitCode != exitOK || launched.stderr != "agentctl: launched session \"public-layout\"; 2 roles are ready\n" {
+		t.Fatalf("launch = %#v", launched)
+	}
+	fixture.waitStubInvocations(2)
+	fixture.waitRoleMarkers("planner", "coder")
+
+	session := fixture.presentationSession("public-layout")
+	panes := fixture.shimPresentationPanes(session.ID)
+	fixture.tmuxOutput("join-pane", "-d", "-s", string(panes["coder"].ID), "-t", string(panes["planner"].ID))
+
+	cleared := fixture.runAgentctl("clear", "--session", "public-layout", "coder")
+	if cleared.exitCode != exitOK || cleared.stderr != "agentctl: clear for role \"coder\" in session \"public-layout\" wrote 6 bytes and observed submit\n" {
+		t.Fatalf("clear after join-pane = %#v", cleared)
+	}
+	fixture.waitRoleInput("coder", "\x15/clear\n")
+
+	statusResult := fixture.runAgentctl("status", "--session", "public-layout", "--json")
+	if statusResult.exitCode != exitOK || statusResult.stderr != "" {
+		t.Fatalf("status after join-pane = %#v", statusResult)
+	}
+	var report statuspkg.ShimReport
+	if err := json.Unmarshal([]byte(statusResult.stdout), &report); err != nil {
+		t.Fatalf("decode public status %q: %v", statusResult.stdout, err)
+	}
+	if len(report.Agents) != 2 || report.Agents[0].State != statuspkg.RuntimeStateRunning || report.Agents[1].State != statuspkg.RuntimeStateRunning {
+		t.Fatalf("public status = %#v, want two runtime-running roles", report)
+	}
+}
+
+func TestIntegrationPublicAttachRefusesAbsentPresentationWithoutRuntimeClaim(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	if err := os.Unsetenv("TMUX_PANE"); err != nil {
+		t.Fatal(err)
+	}
+	result := fixture.runAgentctl("attach", "--session", "no-ui")
+	want := "agentctl: refusing to attach session \"no-ui\"; no tmux presentation was observed; status and control remain available without tmux\n"
+	if result.exitCode != exitSession || result.stdout != "" || result.stderr != want {
+		t.Fatalf("attach without presentation = %#v, want exit 3 and %q", result, want)
+	}
+}
 
 func TestIntegrationShimPresentationTreatsPrivateTmuxSocketAbsenceAsGone(t *testing.T) {
 	fixture := newIntegrationFixtureWithoutServer(t)

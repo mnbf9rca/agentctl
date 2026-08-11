@@ -26,6 +26,7 @@ const (
 	integrationMarkerEnv     = "AGENTCTL_INTEGRATION_MARKER"
 	integrationCaptureEnv    = "AGENTCTL_INTEGRATION_CAPTURE"
 	integrationShimBinaryEnv = "AGENTCTL_INTEGRATION_SHIM_BINARY"
+	integrationAgentctlEnv   = "AGENTCTL_INTEGRATION_AGENTCTL_BINARY"
 	integrationOwnedPIDsEnv  = "AGENTCTL_INTEGRATION_OWNED_PIDS"
 	integrationRawStubEnv    = "AGENTCTL_INTEGRATION_RAW_STUB"
 )
@@ -234,6 +235,10 @@ func TestMain(m *testing.M) {
 		return
 	}
 	if os.Getenv(integrationShimBinaryEnv) == "1" && len(os.Args) > 1 && os.Args[1] == "__shim" {
+		os.Setenv(integrationRawStubEnv, "1")
+		os.Exit(runWithRunner(context.Background(), os.Args[1:], os.Stdout, os.Stderr, tmuxx.RealRunner{}, os.LookupEnv))
+	}
+	if os.Getenv(integrationAgentctlEnv) == "1" {
 		os.Setenv(integrationRawStubEnv, "1")
 		os.Exit(runWithRunner(context.Background(), os.Args[1:], os.Stdout, os.Stderr, tmuxx.RealRunner{}, os.LookupEnv))
 	}
@@ -655,6 +660,25 @@ func (f *integrationFixture) hasSession(name string) bool {
 		}
 	}
 	return false
+}
+
+func (f *integrationFixture) presentationSession(name string) tmuxx.Session {
+	f.t.Helper()
+	var found *tmuxx.Session
+	for _, observed := range f.sessions() {
+		if observed.Name != name {
+			continue
+		}
+		if found != nil {
+			f.t.Fatalf("multiple presentations named %q", name)
+		}
+		value := tmuxx.Session{ID: observed.ID, Name: observed.Name}
+		found = &value
+	}
+	if found == nil {
+		f.t.Fatalf("presentation %q is missing", name)
+	}
+	return *found
 }
 
 func (f *integrationFixture) windows(sessionID tmuxx.SessionID) []integrationWindow {

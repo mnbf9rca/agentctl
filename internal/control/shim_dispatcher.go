@@ -22,8 +22,7 @@ type GuardedShimClient[T any] interface {
 	DeliverOperationGuarded(context.Context, string, string, string, func(context.Context, int) error) (T, error)
 }
 
-// ShimDispatcher is the operation-name-only compatibility dispatcher used by
-// the PR 7 cutover. The legacy Dispatcher remains unchanged until then.
+// ShimDispatcher is the operation-name-only dispatcher used by the public CLI.
 type ShimDispatcher[T any] struct {
 	client    GuardedShimClient[T]
 	ancestry  ConnectedPeerGuard

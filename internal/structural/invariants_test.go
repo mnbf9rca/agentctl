@@ -24,11 +24,10 @@ type sourceFile struct {
 }
 
 // This syntactic guard catches direct calls through normal, aliased, and dot
-// imports. The second named site is the transitional shim compatibility path;
-// PR 7 removes the legacy site and restores the one-site invariant.
+// imports. The shim window command is the sole production shell composition.
 // Function-value indirection is deliberately outside its boundary: evading
 // the repository's own tests is excluded by the same-user threat model.
-func TestProductionShellqJoinCallsStayAtTransitionalAuthorizedSites(t *testing.T) {
+func TestProductionShellqJoinCallStaysAtShimWindowCommand(t *testing.T) {
 	root := repositoryRoot(t)
 	var sites []string
 
@@ -74,10 +73,7 @@ func TestProductionShellqJoinCallsStayAtTransitionalAuthorizedSites(t *testing.T
 	}
 
 	sort.Strings(sites)
-	want := []string{
-		"internal/fleet/fleet.go:agentCommand",
-		"internal/fleet/shim.go:shimWindowCommand",
-	}
+	want := []string{"internal/fleet/shim.go:shimWindowCommand"}
 	if strings.Join(sites, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("shellq.Join production call sites = %q, want exact transitional sites %q", sites, want)
 	}
@@ -96,21 +92,11 @@ func enclosingFunctionName(file *ast.File, position token.Pos) string {
 // This syntactic guard catches quoted and raw send-keys literals at every
 // production scope. Strings assembled from multiple literals are deliberately
 // outside its boundary for the same threat-model reason.
-func TestProductionSendKeysLiteralsAreInsideDeliverPayload(t *testing.T) {
+func TestProductionContainsNoTmuxSendKeysLiteral(t *testing.T) {
 	root := repositoryRoot(t)
 	var violations []string
 
 	for _, src := range parseProductionGo(t, root) {
-		var sanctioned []*ast.FuncDecl
-		if filepath.ToSlash(filepath.Dir(src.rel)) == "internal/tmuxx" {
-			for _, decl := range src.file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if ok && fn.Name.Name == "DeliverPayload" && fn.Body != nil {
-					sanctioned = append(sanctioned, fn)
-				}
-			}
-		}
-
 		ast.Inspect(src.file, func(node ast.Node) bool {
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
@@ -120,11 +106,6 @@ func TestProductionSendKeysLiteralsAreInsideDeliverPayload(t *testing.T) {
 			if err != nil || value != "send-keys" {
 				return true
 			}
-			for _, fn := range sanctioned {
-				if fn.Body.Pos() <= literal.Pos() && literal.End() <= fn.Body.End() {
-					return true
-				}
-			}
 			violations = append(violations, sourceSite(src, literal.Pos()))
 			return true
 		})
@@ -132,7 +113,7 @@ func TestProductionSendKeysLiteralsAreInsideDeliverPayload(t *testing.T) {
 
 	sort.Strings(violations)
 	if len(violations) != 0 {
-		t.Fatalf("production send-keys literals outside internal/tmuxx.DeliverPayload: %s", strings.Join(violations, ", "))
+		t.Fatalf("production send-keys literals remain: %s", strings.Join(violations, ", "))
 	}
 }
 
@@ -211,7 +192,7 @@ func TestShimCompatibilityAPIsExposeNoPayloadParameter(t *testing.T) {
 	}
 }
 
-func TestLegacyTargetAndPayloadDeliveryStayAtTransitionalInventory(t *testing.T) {
+func TestLegacyTargetAndPayloadDeliveryAreRetired(t *testing.T) {
 	root := repositoryRoot(t)
 	var targetImports []string
 	var deliveryCalls []string
@@ -241,14 +222,14 @@ func TestLegacyTargetAndPayloadDeliveryStayAtTransitionalInventory(t *testing.T)
 	sort.Strings(targetImports)
 	sort.Strings(deliveryCalls)
 	sort.Strings(deliveryDeclarations)
-	if got, want := strings.Join(targetImports, ","), "cmd/agentctl/main.go"; got != want {
-		t.Fatalf("legacy internal/target imports = %q, want transitional inventory %q", got, want)
+	if len(targetImports) != 0 {
+		t.Fatalf("legacy internal/target imports remain: %q", targetImports)
 	}
-	if got, want := strings.Join(deliveryCalls, ","), "internal/control/dispatcher.go:Execute"; got != want {
-		t.Fatalf("legacy DeliverPayload calls = %q, want transitional inventory %q", got, want)
+	if len(deliveryCalls) != 0 {
+		t.Fatalf("legacy DeliverPayload calls remain: %q", deliveryCalls)
 	}
-	if got, want := strings.Join(deliveryDeclarations, ","), "internal/tmuxx/control.go:DeliverPayload"; got != want {
-		t.Fatalf("legacy DeliverPayload declarations = %q, want transitional inventory %q", got, want)
+	if len(deliveryDeclarations) != 0 {
+		t.Fatalf("legacy DeliverPayload declarations remain: %q", deliveryDeclarations)
 	}
 }
 

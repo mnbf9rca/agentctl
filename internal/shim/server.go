@@ -251,6 +251,30 @@ type childWatcher struct {
 	err  error
 }
 
+// ForegroundChildExitError preserves the child outcome observed by the
+// resident lifecycle when it ends without a stop request.
+type ForegroundChildExitError struct {
+	Status int
+	Signal syscall.Signal
+}
+
+func (e *ForegroundChildExitError) Error() string {
+	if e.Signal != 0 {
+		return fmt.Sprintf("foreground child terminated by signal %d", e.Signal)
+	}
+	return fmt.Sprintf("foreground child exited with status %d", e.Status)
+}
+
+func foregroundChildExitOutcome(exit ptyx.ExitObservation) error {
+	if !exit.Observed {
+		return errors.New("foreground child exit was not observed")
+	}
+	if exit.Signal != 0 || exit.ExitCode != 0 {
+		return &ForegroundChildExitError{Status: exit.ExitCode, Signal: exit.Signal}
+	}
+	return nil
+}
+
 func watchChild(ctx context.Context, child ptyx.Child) *childWatcher {
 	watcher := &childWatcher{done: make(chan struct{})}
 	go func() {
@@ -331,6 +355,9 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 			cancel()
 			cleanup := s.cleanupRuntime(runtime, false)
 			if ready {
+				if handler.operationPhase() == shimOperationActive {
+					return errors.Join(foregroundChildExitOutcome(watcher.exit), cleanup.Err)
+				}
 				return cleanup.Err
 			}
 			return &LifecycleRunError{

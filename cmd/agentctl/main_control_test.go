@@ -1,387 +1,202 @@
+//go:build darwin
+
 package main
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/mnbf9rca/agentctl/internal/target"
-	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+	"github.com/mnbf9rca/agentctl/internal/control"
+	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
-func TestRunControlDeliversRegisteredOperationToResolvedRole(t *testing.T) {
-	tests := []struct {
-		operation string
-		role      string
-		payload   string
-	}{
-		{operation: "clear", role: "planner", payload: "/clear"},
-		{operation: "compact", role: "reviewer", payload: "/compact"},
+func TestRunControlSendsOnlyRegisteredOperationAndValidatedIdentity(t *testing.T) {
+	t.Parallel()
+
+	written := uint64(7)
+	submitted := true
+	controller := &controlStub{response: shim.Response{
+		Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeDeliverySubmitted,
+		BytesWritten: &written, SubmitObserved: &submitted,
+	}}
+	resolver := &resolverStub{selected: "fleet"}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"clear", "--session", "fleet", "planner"}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
+	if code != exitOK || controller.operation != "clear" || controller.session != "fleet" || controller.role != "planner" {
+		t.Fatalf("code=%d invocation=%q/%q/%q stderr=%q", code, controller.operation, controller.session, controller.role, stderr.String())
 	}
-	for _, tt := range tests {
-		t.Run(tt.operation, func(t *testing.T) {
-			session := tmuxx.Session{ID: "$4", Name: "epic123"}
-			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-				return session, nil
-			})
-			type invocation struct {
-				operation string
-				session   tmuxx.Session
-				role      string
-			}
-			var got invocation
-			controller := controlExecutorFunc(func(_ context.Context, operation string, target tmuxx.Session, role string) error {
-				got = invocation{operation: operation, session: target, role: role}
-				return nil
-			})
-			var stdout, stderr bytes.Buffer
-
-			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
-
-			if code != exitOK {
-				t.Fatalf("runWithDependencies() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-			}
-			want := invocation{operation: tt.operation, session: session, role: tt.role}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("Execute() invocation = %#v, want %#v", got, want)
-			}
-			wantOutput := "agentctl: delivered " + tt.payload + " to epic123:" + tt.role + "\n"
-			if stdout.String() != wantOutput {
-				t.Fatalf("stdout = %q, want %q", stdout.String(), wantOutput)
-			}
-			if stderr.Len() != 0 {
-				t.Fatalf("stderr = %q, want empty", stderr.String())
-			}
-		})
+	want := "agentctl: clear for role \"planner\" in session \"fleet\" wrote 7 bytes and observed submit\n"
+	if stdout.Len() != 0 || stderr.String() != want {
+		t.Fatalf("stdout=%q stderr=%q, want %q", stdout.String(), stderr.String(), want)
 	}
 }
 
-func TestRunControlRejectsCallerPayloadInputsBeforeDependencies(t *testing.T) {
+func TestRunControlRejectsCallerPayloadSurfaceBeforeDependencies(t *testing.T) {
+	t.Parallel()
+
+	for _, arguments := range [][]string{
+		{"clear", "planner", "arbitrary"},
+		{"compact", "--payload", "text", "planner"},
+		{"clear", "--keys", "C-c", "planner"},
+	} {
+		controller := &controlStub{}
+		var stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), arguments, &bytes.Buffer{}, &stderr, dependencies{controller: controller})
+		if code != exitUsage || controller.called {
+			t.Fatalf("arguments=%q code=%d called=%t stderr=%q", arguments, code, controller.called, stderr.String())
+		}
+	}
+}
+
+func TestRunControlMapsDistinctGuardOutcomesExactly(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name string
-		args []string
+		err  error
+		code int
+		want string
 	}{
-		{name: "extra positional text", args: []string{"clear", "planner", "erase this"}},
-		{name: "text option", args: []string{"clear", "--text", "erase this", "planner"}},
-		{name: "command option", args: []string{"compact", "--command=/rename", "planner"}},
-		{name: "raw option", args: []string{"clear", "--raw=/rename", "planner"}},
-		{name: "keys option", args: []string{"compact", "--keys=C-u", "planner"}},
+		{
+			name: "observed self target", err: &control.ObservedSelfTargetError{TargetPID: 41, CallerPID: 99}, code: exitUnsafe,
+			want: "agentctl: refusing to clear role \"planner\" in session \"fleet\"; target shim PID 41 is an ancestor of caller PID 99 (observed-self-target)\n",
+		},
+		{
+			name: "ancestry undetermined", err: &control.AncestryUndeterminedError{TargetPID: 41, CallerPID: 99, Cause: errors.New("ps failed")}, code: exitTmux,
+			want: "agentctl: refusing to clear role \"planner\" in session \"fleet\"; could not determine whether caller PID 99 descends from target shim PID 41: \"ps failed\" (ancestry-undetermined)\n",
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resolverCalled := false
-			controllerCalled := false
-			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-				resolverCalled = true
-				return tmuxx.Session{ID: "$4", Name: "epic123"}, nil
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"clear", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
+				resolver: &resolverStub{selected: "fleet"}, controller: &controlStub{err: test.err},
 			})
-			controller := controlExecutorFunc(func(context.Context, string, tmuxx.Session, string) error {
-				controllerCalled = true
-				return nil
-			})
-			var stdout, stderr bytes.Buffer
-
-			code := runWithDependencies(context.Background(), tt.args, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
-
-			if code != exitUsage {
-				t.Fatalf("runWithDependencies(%q) = %d, want %d", tt.args, code, exitUsage)
-			}
-			if resolverCalled || controllerCalled {
-				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
-			}
-			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "Usage:") {
-				t.Fatalf("stdout = %q, stderr = %q, want usage error only", stdout.String(), stderr.String())
+			if code != test.code || stderr.String() != test.want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
 			}
 		})
 	}
 }
 
-func TestRunControlRejectsMalformedRoleBeforeSessionResolution(t *testing.T) {
-	tests := []string{"", "Planner", "bad.role", "-planner"}
-	for _, role := range tests {
-		t.Run(role, func(t *testing.T) {
-			resolverCalled := false
-			controllerCalled := false
-			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-				resolverCalled = true
-				return tmuxx.Session{ID: "$4", Name: "epic123"}, nil
-			})
-			controller := controlExecutorFunc(func(context.Context, string, tmuxx.Session, string) error {
-				controllerCalled = true
-				return nil
-			})
-			var stdout, stderr bytes.Buffer
-			arguments := []string{"clear", "--session", "epic123", role}
-			if strings.HasPrefix(role, "-") {
-				arguments = []string{"clear", "--session", "epic123", "--", role}
-			}
+func TestRunControlMapsDirectProtocolDecodeFailuresExactly(t *testing.T) {
+	t.Parallel()
 
-			code := runWithDependencies(context.Background(), arguments, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
-
-			if code != exitUsage {
-				t.Fatalf("runWithDependencies(role %q) = %d, want %d", role, code, exitUsage)
-			}
-			if resolverCalled || controllerCalled {
-				t.Fatalf("dependency calls = resolver:%v controller:%v, want neither", resolverCalled, controllerCalled)
-			}
-			wantPrefix := "agentctl: invalid role " + strconv.Quote(role) + ": must match ^[a-z0-9][a-z0-9_-]*$\n"
-			if !strings.HasPrefix(stderr.String(), wantPrefix) || !strings.Contains(stderr.String(), "Usage: agentctl clear") {
-				t.Fatalf("stderr = %q, want prefix %q and clear usage", stderr.String(), wantPrefix)
-			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q, want empty", stdout.String())
+	for _, test := range []struct {
+		name    string
+		err     error
+		outcome string
+	}{
+		{name: "schema", err: &shim.ProtocolSchemaError{Kind: shim.ProtocolSchemaUnknownField, Field: "payload"}, outcome: "could not interpret version-1 shim protocol for role \"planner\" in session \"fleet\": \"unknown field \\\"payload\\\"\" (protocol-schema-invalid)"},
+		{name: "json", err: &shim.JSONError{Kind: shim.JSONTrailingBytes}, outcome: "could not read protocol frame from connected shim for role \"planner\" in session \"fleet\": \"payload has trailing bytes after its JSON value\" (protocol-frame-read-invalid)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"clear", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
+				resolver: &resolverStub{selected: "fleet"}, controller: &controlStub{err: test.err},
+			})
+			want := "agentctl: " + test.outcome + "\n"
+			if code != exitTmux || stderr.String() != want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), exitTmux, want)
 			}
 		})
 	}
 }
 
-func TestRunControlMapsTypedTargetErrorsFromFields(t *testing.T) {
-	session := tmuxx.Session{ID: "$4", Name: "epic123"}
-	plannerWindow := tmuxx.Window{
-		ID: "@4", Name: "planner", Role: "planner",
-		Harness: "codex", Model: "o3", Process: "codex",
-	}
-	reviewerWindow := tmuxx.Window{
-		ID: "@7", Name: "reviewer", Role: "reviewer",
-		Harness: "claude", Model: "sonnet", Process: "claude",
-	}
-	plannerPane := tmuxx.Pane{ID: "%9", PID: 123, Dead: false, WindowPanes: 1}
-	reviewerPane := tmuxx.Pane{ID: "%11", PID: 456, Dead: false, WindowPanes: 1}
+func TestRunControlMapsDisagreementAndManualRecoveryOutcomesWithoutCallingThemMissing(t *testing.T) {
+	t.Parallel()
+
+	state := "child-starting"
+	shimPID, childPID := 41, 73
+	local, recorded, path := "/local", "/recorded", "/recorded/sessions/fleet/roles/planner.json"
+	recordedToken := shim.StartToken{Sec: 10, Usec: 20}
+	observedToken := shim.StartToken{Sec: 11, Usec: 21}
 	tests := []struct {
-		name      string
-		operation string
-		role      string
-		err       error
-		wantCode  int
-		wantError string
+		name     string
+		response shim.Response
+		want     string
 	}{
 		{
-			name:      "session metadata",
-			operation: "clear",
-			role:      "planner",
-			err:       &target.SessionMetadataError{Session: session, Option: "@agentctl_version", Value: "2"},
-			wantCode:  exitSession,
-			wantError: "agentctl: refusing to send clear; session epic123 has @agentctl_version=\"2\"; expected \"1\"\n",
+			name: "state root", response: shim.Response{Version: 1, Outcome: shim.OutcomeStateRootDisagreement, LocalRoot: &local, RecordedRoot: &recorded},
+			want: "resolved state root \"/local\" differs from lockfile-recorded state root \"/recorded\" (state-root-disagreement)",
 		},
 		{
-			name:      "unmanaged session",
-			operation: "compact",
-			role:      "reviewer",
-			err:       &target.SessionMetadataError{Session: session, Option: "@agentctl_managed", Value: ""},
-			wantCode:  exitSession,
-			wantError: "agentctl: refusing to send compact; session epic123 has @agentctl_managed=\"\"; expected \"1\"\n",
+			name: "start token", response: shim.Response{Version: 1, Outcome: shim.OutcomePresentTokenDisagreement, ChildPID: &childPID, RecordedToken: &recordedToken, ObservedToken: &observedToken},
+			want: "child PID 73 start token {sec:11,usec:21} differs from recorded token {sec:10,usec:20} (present-token-disagreement)",
 		},
 		{
-			name:      "missing role",
-			operation: "clear",
-			role:      "planner",
-			err:       &target.RoleResolutionError{Session: session, Role: "planner", WindowIDs: nil},
-			wantCode:  exitRole,
-			wantError: "agentctl: refusing to send clear; role planner matches no windows in epic123\n",
-		},
-		{
-			name:      "ambiguous role",
-			operation: "compact",
-			role:      "reviewer",
-			err: fmt.Errorf("wrapped target refusal: %w", &target.RoleResolutionError{
-				Session: session, Role: "reviewer", WindowIDs: []tmuxx.WindowID{"@4", "@7"},
-			}),
-			wantCode:  exitRole,
-			wantError: "agentctl: refusing to send compact; role reviewer matches 2 windows in epic123 (@4, @7)\n",
-		},
-		{
-			name:      "stored role mismatch",
-			operation: "compact",
-			role:      "planner",
-			err: &target.WindowMetadataError{Session: session, Role: "planner", Window: tmuxx.Window{
-				ID: "@4", Name: "planner", Role: "reviewer",
-				Harness: "codex", Model: "o3", Process: "codex",
-			}},
-			wantCode:  exitRole,
-			wantError: "agentctl: refusing to send compact; window @4 named planner has stored role \"reviewer\"; expected \"planner\"\n",
-		},
-		{
-			name:      "missing pane",
-			operation: "clear",
-			role:      "planner",
-			err:       &target.PaneStateError{Session: session, Role: "planner", Window: plannerWindow, Panes: nil},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send clear; window @4 for epic123:planner contains 0 panes; expected 1\n",
-		},
-		{
-			name:      "reported multiple panes",
-			operation: "clear",
-			role:      "planner",
-			err: &target.PaneStateError{Session: session, Role: "planner", Window: plannerWindow, Panes: []tmuxx.Pane{
-				{ID: "%9", PID: 123, Dead: false, WindowPanes: 2},
-			}},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send clear; pane %9 reports 2 panes in window @4; expected 1\n",
-		},
-		{
-			name:      "dead pane",
-			operation: "compact",
-			role:      "reviewer",
-			err: &target.PaneStateError{Session: session, Role: "reviewer", Window: reviewerWindow, Panes: []tmuxx.Pane{
-				{ID: "%11", PID: 456, Dead: true, WindowPanes: 1},
-			}},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send compact; epic123:reviewer pane %11 is dead\n",
-		},
-		{
-			name:      "empty process baseline",
-			operation: "clear",
-			role:      "planner",
-			err: &target.ProcessIdentityError{
-				Session: session, Role: "planner", Window: tmuxx.Window{
-					ID: "@4", Name: "planner", Role: "planner",
-					Harness: "codex", Model: "o3", Process: "",
-				}, Pane: plannerPane,
-			},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to clear planner; window @4 has no @agentctl_process baseline; recover the role with \"agentctl relaunch planner\"\n",
-		},
-		{
-			name:      "process unavailable",
-			operation: "compact",
-			role:      "reviewer",
-			err: &target.ProcessIdentityError{
-				Session: session, Role: "reviewer", Window: reviewerWindow, Pane: reviewerPane, Err: tmuxx.ErrProcessUnavailable,
-			},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send compact; epic123:reviewer process identity is unavailable for pane %11: process identity unavailable\n",
-		},
-		{
-			name:      "process mismatch",
-			operation: "clear",
-			role:      "planner",
-			err: &target.ProcessIdentityError{
-				Session: session, Role: "planner", Window: plannerWindow, Pane: plannerPane, ActualProcess: "zsh",
-			},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send clear; epic123:planner pane %9 is running \"zsh\"; recorded process is \"codex\"\n",
-		},
-		{
-			name:      "self target",
-			operation: "compact",
-			role:      "reviewer",
-			err: &target.SelfTargetError{
-				Session: session, Role: "reviewer", Window: reviewerWindow, Pane: reviewerPane, CallerPane: "%11",
-			},
-			wantCode:  exitUnsafe,
-			wantError: "agentctl: refusing to send compact; epic123:reviewer is the calling pane %11\n",
+			name: "manual only child starting", response: shim.Response{Version: 1, Outcome: shim.OutcomeIndeterminateChildStarting, State: &state, ShimPID: &shimPID, RecordPath: &path},
+			want: "shim PID 41 was absent and the durable record is child-starting; independently prove child absence, then remove \"/recorded/sessions/fleet/roles/planner.json\" (indeterminate-child-starting)",
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resolver := resolverFunc(func(context.Context, *string) (tmuxx.Session, error) {
-				return session, nil
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"clear", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
+				resolver: &resolverStub{selected: "fleet"}, controller: &controlStub{response: test.response},
 			})
-			controller := controlExecutorFunc(func(context.Context, string, tmuxx.Session, string) error {
-				return tt.err
-			})
-			var stdout, stderr bytes.Buffer
-
-			code := runWithDependencies(context.Background(), []string{tt.operation, "--session", "epic123", tt.role}, &stdout, &stderr, dependencies{resolver: resolver, controller: controller})
-
-			if code != tt.wantCode {
-				t.Fatalf("runWithDependencies() = %d, want %d", code, tt.wantCode)
-			}
-			if stderr.String() != tt.wantError {
-				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantError)
-			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q, want empty", stdout.String())
+			if code != exitUnsafe || !strings.Contains(stderr.String(), test.want) || strings.Contains(stderr.String(), "(missing)") {
+				t.Fatalf("code=%d stderr=%q want fragment=%q", code, stderr.String(), test.want)
 			}
 		})
 	}
 }
 
-func TestRunWithRunnerControlValidatesTargetThenDeliversByPaneID(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(
-		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\t\tcodex\n")},
-		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
-		tmuxx.Response{Stdout: []byte("codex\n")},
-		tmuxx.Response{},
-		tmuxx.Response{},
-		tmuxx.Response{},
-	)
-	var stdout, stderr bytes.Buffer
+func TestRunControlMapsClosedShimResponseClasses(t *testing.T) {
+	t.Parallel()
 
-	code := runWithRunner(context.Background(), []string{"clear", "--session", "epic123", "planner"}, &stdout, &stderr, runner, lookupValues(nil))
-
-	if code != exitOK {
-		t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
+	state := "child-recorded"
+	stopping := "stopping"
+	causeBadRole := `role "other" differs from connected role "planner"`
+	causeSchema := `unknown field "payload"`
+	causeVersion := "2"
+	causeClaim := "claim"
+	causeCleanup := "SIGHUP failed"
+	cleanupObservation := "present-match"
+	causeContended := "flock returned EWOULDBLOCK"
+	causeObserve := "operation not permitted"
+	shimPID, childPID, callerPID, targetPID := 41, 73, 99, 41
+	tests := []struct {
+		name     string
+		response shim.Response
+		code     int
+		want     string
+	}{
+		{"invalid request", shim.Response{Version: 1, Outcome: shim.OutcomeInvalidRequest, Cause: &causeBadRole}, exitUsage, "agentctl: invalid shim request for session \"fleet\" role \"planner\": \"role \\\"other\\\" differs from connected role \\\"planner\\\"\"; no role was mutated\n"},
+		{"schema", shim.Response{Version: 1, Outcome: shim.OutcomeProtocolSchemaInvalid, Cause: &causeSchema}, exitTmux, "agentctl: could not interpret version-1 shim protocol for role \"planner\" in session \"fleet\": \"unknown field \\\"payload\\\"\" (protocol-schema-invalid)\n"},
+		{"skew", shim.Response{Version: 1, Outcome: shim.OutcomeProtocolSkew, Cause: &causeVersion}, exitSession, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; connected shim hello protocol version was 2; expected 1 (protocol-skew)\n"},
+		{"answerer claim", shim.Response{Version: 1, Outcome: shim.OutcomeAnswererDisagreement, ShimPID: &shimPID, TargetPID: &targetPID, Cause: &causeClaim}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; LOCAL_PEERPID 41 answered without the matching held role claim (answerer-disagreement)\n"},
+		{"cleanup failed", shim.Response{Version: 1, Outcome: shim.OutcomeCleanupFailed, ChildPID: &childPID, Cause: &causeCleanup, Cleanup: &cleanupObservation}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; durable cleanup is incomplete after \"SIGHUP failed\" and child observation is present-match (cleanup-failed)\n"},
+		{"contender", shim.Response{Version: 1, Outcome: shim.OutcomeConcurrentContender, ShimPID: &shimPID, Cause: &causeContended}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; flock returned EWOULDBLOCK while lockfile shim PID 41 holds the role claim (concurrent-contender)\n"},
+		{"present not ours", shim.Response{Version: 1, Outcome: shim.OutcomePresentNotOurs, ChildPID: &childPID}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; kill(73, 0) returned EPERM (present-not-ours)\n"},
+		{"could not observe", shim.Response{Version: 1, Outcome: shim.OutcomeCouldNotObserve, ChildPID: &childPID, Cause: &causeObserve}, exitTmux, "agentctl: could not observe child PID 73 for role \"planner\" in session \"fleet\": kill(73, 0) returned \"operation not permitted\" (could-not-observe)\n"},
+		{"starting", shim.Response{Version: 1, Outcome: shim.OutcomeStarting, State: &state, ShimPID: &shimPID, ChildPID: &childPID}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; shim PID 41 holds the claim and the durable record is child-recorded (starting)\n"},
+		{"observed self response", shim.Response{Version: 1, Outcome: shim.OutcomeObservedSelfTarget, CallerPID: &callerPID, TargetPID: &targetPID}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; target shim PID 41 is an ancestor of caller PID 99 (observed-self-target)\n"},
+		{"stopping", shim.Response{Version: 1, Outcome: shim.OutcomeShimStopping, State: &stopping, ShimPID: &shimPID, ChildPID: &childPID}, exitUnsafe, "agentctl: refusing to clear role \"planner\" in session \"fleet\"; shim PID 41 state is stopping for child PID 73; no PTY input was written (shim-stopping)\n"},
 	}
-	wantCalls := []tmuxx.Call{
-		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
-		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
-		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
-		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
-		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "-l", "--", "/clear"}},
-		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "Enter"}},
-	}
-	if !reflect.DeepEqual(runner.Calls, wantCalls) {
-		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
-	}
-	if stdout.String() != "agentctl: delivered /clear to epic123:planner\n" {
-		t.Fatalf("stdout = %q, want factual delivery message", stdout.String())
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"clear", "planner"}, &bytes.Buffer{}, &stderr, dependencies{resolver: &resolverStub{selected: "fleet"}, controller: &controlStub{response: test.response}})
+			if code != test.code || stderr.String() != test.want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
+			}
+		})
 	}
 }
 
-func TestRunWithRunnerControlDeliveryFailureIsTmuxExitWithoutSuccessClaim(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(
-		tmuxx.Response{Stdout: []byte("$4\tepic123\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("@4\tplanner\tplanner\tcodex\to3\thigh\t\tcodex\n")},
-		tmuxx.Response{Stdout: []byte("%9\t123\t0\t1\n")},
-		tmuxx.Response{Stdout: []byte("codex\n")},
-		tmuxx.Response{Err: errors.New("send keys failed")},
-	)
-	var stdout, stderr bytes.Buffer
-
-	code := runWithRunner(context.Background(), []string{"clear", "--session", "epic123", "planner"}, &stdout, &stderr, runner, lookupValues(nil))
-
-	if code != exitTmux {
-		t.Fatalf("runWithRunner() = %d, want %d", code, exitTmux)
-	}
-	wantCalls := []tmuxx.Call{
-		{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_managed"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$4", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$4", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
-		{Executable: "tmux", Args: []string{"list-panes", "-t", "@4", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
-		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "123"}},
-		{Executable: "tmux", Args: []string{"send-keys", "-t", "%9", "C-u"}},
-	}
-	if !reflect.DeepEqual(runner.Calls, wantCalls) {
-		t.Fatalf("Calls = %#v, want %#v", runner.Calls, wantCalls)
-	}
-	if stderr.String() != "agentctl: tmux clear pane input: send keys failed\n" {
-		t.Fatalf("stderr = %q, want retained delivery failure", stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want no delivery claim", stdout.String())
-	}
+type controlStub struct {
+	response                 shim.Response
+	err                      error
+	operation, session, role string
+	called                   bool
 }
 
-type controlExecutorFunc func(context.Context, string, tmuxx.Session, string) error
-
-func (f controlExecutorFunc) Execute(ctx context.Context, operation string, session tmuxx.Session, role string) error {
-	return f(ctx, operation, session, role)
+func (c *controlStub) Execute(_ context.Context, operation, sessionName, role string) (shim.Response, error) {
+	c.called = true
+	c.operation, c.session, c.role = operation, sessionName, role
+	return c.response, c.err
 }

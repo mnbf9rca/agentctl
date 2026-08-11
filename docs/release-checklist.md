@@ -47,9 +47,44 @@ hack/probe-shim-sighup.sh --harness codex --output "$shim_probe_dir/codex.txt"
 - [ ] The release notes record both observed child outcomes; no SIGHUP result is used as absence evidence
 - [ ] Focused aggregate tests cover below/equal/above pane counts and near misses, and the exact emitted line remains
       `note: all N roster roles are missing; unmanaged window "W" has N panes`
-- [ ] Operator recovery guidance still cites the tracked
-      [incident replay](security/2026-08-10-issue-182-replay-evidence.md), `classifyRelaunchWindow`, sole-window exit 3,
-      the eight-pane duplicate interval, inference-qualified low-duplication order, and `kill` plus `launch`
+- [ ] Transition guidance cites the tracked
+      [incident replay](security/2026-08-10-issue-182-replay-evidence.md), sole-window exit 3, the eight-pane duplicate
+      interval, inference-qualified low-duplication order, and `kill` plus `launch`, while labeling
+      `classifyRelaunchWindow` a retired pre-0.5 seam rather than a current recovery path
+
+### 0.5.0 atomic-cutover checkpoint
+
+For the public shim cutover, verify the release candidate rather than a package-only fixture. These checks use an
+isolated `AGENTCTL_RUNTIME_ROOT`, isolated `AGENTCTL_STATE_ROOT`, throwaway HOME/project, stub or explicitly consented
+harnesses, and a named throwaway tmux server. They never point at the operator's default tmux server or live agents.
+Task 8 adds the complete automated release fixture and evidence record; this checkpoint pins what that fixture must
+demonstrate and is not a substitute for it.
+
+- [ ] `agentctl --help` lists public `run` and never lists `__shim`; `relaunch --help` describes only runtime-observed
+      missing/ESRCH-backed stale roles and contains no `no-baseline` window recovery
+- [ ] A public `launch` creates the durable fleet record before role start, every role reaches runtime `running`, and
+      `status --session` reports `anchored` confidence separately from tmux presentation
+- [ ] On the same throwaway fleet, `join-pane`, `break-pane`, `swap-pane`, and `move-window` each leave runtime identity
+      and closed `clear`/`compact` delivery available; no assertion derives identity from window name, metadata, pane
+      count, or process row
+- [ ] `agentctl run --session direct --role a --harness HARNESS` reaches ready on an isolated PTY with no tmux server;
+      a second process observes status, delivery, and kill, and `attach` prints the exact no-presentation refusal
+- [ ] A second foreground role in the same cwd extends the durable roster after readiness. The same invocation from a
+      different cwd refuses before role start and record mutation, and prints both stored/current paths with
+      `fleet-directory-disagreement`
+- [ ] Removing a volatile anchor while retaining a durable record yields `unanchored`; changing HOME/state override
+      while the uid-rooted lock remains yields `state-root-disagreement` with both roots and no alternate-tree adoption
+- [ ] A dead-shim `child-starting` fixture remains indeterminate with no expiry. Documentation directs the operator to
+      the lockfile body's recorded state root and requires independent child-absence proof before manual record removal
+- [ ] `kill` proves child exit/absence before optional presentation and fleet cleanup. The auto-disappearing final tmux
+      window leg distinguishes presentation `gone` from `removed`; present/unavailable post-failure retains the fleet
+      record
+- [ ] Structural guards prove one `shellq.Join` site, no production `internal/target`, `DeliverPayload`, or `send-keys`,
+      and no caller-payload field in the version-1 request
+- [ ] `go version -m` on the built Darwin release candidate records `golang.org/x/sys v0.47.0`, and both Darwin archives
+      include the x/sys license along with all previously required license material
+- [ ] The upgrade notes state the flag day: stop pre-0.5 fleets with the old binary before upgrade; no tmux-metadata
+      fleet is migrated, adopted, or spoken to through a dual protocol
 
 ## Part A — Start the verifier
 

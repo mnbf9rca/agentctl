@@ -127,6 +127,37 @@ func TestServerRunServesClosedOperationsAndCleansOnlyAfterObservedAbsence(t *tes
 	}
 }
 
+func TestForegroundChildExitOutcomeKeepsExitAndSignalFactsDistinct(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name       string
+		exit       ptyx.ExitObservation
+		wantStatus int
+		wantSignal syscall.Signal
+		wantError  bool
+	}{
+		{name: "zero", exit: ptyx.ExitObservation{Observed: true, ExitCode: 0}},
+		{name: "nonzero", exit: ptyx.ExitObservation{Observed: true, ExitCode: 17}, wantStatus: 17, wantError: true},
+		{name: "signal", exit: ptyx.ExitObservation{Observed: true, ExitCode: -1, Signal: syscall.SIGHUP}, wantStatus: -1, wantSignal: syscall.SIGHUP, wantError: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			err := foregroundChildExitOutcome(test.exit)
+			if !test.wantError {
+				if err != nil {
+					t.Fatalf("outcome error = %v, want nil", err)
+				}
+				return
+			}
+			var child *ForegroundChildExitError
+			if !errors.As(err, &child) || child.Status != test.wantStatus || child.Signal != test.wantSignal {
+				t.Fatalf("outcome error = %#v, want status=%d signal=%v", child, test.wantStatus, test.wantSignal)
+			}
+		})
+	}
+}
+
 func TestShimServerRefusesIdentityAndReadinessBeforePTYMutation(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}

@@ -63,3 +63,66 @@ func TestWriteShimJSONCarriesExplicitUnanchoredMissing(t *testing.T) {
 		t.Fatalf("WriteShimJSON() = %q, want %q", got, want)
 	}
 }
+
+func TestWriteShimSessionsTableMarksCurrentFleetAndKeepsDefectiveEntryVisible(t *testing.T) {
+	t.Parallel()
+
+	report := ShimSessionsReport{Schema: 1, Sessions: []ShimReport{
+		{Schema: 1, Session: "alpha", Current: true, Presentation: PresentationGone, Agents: []ShimAgent{{Role: "planner", Harness: "claude", Confidence: ConfidenceUnanchored, State: RuntimeStateMissing}}},
+		{Schema: 1, Session: "broken", Presentation: PresentationUnavailable, Agents: []ShimAgent{}, Defect: "fleet.json is not a regular file"},
+	}}
+	var output bytes.Buffer
+	if err := WriteShimSessionsTable(&output, report); err != nil {
+		t.Fatalf("WriteShimSessionsTable() error = %v", err)
+	}
+	want := "   SESSION  ROLE     HARNESS  MODEL    EFFORT   CONFIDENCE  SHIM  CHILD  PRESENTATION  STATE           FACTS\n" +
+		"*  alpha    planner  claude   default  default  unanchored               gone          missing         -\n" +
+		"   broken                                                                unavailable   invalid-record  fleet.json is not a regular file\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteShimSessionsTable() =\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestWriteShimSessionsTableKeepsEachNoteWithItsFleet(t *testing.T) {
+	t.Parallel()
+
+	report := ShimSessionsReport{Schema: 1, Sessions: []ShimReport{
+		{Schema: 1, Session: "alpha", Presentation: PresentationGone, Agents: []ShimAgent{{Role: "planner", Harness: "claude", Confidence: ConfidenceUnanchored, State: RuntimeStateMissing}}, Note: "alpha note"},
+		{Schema: 1, Session: "beta", Presentation: PresentationGone, Agents: []ShimAgent{{Role: "worker", Harness: "codex", Confidence: ConfidenceUnanchored, State: RuntimeStateMissing}}, Note: "beta note"},
+	}}
+	var output bytes.Buffer
+	if err := WriteShimSessionsTable(&output, report); err != nil {
+		t.Fatalf("WriteShimSessionsTable() error = %v", err)
+	}
+	wantOrder := []string{
+		"alpha    planner",
+		"note: alpha note",
+		"beta     worker",
+		"note: beta note",
+	}
+	remaining := output.String()
+	for _, fragment := range wantOrder {
+		index := bytes.Index([]byte(remaining), []byte(fragment))
+		if index < 0 {
+			t.Fatalf("WriteShimSessionsTable() = %q, want %q after prior fragments", output.String(), fragment)
+		}
+		remaining = remaining[index+len(fragment):]
+	}
+}
+
+func TestWriteShimSessionsJSONUsesEmptyArraysForDefectiveFleet(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	report := ShimSessionsReport{Schema: 1, Sessions: []ShimReport{{
+		Schema: 1, Session: "broken", Presentation: PresentationUnavailable,
+		Defect: "bad record",
+	}}}
+	if err := WriteShimSessionsJSON(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	want := "{\"schema\":1,\"sessions\":[{\"schema\":1,\"session\":\"broken\",\"presentation\":\"unavailable\",\"agents\":[],\"defect\":\"bad record\"}]}\n"
+	if got := output.String(); got != want {
+		t.Fatalf("WriteShimSessionsJSON() = %q, want %q", got, want)
+	}
+}

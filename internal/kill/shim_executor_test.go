@@ -119,6 +119,37 @@ func TestShimExecutorRetainsPresentationAndFleetRecordWhenStopDoesNotObserveExit
 	}
 }
 
+func TestShimExecutorReportsAlreadyStoppingWithoutClaimingASecondSignal(t *testing.T) {
+	t.Parallel()
+
+	events := &killEventLog{}
+	record := killFleetRecord(t, oneKillRole())
+	recordState := "stopping"
+	shimPID, childPID := 6001, 7001
+	attempted := false
+	executor := NewShimExecutor(
+		&killLifecycle{events: events, responses: map[string]shim.Response{"planner": {
+			Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStopAlreadyStopping,
+			State: &recordState, ShimPID: &shimPID, ChildPID: &childPID, SignalAttempted: &attempted,
+		}}},
+		&killRecords{events: events, record: record},
+		&killInspector{events: events, observations: map[string]fleet.ShimRoleObservation{
+			"planner": {Outcome: shim.OutcomeRunning, ShimPID: shimPID, ChildPID: childPID},
+		}},
+		&killPresentation{events: events},
+	)
+
+	_, err := executor.Execute(context.Background(), "fleet")
+	var refusal *ShimKillRefusalError
+	if !errors.As(err, &refusal) || refusal.Outcome != shim.OutcomeStopAlreadyStopping || refusal.Observation.State != "stopping" || refusal.Observation.ShimPID != shimPID || refusal.Observation.ChildPID != childPID {
+		t.Fatalf("Execute() error = %T %#v, want exact stop-already-stopping refusal", err, err)
+	}
+	want := []string{"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner"}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events=%#v, want retained ownership %#v", got, want)
+	}
+}
+
 func TestShimExecutorSucceedsWithoutTmuxPresentation(t *testing.T) {
 	t.Parallel()
 

@@ -20,8 +20,16 @@ import (
 // needed for a fresh absence check or diagnostics.
 type ShimRoleObservation struct {
 	Outcome       shim.Outcome
+	State         string
 	ShimPID       int
 	ChildPID      int
+	RecordPath    string
+	LocalRoot     string
+	RecordedRoot  string
+	AnswererPID   int
+	CallerPID     int
+	TargetPID     int
+	Cleanup       string
 	RecordedToken *shim.StartToken
 	ObservedToken *shim.StartToken
 	Cause         error
@@ -64,17 +72,17 @@ func (i *RuntimeShimRoleInspector) Inspect(ctx context.Context, session, role st
 		if errors.Is(err, os.ErrNotExist) && errors.Is(recordErr, os.ErrNotExist) {
 			return ShimRoleObservation{Outcome: shim.OutcomeMissing}, nil
 		}
-		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, Cause: err}, nil
+		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, RecordPath: path.Record, Cause: err}, nil
 	}
 	if err := advisory.CompareStateRoot(i.namespace.StateRoot); err != nil {
 		return ShimRoleObservation{Outcome: shim.OutcomeStateRootDisagreement, ShimPID: advisory.ShimPID, Cause: err}, nil
 	}
 	record, err := shim.ReadRecord(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, ShimPID: advisory.ShimPID, Cause: err}, nil
+		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, ShimPID: advisory.ShimPID, RecordPath: path.Record, Cause: err}, nil
 	}
 	if err != nil {
-		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, ShimPID: advisory.ShimPID, Cause: err}, nil
+		return ShimRoleObservation{Outcome: shim.OutcomeInvalidRecord, ShimPID: advisory.ShimPID, RecordPath: path.Record, Cause: err}, nil
 	}
 	response, clientErr := i.lifecycle.Observe(ctx, session, role)
 	if clientErr == nil {
@@ -98,7 +106,7 @@ func (i *RuntimeShimRoleInspector) Inspect(ctx context.Context, session, role st
 	}
 	if record.State == shim.RecordStateChildStarting {
 		return ShimRoleObservation{
-			Outcome: shim.OutcomeIndeterminateChildStarting, ShimPID: advisory.ShimPID, Cause: clientErr,
+			Outcome: shim.OutcomeIndeterminateChildStarting, ShimPID: advisory.ShimPID, RecordPath: path.Record, Cause: clientErr,
 		}, nil
 	}
 	result := i.observeProcess(record.ChildPID, *record.ChildStartToken)
@@ -109,11 +117,30 @@ func observationFromShimResponse(response shim.Response, record shim.Record) Shi
 	observation := ShimRoleObservation{
 		Outcome: response.Outcome, ChildPID: record.ChildPID, RecordedToken: record.ChildStartToken,
 	}
+	if response.State != nil {
+		observation.State = *response.State
+	}
 	if response.ShimPID != nil {
 		observation.ShimPID = *response.ShimPID
 	}
 	if response.ChildPID != nil {
 		observation.ChildPID = *response.ChildPID
+	}
+	if response.LocalRoot != nil {
+		observation.LocalRoot = *response.LocalRoot
+	}
+	if response.RecordedRoot != nil {
+		observation.RecordedRoot = *response.RecordedRoot
+	}
+	if response.TargetPID != nil {
+		observation.AnswererPID = *response.TargetPID
+		observation.TargetPID = *response.TargetPID
+	}
+	if response.CallerPID != nil {
+		observation.CallerPID = *response.CallerPID
+	}
+	if response.Cleanup != nil {
+		observation.Cleanup = *response.Cleanup
 	}
 	observation.ObservedToken = response.ObservedToken
 	if response.Cause != nil {
@@ -170,10 +197,11 @@ func (i *RuntimeShimRoleInspector) RemoveStale(_ context.Context, session, role 
 
 // ShimRelaunchRefusalError preserves the exact state that refused mutation.
 type ShimRelaunchRefusalError struct {
-	Session string
-	Role    string
-	Outcome shim.Outcome
-	Cause   error
+	Session     string
+	Role        string
+	Outcome     shim.Outcome
+	Cause       error
+	Observation ShimRoleObservation
 }
 
 func (e *ShimRelaunchRefusalError) Error() string {
@@ -211,14 +239,13 @@ func (e *ShimRelaunchRollbackError) Error() string {
 
 func (e *ShimRelaunchRollbackError) Unwrap() error { return e.Cause }
 
-// ShimRelauncher is the explicitly named compatibility implementation.
+// ShimRelauncher is the runtime-backed single-role relaunch implementation.
 type ShimRelauncher struct {
 	launcher  ShimLauncher
 	inspector ShimRoleInspector
 }
 
-// NewShimRelauncher constructs the compatibility path without changing the
-// legacy Relaunch method or production CLI dependencies.
+// NewShimRelauncher constructs the runtime-backed relaunch implementation.
 func NewShimRelauncher(
 	presentation ShimPresentation,
 	lifecycle ShimLifecycle,
@@ -237,7 +264,7 @@ func NewShimRelauncher(
 func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request RelaunchRequest) (ShimRelaunchResult, error) {
 	record, err := r.launcher.records.Read(session)
 	if err != nil {
-		return ShimRelaunchResult{}, err
+		return ShimRelaunchResult{}, fleetMissing(session, err)
 	}
 	stored, ok := record.Roles[request.Role]
 	if !ok {
@@ -249,7 +276,7 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 	}
 	if observation.Outcome != shim.OutcomeMissing && observation.Outcome != shim.OutcomeStaleRecord {
 		return ShimRelaunchResult{}, &ShimRelaunchRefusalError{
-			Session: session, Role: request.Role, Outcome: observation.Outcome, Cause: observation.Cause,
+			Session: session, Role: request.Role, Outcome: observation.Outcome, Cause: observation.Cause, Observation: observation,
 		}
 	}
 	role, directory, err := resolveShimRelaunchConfig(record, request, stored)
@@ -272,8 +299,10 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 			return ShimRelaunchResult{}, err
 		}
 		if !fresh.MayAuthorizeRelaunch() {
+			outcome := outcomeFromProcessObservation(fresh.Observation)
 			return ShimRelaunchResult{}, &ShimRelaunchRefusalError{
-				Session: session, Role: request.Role, Outcome: outcomeFromProcessObservation(fresh.Observation), Cause: fresh.Err,
+				Session: session, Role: request.Role, Outcome: outcome, Cause: fresh.Err,
+				Observation: ShimRoleObservation{Outcome: outcome, ChildPID: observation.ChildPID, Cause: fresh.Err},
 			}
 		}
 	}
@@ -311,7 +340,9 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 			}
 			return ShimRelaunchResult{}, &ShimRelaunchRefusalError{
 				Session: session, Role: role.Name, Outcome: shim.OutcomeConcurrentContender,
-				Cause: errors.Join(err, cleanupErr),
+				Cause: errors.Join(err, cleanupErr), Observation: ShimRoleObservation{
+					Outcome: shim.OutcomeConcurrentContender, ShimPID: disagreement.ObservedPID, Cause: errors.Join(err, cleanupErr),
+				},
 			}
 		}
 		return ShimRelaunchResult{}, err
