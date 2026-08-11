@@ -89,6 +89,23 @@ against a built release candidate, including skill discovery. The retired
 pre-0.5 Parts A–C walkthrough is removed because its window-identity attach and
 pane-removal relaunch steps are not valid shim-plane evidence.
 
+From the clean primary checkout, build the candidate and choose an evidence
+directory outside the verifier's owned temporary root:
+
+```bash
+make build
+task8_evidence="$(mktemp -d /tmp/agentctl-task8-evidence.XXXXXX)"
+hack/release-verify.sh --task8 "$(pwd -P)/bin/agentctl" "$task8_evidence"
+```
+
+The command fails closed at the first missing observation. A passing run keeps
+only the evidence directory and records `TASK8 CLEANUP PASS`: its temporary
+HOME, runtime/state roots, project, PTY children, sockets, locks, and fixture
+credentials were observed absent. The version matrix under
+`shim-version-matrix/` records both executable hashes/versions and six named
+foreign, absent, and matching legs. The integration log names the fixture-owned
+tmux tests; no step targets the default tmux server.
+
 ## Part D — Promotion PR
 
 `--body-file` is mandatory: GitHub shows no template chooser for PRs, so

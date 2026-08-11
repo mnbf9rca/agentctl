@@ -4,6 +4,12 @@ See `docs/release-checklist.md` for the runbook this supports.
 
 ## Why this checklist exists
 
+For 0.5.0, the shim cutover replaces the old human Parts A–C walkthrough with
+the Task 8 automated release-candidate fixture. Kernel, PTY, Unix-socket, tmux
+layout, installed-skill, and cleanup observations are captured as named
+artifacts. The historical explanation below describes why the pre-0.5
+walkthrough existed; its results remain history, not evidence for 0.5 or later.
+
 Automated tests cannot cover the states this checklist covers, and the reason is
 structural rather than a matter of effort.
 
@@ -29,6 +35,45 @@ So this document is not a belt-and-braces duplicate of the test suite. It is the
 part of verification the suite is structurally unable to perform.
 
 ## Results history
+
+### 2026-08-11
+
+Issue #182 Task 8 implementation evidence (pre-PR release-candidate run):
+
+- Candidate: `agentctl 9b3ecd78ca8b129c90c7c0bda1b4f2d03672f065`; SHA-256
+  `1b20f9c5c7204908c33c749e10e488053f58e41b3d2e3273f6ca4ceb927370a0`.
+- Foreign fixture: `foreign-protocol-v2`; SHA-256
+  `0fcdb1861fa469b43d82e5f1af91c272cff120efa1adde26627eb8afc00b3d0b`.
+- All six matrix legs passed: the current client rejected foreign and absent
+  `connected shim hello` versions; foreign and absent clients were rejected
+  from `client request`; matching hello/request controls reached their next
+  typed runtime gates.
+- Candidate-backed, fixture-owned integration tests attested the candidate
+  path/hash and passed no-tmux foreground operation,
+  `join-pane`/`break-pane`/`swap-pane`/`move-window` identity preservation,
+  delivery, roster extension/directory refusal, unanchored status, divergent
+  state roots, attach refusal, shim-crash/relaunch, and child-exit-before-cleanup
+  (`9.040s`).
+- Live kernel tests observed a reaped child as ESRCH/absent; the EPERM, other
+  kill-error, and post-presence token-read failure table refused absence. Raw
+  start-token legs passed under `TZ=UTC, LC_ALL=C` and
+  `TZ=Pacific/Auckland, LC_ALL=en_US.UTF-8`.
+- Deterministic TERM injection at all nine walkthrough phases used an actual
+  `setsid` descendant that ignored TERM/HUP, preserved exit 143, cleaned
+  exactly once, and never printed PASS. The owned-process sweep required
+  peer-verified shim identity or matching PID/start-token identity before
+  cleanup and then observed ESRCH; cleanup-failure injection preserved the
+  signal status.
+- The candidate installed matching Claude and Codex skill trees into an
+  isolated HOME. R23's agent-facing surface and R23a's production
+  `RuntimeStates` pairing were verified by their landed drift tests; they were
+  not reimplemented.
+- Structural and archive-license fixtures passed. Both actual Darwin snapshot
+  archives contained the x/sys license and all prior required license material;
+  `go version -m` recorded `golang.org/x/sys v0.47.0`.
+- Cleanup recorded the owned Task 8 root absent. The run retained evidence
+  only under `/private/tmp/agentctl-task8-final.20ncWP`; this path is
+  run-local and this summary is the durable record.
 
 ### 2026-08-10
 
