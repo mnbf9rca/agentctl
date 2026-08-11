@@ -86,6 +86,63 @@ func TestIntegrationPublicForegroundRunUsesRuntimeWithoutTmux(t *testing.T) {
 	}
 }
 
+func TestIntegrationPublicForegroundRunRelaysCtrlCToNestedPTYAndCleansUp(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+	scriptPath, err := exec.LookPath("script")
+	if err != nil {
+		t.Skipf("foreground integration requires script PTY wrapper: %v", err)
+	}
+	input, keepOpen, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer keepOpen.Close()
+	var output bytes.Buffer
+	command := exec.Command(scriptPath, "-q", "/dev/null", fixture.agentctlPath,
+		"run", "--session", "direct-signal", "--role", "planner", "--harness", "claude")
+	command.Env = environmentWith(os.Environ(), integrationAgentctlEnv, "1")
+	command.Stdin = input
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start public foreground run: %v", err)
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		statusResult := fixture.runAgentctl("status", "--session", "direct-signal", "--json")
+		if statusResult.exitCode == exitOK && strings.Contains(statusResult.stdout, `"state":"running"`) {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			_ = command.Process.Kill()
+			t.Fatalf("foreground role did not become runtime-running; output=%q", output.String())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, err := keepOpen.Write([]byte{3}); err != nil {
+		t.Fatalf("write Ctrl-C: %v", err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		_ = command.Process.Kill()
+		t.Fatalf("foreground process did not exit after relayed Ctrl-C; output=%q", output.String())
+	}
+	if !strings.Contains(output.String(), "foreground role \"planner\" in session \"direct-signal\" terminated by signal SIGINT (child-signal)") {
+		t.Fatalf("foreground Ctrl-C output=%q, want observed nested-child SIGINT", output.String())
+	}
+	statusResult := fixture.runAgentctl("status", "--session", "direct-signal", "--json")
+	cleanedRole := statusResult.exitCode == exitOK && strings.Contains(statusResult.stdout, `"state":"missing"`)
+	cleanedNewFleet := statusResult.exitCode == exitSession && strings.Contains(statusResult.stderr, `has no durable fleet configuration`)
+	if !cleanedRole && !cleanedNewFleet {
+		t.Fatalf("status after Ctrl-C = %#v, want cleaned missing role or cleaned newly owned fleet", statusResult)
+	}
+}
+
 func TestIntegrationPublicShimCommandsSurvivePresentationLayoutChanges(t *testing.T) {
 	fixture := newIntegrationFixture(t)
 	launched := fixture.runAgentctl("launch", "--session", "public-layout", "--roles", "planner:claude,coder:codex")
@@ -118,8 +175,16 @@ func TestIntegrationPublicShimCommandsSurvivePresentationLayoutChanges(t *testin
 	}
 }
 
-func TestIntegrationPublicAttachRefusesAbsentPresentationWithoutRuntimeClaim(t *testing.T) {
+func TestIntegrationPublicAttachRefusesAbsentPresentationForDurableFleet(t *testing.T) {
 	fixture := newIntegrationFixtureWithoutServer(t)
+	_, records, _, _ := fixture.shimStack(t)
+	record, err := fleet.NewShimFleetRecord("no-ui", fixture.captureDir, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
+	if err != nil {
+		t.Fatalf("NewShimFleetRecord() error = %v", err)
+	}
+	if err := records.Create(record); err != nil {
+		t.Fatalf("Create() durable fleet error = %v", err)
+	}
 	t.Setenv("TERM_PROGRAM", "iTerm.app")
 	if err := os.Unsetenv("TMUX_PANE"); err != nil {
 		t.Fatal(err)

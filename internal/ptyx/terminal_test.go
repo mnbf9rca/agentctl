@@ -424,6 +424,25 @@ func TestTerminalForwardsExactTermiosAndWindowSizeInTheirRequiredDirections(t *t
 	}
 }
 
+func TestRelayInputStateDisablesOnlyOuterSignalGeneration(t *testing.T) {
+	state := TerminalState{
+		termiosObserved: true,
+		termios: syscall.Termios{
+			Iflag: 1, Oflag: 2, Cflag: 3, Lflag: syscall.ISIG | 0x4000,
+			Cc: [20]uint8{1, 2, 3, 4}, Ispeed: 9600, Ospeed: 19200,
+		},
+	}
+	relay := state.RelayInputState()
+	want := state.termios
+	want.Lflag &^= syscall.ISIG
+	if !relay.termiosObserved || !reflect.DeepEqual(relay.termios, want) {
+		t.Fatalf("RelayInputState() = %#v, want observed state %#v", relay, want)
+	}
+	if state.termios.Lflag&syscall.ISIG == 0 {
+		t.Fatal("RelayInputState() mutated the nested terminal observation")
+	}
+}
+
 func TestTerminalRefusesToApplyUnobservedTermiosState(t *testing.T) {
 	file := newTestFile(t, "terminal")
 	system := &fakeTerminalSystem{

@@ -2023,8 +2023,10 @@ before parsing any other field. The protocol constants are:
 | `ShimProtocolIOTimeout` | `2s` |
 
 Each frame is a four-byte unsigned big-endian payload length followed by exactly that many UTF-8 JSON bytes. Lengths
-from 1 through 4096 are accepted; zero, a value above 4096, EOF in either header or payload, invalid UTF-8, trailing
-bytes inside a single JSON value, and a non-object top level are `protocol-frame-read-invalid`. A connection carries,
+from 1 through 4096 are accepted; zero, a value above 4096, EOF after any header/payload byte, invalid UTF-8, trailing
+bytes inside a single JSON value, and a non-object top level are `protocol-frame-read-invalid`. A zero-byte EOF before
+the client request is a nonfatal peer abort because clients close at that boundary after skew, answerer, or ancestry
+refusal. A connection carries,
 in order, exactly one server hello, one client request, and one server response, then the server closes it. The hello
 payload encoded by version 1 is exactly `{"version":1}`. The request schema contains only `version`, `session`,
 `role`, and `operation`; `operation` is one closed registry name. Ruling R16 (planner answer to the PR-4 builder,
@@ -2041,7 +2043,12 @@ payload encoded by version 1 is exactly `{"version":1}`. The request schema cont
 at their specified provenance. `stop` attempts the closed `SIGHUP` process-group signal and reports
 `signal_attempted` separately from `child_exit_observed`; a signal attempt is never exit evidence, and a survivor is
 retained. A non-wire signal/file side channel is inadmissible because it cannot return those §1.1 observations. The
-versioned socket round trip is the one control channel for all four operations.
+versioned socket round trip is the one control channel for all four operations. A partial client frame, timeout, or
+non-closure read/write transport failure is not discarded: the server surfaces its typed direction and peer, exits
+through the applicable §15.8 client row, and performs the normal owned-runtime cleanup. Zero-byte pre-request closure
+and peer closure while writing a response are nonfatal aborts; this preserves safety refusals and cancellation without
+claiming request success or tearing down the resident role. A hello-write failure is always typed/fatal, including a
+zero- or partial-progress peer closure, because no client refusal has yet been established.
 
 Payload delivery and stop share one serialization gate that remains held through their response write. Stop first
 changes the closed phase from `active` to `stopping`, then waits for any already-admitted payload operation to finish
@@ -2173,14 +2180,17 @@ operator-selected fields into runtime evidence. The legacy tmux identity collect
 `launch` persists roster/config before absence can be reported, starts shims in roster order, and waits for readiness.
 Tmux launch uses the single §12.1 shell site to start the hidden shim; foreground `run` invokes typed argv directly.
 `relaunch` requires §15.4 absence permission and never starts beside orphan, indeterminate, disagreement, or
-could-not-observe. `kill` signals child/process group first, observes §15.4, then lets shim release its claim; partial
-cleanup remains reported.
+could-not-observe. An explicit relaunch `--dir` is resolved to an absolute path and validated before presentation or
+runtime mutation; the stored fleet directory is already absolute by §15.2. `kill` signals child/process group first,
+observes §15.4, then lets shim release its claim; partial cleanup remains reported.
 
 Foreground `run` creates or extends the durable fleet according to §15.2, starts the same resident server and harness
 argv as tmux launch, and connects the caller's terminal streams directly to the nested PTY. It creates no shell,
 viewer, tmux server, session, window, or pane. The command remains in the foreground through child exit and forwards
-terminal signal/resize behavior through the shared PTY lifecycle. Its exact syntax is §15.1; the cwd is observed before
-runtime mutation and is not caller-overridable.
+terminal signal/resize behavior through the shared PTY lifecycle. Once the nested terminal reaches ready, the outer
+terminal copies its observed mode with only `ISIG` cleared so control characters reach the relay as bytes; the nested
+PTY retains its own `ISIG` policy and delivers the resulting signal to the harness process group. Its exact syntax is
+§15.1; the cwd is observed before runtime mutation and is not caller-overridable.
 
 For an existing fleet whose stored directory differs from that cwd, the exact refusal is:
 
@@ -2189,7 +2199,10 @@ agentctl: refusing to run role "ROLE" in session "SESSION"; durable fleet direct
 ```
 
 `kill` observes optional presentation by exact session name before role mutation and retains that observation's typed
-session ID. Only after every required child exit/absence fact does it attempt `kill-session -t SID` exactly once. Tmux
+session ID. After each `stop-child-exited`, it polls every 25ms through the inclusive 5s boundary until the role
+inspector reports `missing`; transient `stopped`/`stale-record` artifacts are not fleet-cleanup permission. Any other
+state, observation failure, cancellation, or timeout retains the fleet record. Only after every required child
+exit/absence and role-artifact cleanup fact does it attempt `kill-session -t SID` exactly once. Tmux
 normally removes the last non-`remain-on-exit` shim window and its session as the shim exits, so that exact-ID removal
 can race a presentation that has already disappeared. The closed post-removal table is:
 
@@ -2219,7 +2232,9 @@ The only delivery instruction at the control boundary is the operation name afte
 identity, and readiness pass. The request's other permitted values are the protocol version and validated
 session/role identity pinned in §15.5; the response contains only its protocol version and typed objective facts. The
 shim reports only accepted request, bytes written, submit observed, cancellation residue, child exit, and cleanup
-facts. It never reports harness execution from a PTY write. `attach` requires tmux presentation; without one:
+facts. It never reports harness execution from a PTY write. `attach` first proves that the selected session has a
+durable fleet configuration, then requires an exactly observed tmux presentation by name and attaches only its typed
+session ID. It never treats a same-named presentation as fleet identity. Without a presentation:
 
 ```text
 agentctl: refusing to attach session "S"; no tmux presentation was observed; status and control remain available without tmux
@@ -2297,6 +2312,7 @@ sole successful status output and therefore add no diagnostic line.
 | `readiness-timeout-retained` | 9 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; child PID CHILD was not observed absent, so ownership and the durable record were retained (readiness-timeout)` |
 | `ownership-retained` | 9 | `agentctl: role ROLE in session SESSION failed after child PID CHILD started: CAUSE; cleanup observation was OBSERVATION, so ownership and the durable record were retained (ownership-retained)` |
 | `stop-child-retained` | 9 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP but did not observe child PID CHILD exit; child observation was OBSERVATION; ownership and the durable record were retained (stop-child-retained)` |
+| `post-exit-cleanup-retained` | 9 | `agentctl: stop for role ROLE in session SESSION observed child PID CHILD exit, but role cleanup was not observed complete; last outcome was OUTCOME: CAUSE; presentation and fleet record were retained (post-exit-cleanup-retained)` |
 | `record-commit-uncertain` | 9 | `agentctl: role ROLE in session SESSION has an uncertain durable PHASE record commit: CAUSE; the record was retained and the role was not reported absent (record-commit-uncertain)` |
 
 `protocol-skew-shim-observed` and `protocol-skew-client-observed` substitute `OBSERVED` with `duplicate`, the `%q`

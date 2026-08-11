@@ -643,6 +643,11 @@ func writeAttachNextSteps(out io.Writer, observation attachObservation, target t
 }
 
 func attachError(stderr io.Writer, err error) int {
+	var missingFleet *fleet.ShimFleetMissingError
+	if errors.As(err, &missingFleet) {
+		fmt.Fprintf(stderr, "agentctl: session %q has no durable fleet configuration\n", missingFleet.Session)
+		return exitSession
+	}
 	var noPresentation *attach.NoPresentationError
 	if errors.As(err, &noPresentation) {
 		return attachNoPresentationError(stderr, noPresentation)
@@ -827,13 +832,31 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 }
 
 func foregroundError(stderr io.Writer, sessionName, role string, err error) int {
+	var restore *foregroundTerminalRestoreError
+	if errors.As(err, &restore) {
+		fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, restore.Error())
+		return exitUnclassified
+	}
 	var mismatch *fleet.ShimForegroundDirectoryMismatchError
 	if errors.As(err, &mismatch) {
 		fmt.Fprintf(stderr, "agentctl: refusing to run role %q in session %q; durable fleet directory %q differs from current working directory %q; no role was started or durable record mutated (fleet-directory-disagreement)\n", role, sessionName, mismatch.Stored, mismatch.Current)
 		return exitUnsafe
 	}
+	var rollback *fleet.ShimForegroundRollbackError
+	if errors.As(err, &rollback) {
+		fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, rollback.Error())
+		return exitUnclassified
+	}
 	var lifecycle *shim.LifecycleRunError
 	if errors.As(err, &lifecycle) {
+		if lifecycle.CleanupObservation == shim.ProcessAbsent && lifecycle.CleanupErr != nil {
+			if len(lifecycle.Remaining) > 0 {
+				fmt.Fprintf(stderr, "agentctl: run failed for role %q in session %q: %q; cleanup left %s: %q (owned-rollback-incomplete)\n", role, sessionName, errorText(lifecycle.Cause), strings.Join(lifecycle.Remaining, ", "), errorText(lifecycle.CleanupErr))
+				return exitLaunch
+			}
+			fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, lifecycle.Error())
+			return exitUnclassified
+		}
 		cleaned := lifecycle.CleanupObservation == shim.ProcessAbsent && lifecycle.CleanupErr == nil
 		if cleaned {
 			switch lifecycle.Outcome {

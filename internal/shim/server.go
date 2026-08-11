@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -41,11 +42,15 @@ type requestHandler struct {
 }
 
 type shimOperationPhase string
+type connectedClientFramePhase string
 
 const (
-	shimOperationActive   shimOperationPhase = "active"
-	shimOperationStopping shimOperationPhase = "stopping"
-	shimOperationStopped  shimOperationPhase = "stopped"
+	shimOperationActive      shimOperationPhase        = "active"
+	shimOperationStopping    shimOperationPhase        = "stopping"
+	shimOperationStopped     shimOperationPhase        = "stopped"
+	clientFrameHelloWrite    connectedClientFramePhase = "hello-write"
+	clientFrameRequestRead   connectedClientFramePhase = "request-read"
+	clientFrameResponseWrite connectedClientFramePhase = "response-write"
 )
 
 func (h *requestHandler) operationPhase() shimOperationPhase {
@@ -107,11 +112,11 @@ func (h *requestHandler) handleConnection(ctx context.Context, connection net.Co
 		return err
 	}
 	if _, err := WriteFrame(connection, hello); err != nil {
-		return err
+		return connectedClientFrameError(clientFrameHelloWrite, ProtocolFrameWrite, err)
 	}
 	payload, err := ReadFrame(connection)
 	if err != nil {
-		return err
+		return connectedClientFrameError(clientFrameRequestRead, ProtocolFrameRead, err)
 	}
 	request, err := DecodeRequest(payload)
 	if err != nil {
@@ -186,7 +191,12 @@ func (h *requestHandler) handleConnection(ctx context.Context, connection net.Co
 				h.setOperationPhase(shimOperationStopped)
 			}
 			if writeErr := writeHandlerResponse(connection, response); writeErr != nil {
-				if !childExited {
+				if childExited {
+					var abort *ProtocolPeerAbortError
+					if errors.As(writeErr, &abort) && h.stopComplete != nil {
+						h.stopComplete()
+					}
+				} else {
 					h.setOperationPhase(shimOperationActive)
 				}
 				return writeErr
@@ -340,6 +350,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	go func() { readyErr <- runtime.waitReady(serverCtx) }()
 
 	ready := false
+	watcherDone := watcher.done
 	for {
 		select {
 		case err := <-readyErr:
@@ -351,14 +362,17 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 			}
 			handler.setReady()
 			ready = true
-		case <-watcher.done:
+		case <-watcherDone:
+			if ready && handler.operationPhase() != shimOperationActive {
+				// Stop owns the observed exit. Wait for either its response write
+				// disposition or stopComplete so the exact protocol outcome wins.
+				watcherDone = nil
+				continue
+			}
 			cancel()
 			cleanup := s.cleanupRuntime(runtime, false)
 			if ready {
-				if handler.operationPhase() == shimOperationActive {
-					return errors.Join(foregroundChildExitOutcome(watcher.exit), cleanup.Err)
-				}
-				return cleanup.Err
+				return errors.Join(foregroundChildExitOutcome(watcher.exit), cleanup.Err)
 			}
 			return &LifecycleRunError{
 				Outcome: OutcomeChildExitedBeforeReady, ChildPID: runtime.record.ChildPID,
@@ -479,7 +493,16 @@ func (s *Server) serveConnections(ctx context.Context, listener roleListener, ha
 		}
 		go func() {
 			defer func() { _ = connection.Close() }()
-			_ = handler.handleConnection(ctx, connection)
+			if err := handler.handleConnection(ctx, connection); err != nil {
+				var abort *ProtocolPeerAbortError
+				if errors.As(err, &abort) {
+					return
+				}
+				select {
+				case fatal <- err:
+				case <-ctx.Done():
+				}
+			}
 		}()
 	}
 }
@@ -675,7 +698,31 @@ func writeHandlerResponse(connection net.Conn, response Response) error {
 		return err
 	}
 	_, err = WriteFrame(connection, payload)
-	return err
+	if err != nil {
+		return connectedClientFrameError(clientFrameResponseWrite, ProtocolFrameWrite, err)
+	}
+	return nil
+}
+
+func connectedClientFrameError(phase connectedClientFramePhase, direction ProtocolFrameDirection, err error) error {
+	if phase == clientFrameRequestRead && direction == ProtocolFrameRead {
+		var readErr *FrameReadError
+		if errors.As(err, &readErr) {
+			if readErr.Phase == "header" && readErr.Read == 0 && connectionClosedError(readErr.Err) {
+				return &ProtocolPeerAbortError{Direction: direction, Err: err}
+			}
+			return &ProtocolFrameError{Direction: direction, Peer: ProtocolPeerClient, Err: err}
+		}
+	}
+	if phase == clientFrameResponseWrite && direction == ProtocolFrameWrite && connectionClosedError(err) {
+		return &ProtocolPeerAbortError{Direction: direction, Err: err}
+	}
+	return &ProtocolFrameError{Direction: direction, Peer: ProtocolPeerClient, Err: err}
+}
+
+func connectionClosedError(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
 }
 
 type operationWriter interface {

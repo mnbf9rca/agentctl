@@ -7,10 +7,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -124,6 +126,93 @@ func TestServerRunServesClosedOperationsAndCleansOnlyAfterObservedAbsence(t *tes
 		if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("Lstat(%q) error = %v, want os.ErrNotExist", artifact, err)
 		}
+	}
+}
+
+func TestServerRunReturnsTypedProtocolFailureAfterStoppedChildResponseWriteFault(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatalf("openNamespaceRoots() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	child := newServerRunChild(t, 456)
+	terminal := &serverRunTerminal{}
+	var listener *toggleResponseFailureListener
+	deps := lifecycleDependencies{
+		rolePath: namespace.RolePath,
+		pid:      os.Getpid,
+		nonce:    func() (string, error) { return "server-run-fatal-write", nil },
+		acquireClaim: func(path *RolePath, advisory Advisory) (claimHandle, error) {
+			return AcquireClaim(path, advisory)
+		},
+		writeRecord: WriteRecord,
+		startToken:  func(int) (StartToken, error) { return StartToken{Sec: 1, Usec: 2}, nil },
+		starter: lifecycleStarterFunc(func(context.Context, ptyx.StartRequest) (ptyx.Child, error) {
+			return child, nil
+		}),
+		listen: func(path string) (roleListener, error) {
+			inner, listenErr := listenRoleSocket(path)
+			if listenErr != nil {
+				return nil, listenErr
+			}
+			listener = &toggleResponseFailureListener{roleListener: inner, err: errors.New("injected response transport failure")}
+			return listener, nil
+		},
+		newMasterEndpoint: func(*os.File) (ptyx.ContextReadWriter, func() error, error) {
+			return &lifecycleFakeEndpoint{}, func() error { return nil }, nil
+		},
+		newRelay: func(ptyx.ContextReader, ptyx.ContextWriter, ptyx.ContextReadWriter) lifecycleRelay {
+			return &serverRunRelay{writer: &recordingOperationWriter{}}
+		},
+		terminal: terminal,
+	}
+	server := &Server{
+		lifecycle: roleLifecycle{deps: deps},
+		observeProcess: func(_ int, token StartToken) ProcessResult {
+			select {
+			case <-child.done:
+				return ProcessResult{Observation: ProcessAbsent}
+			default:
+				observed := token
+				return ProcessResult{Observation: ProcessPresentMatch, ObservedToken: &observed}
+			}
+		},
+		resizeEvents: func() (<-chan os.Signal, func()) { return make(chan os.Signal), func() {} },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- server.Run(ctx, RunRequest{
+			Session: "fleet", Role: "planner", Harness: "codex",
+			Environment: []string{"PATH=/usr/bin"}, InitialSize: ptyx.WindowSize{Rows: 24, Cols: 80},
+			OperatorInput: &lifecycleFakeEndpoint{}, OperatorOutput: &lifecycleFakeEndpoint{},
+			OuterTerminal: child.Master(), OuterState: ptyx.TerminalState{},
+		})
+	}()
+	client := NewClient(namespace)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, observeErr := client.Observe(context.Background(), "fleet", "planner")
+		if observeErr == nil && response.Outcome == OutcomeRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not become ready: response=%#v error=%v", response, observeErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	listener.EnableFailure()
+	_, _ = client.Stop(context.Background(), "fleet", "planner")
+	select {
+	case runErr := <-runDone:
+		var frame *ProtocolFrameError
+		if !errors.As(runErr, &frame) || frame.Peer != ProtocolPeerClient || frame.Direction != ProtocolFrameWrite || frame.Err == nil || !strings.Contains(frame.Err.Error(), "injected response transport failure") {
+			t.Fatalf("Server.Run() error = %T %v, want typed fatal response-write failure", runErr, runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Server.Run() did not finish fatal response-write cleanup")
 	}
 }
 
@@ -380,6 +469,51 @@ func TestShimRetainedStopStaysStoppingUntilItsResponseIsReported(t *testing.T) {
 	}
 }
 
+func TestShimStopCompletesCleanupWhenClientAbortsAfterObservedChildExit(t *testing.T) {
+	childPID := 456
+	attempted, exited := true, true
+	signalName := "SIGHUP"
+	stopComplete := make(chan struct{}, 1)
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	handler := &requestHandler{
+		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
+		stop: func(context.Context) (Response, error) {
+			close(stopEntered)
+			<-releaseStop
+			return Response{
+				Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID,
+				SignalAttempted: &attempted, Signal: &signalName, ChildExitObserved: &exited,
+			}, nil
+		},
+		stopComplete: func() { stopComplete <- struct{}{} },
+	}
+	client, server := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- handler.handleConnection(context.Background(), server) }()
+	if _, err := ReadFrame(client); err != nil {
+		t.Fatalf("ReadFrame(hello) error = %v", err)
+	}
+	request, _ := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: "stop"})
+	if _, err := WriteFrame(client, request); err != nil {
+		t.Fatalf("WriteFrame(stop) error = %v", err)
+	}
+	<-stopEntered
+	_ = client.Close()
+	close(releaseStop)
+	err := <-done
+	_ = server.Close()
+	var abort *ProtocolPeerAbortError
+	if !errors.As(err, &abort) || abort.Direction != ProtocolFrameWrite {
+		t.Fatalf("handleConnection() error = %T %v, want response-write peer abort", err, err)
+	}
+	select {
+	case <-stopComplete:
+	case <-time.After(time.Second):
+		t.Fatal("observed child exit did not complete stop cleanup after response abort")
+	}
+}
+
 func beginHandlerRequest(t *testing.T, handler *requestHandler, operation string) (net.Conn, <-chan error) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -417,6 +551,425 @@ func readHandlerResponse(t *testing.T, client net.Conn, done <-chan error) Respo
 		t.Fatalf("handleConnection() error = %v", err)
 	}
 	return response
+}
+
+func TestShimHandlerClassifiesConnectedClientFrameTransportFailures(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		direction ProtocolFrameDirection
+		wrap      func(net.Conn) net.Conn
+		complete  func(*testing.T, net.Conn)
+	}{
+		{
+			name: "request read", direction: ProtocolFrameRead,
+			complete: func(t *testing.T, client net.Conn) {
+				if _, err := ReadFrame(client); err != nil {
+					t.Fatalf("ReadFrame(hello) error = %v", err)
+				}
+				if _, err := client.Write([]byte{0, 0}); err != nil {
+					t.Fatalf("write partial request header: %v", err)
+				}
+			},
+		},
+		{
+			name: "response write", direction: ProtocolFrameWrite,
+			wrap: func(connection net.Conn) net.Conn {
+				return &failNthWriteConn{Conn: connection, failAt: 2, err: errors.New("injected response write failure")}
+			},
+			complete: func(t *testing.T, client net.Conn) {
+				if _, err := ReadFrame(client); err != nil {
+					t.Fatalf("ReadFrame(hello) error = %v", err)
+				}
+				request, err := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: "observe"})
+				if err != nil {
+					t.Fatalf("EncodeRequest() error = %v", err)
+				}
+				if _, err := WriteFrame(client, request); err != nil {
+					t.Fatalf("WriteFrame(request) error = %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			state := "running"
+			shimPID, childPID := 123, 456
+			handler := &requestHandler{
+				session: "fleet", role: "planner", ready: true, shimPID: shimPID, childPID: childPID,
+				observe: func() Response {
+					return Response{Version: 1, Outcome: OutcomeRunning, State: &state, ShimPID: &shimPID, ChildPID: &childPID}
+				},
+			}
+			handlerConnection := net.Conn(server)
+			if test.wrap != nil {
+				handlerConnection = test.wrap(server)
+			}
+			done := make(chan error, 1)
+			go func() { done <- handler.handleConnection(context.Background(), handlerConnection) }()
+			test.complete(t, client)
+			if test.direction == ProtocolFrameRead {
+				_ = client.Close()
+			}
+			err := <-done
+			_ = server.Close()
+			var frame *ProtocolFrameError
+			if !errors.As(err, &frame) || frame.Peer != ProtocolPeerClient || frame.Direction != test.direction {
+				t.Fatalf("handleConnection() error = %T %v, want %s-to-client ProtocolFrameError", err, err, test.direction)
+			}
+		})
+	}
+}
+
+func TestShimHandlerTreatsEveryHelloWriteFailureAsFatal(t *testing.T) {
+	for _, progress := range []int{0, 2} {
+		t.Run(fmt.Sprintf("progress-%d", progress), func(t *testing.T) {
+			client, server := net.Pipe()
+			defer func() { _ = client.Close(); _ = server.Close() }()
+			connection := &progressWriteFailureConn{Conn: server, progress: progress, err: syscall.EPIPE}
+			err := (&requestHandler{}).handleConnection(context.Background(), connection)
+			var frame *ProtocolFrameError
+			var abort *ProtocolPeerAbortError
+			if !errors.As(err, &frame) || errors.As(err, &abort) || frame.Direction != ProtocolFrameWrite || frame.Peer != ProtocolPeerClient {
+				t.Fatalf("hello write error = %T %v, want fatal write-to-client ProtocolFrameError", err, err)
+			}
+		})
+	}
+}
+
+func TestShimStopLeavesNonClosureResponseFailureForFatalCleanupPath(t *testing.T) {
+	childPID := 456
+	attempted, exited := true, true
+	signalName := "SIGHUP"
+	stopComplete := make(chan struct{}, 1)
+	handler := &requestHandler{
+		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
+		stop: func(context.Context) (Response, error) {
+			return Response{
+				Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID,
+				SignalAttempted: &attempted, Signal: &signalName, ChildExitObserved: &exited,
+			}, nil
+		},
+		stopComplete: func() { stopComplete <- struct{}{} },
+	}
+	client, server := net.Pipe()
+	connection := &failNthWriteConn{Conn: server, failAt: 2, err: errors.New("injected non-closure response failure")}
+	done := make(chan error, 1)
+	go func() { done <- handler.handleConnection(context.Background(), connection) }()
+	if _, err := ReadFrame(client); err != nil {
+		t.Fatalf("ReadFrame(hello) error = %v", err)
+	}
+	request, _ := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: "stop"})
+	if _, err := WriteFrame(client, request); err != nil {
+		t.Fatalf("WriteFrame(stop) error = %v", err)
+	}
+	err := <-done
+	_ = client.Close()
+	_ = server.Close()
+	var frame *ProtocolFrameError
+	if !errors.As(err, &frame) || frame.Direction != ProtocolFrameWrite {
+		t.Fatalf("handleConnection() error = %T %v, want fatal response-write ProtocolFrameError", err, err)
+	}
+	select {
+	case <-stopComplete:
+		t.Fatal("non-closure response failure raced stopComplete against fatal cleanup")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestShimServeConnectionsSurfacesHandlerProtocolFailure(t *testing.T) {
+	client, server := net.Pipe()
+	listener := &singleConnectionRoleListener{connection: server, closed: make(chan struct{})}
+	fatal := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewServer(nil).serveConnections(ctx, listener, &requestHandler{}, fatal)
+	if _, err := ReadFrame(client); err != nil {
+		t.Fatalf("ReadFrame(hello) error = %v", err)
+	}
+	if _, err := client.Write([]byte{0, 0}); err != nil {
+		t.Fatalf("write partial request header: %v", err)
+	}
+	_ = client.Close()
+	select {
+	case err := <-fatal:
+		var frame *ProtocolFrameError
+		if !errors.As(err, &frame) || frame.Peer != ProtocolPeerClient || frame.Direction != ProtocolFrameRead {
+			t.Fatalf("serveConnections() error = %T %v, want read-from-client ProtocolFrameError", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serveConnections discarded handler protocol failure")
+	}
+	_ = listener.Close()
+	_ = server.Close()
+}
+
+func TestShimServeConnectionsKeepsResidentHandlerAfterExpectedClientAbort(t *testing.T) {
+	for _, phase := range []string{"pre-request-refusal", "request-cancellation"} {
+		t.Run(phase, func(t *testing.T) {
+			listener := &channelRoleListener{connections: make(chan net.Conn, 2), closed: make(chan struct{})}
+			fatal := make(chan error, 1)
+			state := "running"
+			shimPID, childPID := 123, 456
+			firstObserveEntered := make(chan struct{})
+			releaseFirstObserve := make(chan struct{})
+			observeCalls := 0
+			handler := &requestHandler{
+				session: "fleet", role: "planner", ready: true, shimPID: shimPID, childPID: childPID,
+				observe: func() Response {
+					observeCalls++
+					if phase == "request-cancellation" && observeCalls == 1 {
+						close(firstObserveEntered)
+						<-releaseFirstObserve
+					}
+					return Response{Version: 1, Outcome: OutcomeRunning, State: &state, ShimPID: &shimPID, ChildPID: &childPID}
+				},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go NewServer(nil).serveConnections(ctx, listener, handler, fatal)
+
+			abortClient, abortServer := net.Pipe()
+			listener.connections <- abortServer
+			if _, err := ReadFrame(abortClient); err != nil {
+				t.Fatalf("ReadFrame(abort hello) error = %v", err)
+			}
+			if phase == "request-cancellation" {
+				request, _ := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: "observe"})
+				if _, err := WriteFrame(abortClient, request); err != nil {
+					t.Fatalf("WriteFrame(cancelled request) error = %v", err)
+				}
+				<-firstObserveEntered
+			}
+			_ = abortClient.Close()
+			if phase == "request-cancellation" {
+				close(releaseFirstObserve)
+			}
+
+			select {
+			case err := <-fatal:
+				t.Fatalf("expected %s peer abort became fatal: %v", phase, err)
+			case <-time.After(25 * time.Millisecond):
+			}
+
+			validClient, validServer := net.Pipe()
+			listener.connections <- validServer
+			if _, err := ReadFrame(validClient); err != nil {
+				t.Fatalf("ReadFrame(valid hello) error = %v", err)
+			}
+			request, _ := EncodeRequest(Request{Version: 1, Session: "fleet", Role: "planner", Operation: "observe"})
+			if _, err := WriteFrame(validClient, request); err != nil {
+				t.Fatalf("WriteFrame(valid request) error = %v", err)
+			}
+			response, err := ReadFrame(validClient)
+			if err != nil {
+				t.Fatalf("ReadFrame(valid response) error = %v", err)
+			}
+			decoded, err := DecodeResponse(response)
+			if err != nil || decoded.Outcome != OutcomeRunning {
+				t.Fatalf("valid response = %#v, %v; resident handler did not survive", decoded, err)
+			}
+			_ = validClient.Close()
+			_ = listener.Close()
+		})
+	}
+}
+
+func TestShimResidentSurvivesRealClientGuardRefusalAndCancellation(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatalf("openNamespaceRoots() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatalf("RolePath() error = %v", err)
+	}
+	t.Cleanup(func() { _ = path.Close() })
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "nonce", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatalf("AcquireClaim() error = %v", err)
+	}
+	t.Cleanup(func() { _ = claim.Close() })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	state := "running"
+	shimPID, childPID := os.Getpid(), 456
+	blockObserve := make(chan chan struct{}, 1)
+	observeEntered := make(chan struct{}, 1)
+	handler := &requestHandler{
+		session: "fleet", role: "planner", ready: true, shimPID: shimPID, childPID: childPID,
+		observe: func() Response {
+			select {
+			case release := <-blockObserve:
+				observeEntered <- struct{}{}
+				<-release
+			default:
+			}
+			return Response{Version: 1, Outcome: OutcomeRunning, State: &state, ShimPID: &shimPID, ChildPID: &childPID}
+		},
+	}
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	t.Cleanup(stopServer)
+	fatal := make(chan error, 1)
+	go NewServer(nil).serveConnections(serverCtx, listener, handler, fatal)
+	client := NewClient(namespace)
+
+	wantGuard := errors.New("ancestry refused")
+	if _, err := client.DeliverOperationGuarded(context.Background(), "fleet", "planner", "clear", func(context.Context, int) error { return wantGuard }); !errors.Is(err, wantGuard) {
+		t.Fatalf("DeliverOperationGuarded() error = %T %v, want guard refusal", err, err)
+	}
+	assertNoServerFatal(t, fatal, "guard refusal")
+	if response, err := client.Observe(context.Background(), "fleet", "planner"); err != nil || response.Outcome != OutcomeRunning {
+		t.Fatalf("Observe() after guard refusal = %#v, %v; resident did not survive", response, err)
+	}
+
+	releaseObserve := make(chan struct{})
+	blockObserve <- releaseObserve
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	requestDone := make(chan error, 1)
+	connected := make(chan *net.UnixConn, 1)
+	cancelClient := NewClient(namespace)
+	cancelClient.dial = func(ctx context.Context, socket string) (*net.UnixConn, error) {
+		connection, dialErr := dialRoleSocket(ctx, socket)
+		if dialErr == nil {
+			connected <- connection
+		}
+		return connection, dialErr
+	}
+	go func() {
+		_, requestErr := cancelClient.Observe(requestCtx, "fleet", "planner")
+		requestDone <- requestErr
+	}()
+	connection := <-connected
+	<-observeEntered
+	cancelRequest()
+	closeDeadline := time.Now().Add(time.Second)
+	connectionClosed := false
+	for time.Now().Before(closeDeadline) {
+		if connection.SetDeadline(time.Time{}) != nil {
+			connectionClosed = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !connectionClosed {
+		t.Fatal("cancelled client connection did not close")
+	}
+	close(releaseObserve)
+	if err := <-requestDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Observe() error = %T %v, want context.Canceled", err, err)
+	}
+	assertNoServerFatal(t, fatal, "request cancellation")
+	if response, err := client.Observe(context.Background(), "fleet", "planner"); err != nil || response.Outcome != OutcomeRunning {
+		t.Fatalf("Observe() after cancellation = %#v, %v; resident did not survive", response, err)
+	}
+}
+
+func assertNoServerFatal(t *testing.T, fatal <-chan error, phase string) {
+	t.Helper()
+	select {
+	case err := <-fatal:
+		t.Fatalf("%s became fatal: %v", phase, err)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+type singleConnectionRoleListener struct {
+	connection net.Conn
+	closed     chan struct{}
+	once       sync.Once
+	accepted   bool
+}
+
+type channelRoleListener struct {
+	connections chan net.Conn
+	closed      chan struct{}
+	once        sync.Once
+}
+
+func (l *channelRoleListener) Accept() (net.Conn, error) {
+	select {
+	case connection := <-l.connections:
+		return connection, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *channelRoleListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+type failNthWriteConn struct {
+	net.Conn
+	writes int
+	failAt int
+	err    error
+}
+
+type toggleResponseFailureListener struct {
+	roleListener
+	mu      sync.RWMutex
+	enabled bool
+	err     error
+}
+
+func (l *toggleResponseFailureListener) EnableFailure() {
+	l.mu.Lock()
+	l.enabled = true
+	l.mu.Unlock()
+}
+
+func (l *toggleResponseFailureListener) Accept() (net.Conn, error) {
+	connection, err := l.roleListener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.RLock()
+	enabled := l.enabled
+	l.mu.RUnlock()
+	if enabled {
+		return &failNthWriteConn{Conn: connection, failAt: 2, err: l.err}, nil
+	}
+	return connection, nil
+}
+
+type progressWriteFailureConn struct {
+	net.Conn
+	progress int
+	err      error
+}
+
+func (c *progressWriteFailureConn) Write([]byte) (int, error) {
+	return c.progress, c.err
+}
+
+func (c *failNthWriteConn) Write(payload []byte) (int, error) {
+	c.writes++
+	if c.writes == c.failAt {
+		return 0, c.err
+	}
+	return c.Conn.Write(payload)
+}
+
+func (l *singleConnectionRoleListener) Accept() (net.Conn, error) {
+	if !l.accepted {
+		l.accepted = true
+		return l.connection, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *singleConnectionRoleListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
 }
 
 func waitForShimOperationPhase(t *testing.T, handler *requestHandler, want shimOperationPhase) {

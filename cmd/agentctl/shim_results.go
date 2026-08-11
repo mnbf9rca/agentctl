@@ -157,6 +157,20 @@ func shimOperationError(stderr io.Writer, operation, sessionName, role string, e
 		fmt.Fprintf(stderr, "agentctl: could not read protocol frame from connected shim for role %q in session %q: %q (protocol-frame-read-invalid)\n", role, sessionName, jsonError.CanonicalCause())
 		return exitTmux
 	}
+	var frame *shim.ProtocolFrameError
+	if errors.As(err, &frame) && frame.Peer == shim.ProtocolPeerShim {
+		switch frame.Direction {
+		case shim.ProtocolFrameWrite:
+			fmt.Fprintf(stderr, "agentctl: could not write protocol request to connected shim for role %q in session %q: %q (protocol-frame-write-failed)\n", role, sessionName, errorText(frame.Err))
+		case shim.ProtocolFrameRead:
+			fmt.Fprintf(stderr, "agentctl: could not read protocol frame from connected shim for role %q in session %q: %q (protocol-frame-read-invalid)\n", role, sessionName, errorText(frame.Err))
+		default:
+			break
+		}
+		if frame.Direction == shim.ProtocolFrameRead || frame.Direction == shim.ProtocolFrameWrite {
+			return exitTmux
+		}
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(stderr, "agentctl: role %q in session %q has no live claim or durable role record (missing)\n", role, sessionName)
 		return exitRole
@@ -295,6 +309,11 @@ func shimKillError(stderr io.Writer, sessionName string, err error) int {
 	var refusal *kill.ShimKillRefusalError
 	if errors.As(err, &refusal) {
 		return shimObservationResult(stderr, "kill", sessionName, refusal.Role, refusal.Observation)
+	}
+	var cleanupRetained *kill.ShimKillCleanupRetainedError
+	if errors.As(err, &cleanupRetained) {
+		fmt.Fprintf(stderr, "agentctl: stop for role %q in session %q observed child PID %d exit, but role cleanup was not observed complete; last outcome was %s: %q; presentation and fleet record were retained (post-exit-cleanup-retained)\n", cleanupRetained.Role, cleanupRetained.Session, cleanupRetained.ChildPID, cleanupRetained.LastOutcome, errorText(cleanupRetained.Cause))
+		return exitLaunchUnproven
 	}
 	var retained *kill.ShimKillRetainedError
 	if errors.As(err, &retained) {

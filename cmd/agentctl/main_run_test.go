@@ -114,6 +114,15 @@ func TestRunForegroundMapsLifecycleCleanupOutcomesExactly(t *testing.T) {
 			code: exitLaunchUnproven,
 			want: "agentctl: role \"planner\" in session \"fleet\" was not ready after 5s; final tty flags were ICANON=true ECHO=true; child PID 73 was not observed absent, so ownership and the durable record were retained (readiness-timeout)\n",
 		},
+		{
+			name: "readiness observation cleanup incomplete",
+			err: &shim.LifecycleRunError{
+				Outcome: shim.OutcomeReadinessObservationFailed, ChildPID: 73, Cause: errors.New("TIOCGETA failed"),
+				CleanupObservation: shim.ProcessAbsent, CleanupErr: errors.New("remove record: permission denied"), Remaining: []string{"record", "lock"},
+			},
+			code: exitLaunch,
+			want: "agentctl: run failed for role \"planner\" in session \"fleet\": \"TIOCGETA failed\"; cleanup left record, lock: \"remove record: permission denied\" (owned-rollback-incomplete)\n",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -124,6 +133,83 @@ func TestRunForegroundMapsLifecycleCleanupOutcomesExactly(t *testing.T) {
 			})
 			if code != test.code || stderr.String() != test.want {
 				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
+			}
+		})
+	}
+}
+
+func TestRunForegroundNeverClaimsCompleteCleanupWhenFleetRemovalFailed(t *testing.T) {
+	t.Parallel()
+
+	lifecycleErr := &shim.LifecycleRunError{
+		Outcome: shim.OutcomeReadinessTimeout, ChildPID: 73, CleanupObservation: shim.ProcessAbsent,
+	}
+	err := &fleet.ShimForegroundRollbackError{
+		Session: "fleet", Role: "planner", Cause: lifecycleErr, FleetCleanupErr: errors.New("fleet removal failed"),
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--role", "planner", "--harness", "codex"}, &bytes.Buffer{}, &stderr, dependencies{
+		getwd:      func() (string, error) { return "/work", nil },
+		foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error { return err }),
+	})
+	if code != exitUnclassified || !strings.Contains(stderr.String(), "durable fleet cleanup failed: fleet removal failed") || strings.Contains(stderr.String(), "removed every artifact") {
+		t.Fatalf("code=%d stderr=%q, want unclassified fleet-cleanup failure without complete-cleanup claim", code, stderr.String())
+	}
+}
+
+func TestRunForegroundDoesNotInventRetentionWhenCleanupErrorHasNoArtifactFacts(t *testing.T) {
+	t.Parallel()
+
+	err := &shim.LifecycleRunError{
+		Outcome: shim.OutcomeReadinessObservationFailed, ChildPID: 73, Cause: errors.New("TIOCGETA failed"),
+		CleanupObservation: shim.ProcessAbsent, CleanupErr: errors.New("cleanup observation failed"),
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--role", "planner", "--harness", "codex"}, &bytes.Buffer{}, &stderr, dependencies{
+		getwd:      func() (string, error) { return "/work", nil },
+		foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error { return err }),
+	})
+	if code != exitUnclassified || !strings.Contains(stderr.String(), "cleanup observation failed") || strings.Contains(stderr.String(), "not observed absent") || strings.Contains(stderr.String(), "were retained") {
+		t.Fatalf("code=%d stderr=%q, want unclassified cleanup failure without invented absence or retention fact", code, stderr.String())
+	}
+}
+
+func TestRunForegroundDoesNotHideTerminalRestoreFailureBehindChildOutcome(t *testing.T) {
+	t.Parallel()
+
+	err := &foregroundTerminalRestoreError{
+		RunErr:     &shim.ForegroundChildExitError{Status: 17},
+		RestoreErr: errors.New("restore outer terminal: input/output error"),
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--role", "planner", "--harness", "codex"}, &bytes.Buffer{}, &stderr, dependencies{
+		getwd:      func() (string, error) { return "/work", nil },
+		foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error { return err }),
+	})
+	if code != exitUnclassified || !strings.Contains(stderr.String(), "restore outer terminal: input/output error") || strings.Contains(stderr.String(), "(child-exit)") {
+		t.Fatalf("code=%d stderr=%q, want unclassified terminal-restore failure without hiding it behind child outcome", code, stderr.String())
+	}
+}
+
+func TestRunForegroundRestoreFailurePrecedesSpecificRunErrorRenderers(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		runErr error
+	}{
+		{name: "directory mismatch", runErr: &fleet.ShimForegroundDirectoryMismatchError{Session: "fleet", Role: "planner", Stored: "/stored", Current: "/current"}},
+		{name: "rollback", runErr: &fleet.ShimForegroundRollbackError{Session: "fleet", Role: "planner", Cause: errors.New("readiness failed"), FleetCleanupErr: errors.New("fleet cleanup failed")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &foregroundTerminalRestoreError{RunErr: test.runErr, RestoreErr: errors.New("restore outer terminal: input/output error")}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--role", "planner", "--harness", "codex"}, &bytes.Buffer{}, &stderr, dependencies{
+				getwd:      func() (string, error) { return "/work", nil },
+				foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error { return err }),
+			})
+			if code != exitUnclassified || !strings.Contains(stderr.String(), "restore outer terminal: input/output error") || !strings.Contains(stderr.String(), "(unclassified)") {
+				t.Fatalf("code=%d stderr=%q, want restore failure to take precedence", code, stderr.String())
 			}
 		})
 	}

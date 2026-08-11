@@ -178,6 +178,37 @@ func TestShimForegroundReadinessLetsServerOwnTheBoundedFailureOutcome(t *testing
 	}
 }
 
+func TestShimForegroundRunnerPreservesFleetCleanupFailureSeparatelyFromLifecycleFailure(t *testing.T) {
+	t.Parallel()
+
+	events := &foregroundEvents{}
+	lifecycleErr := &shim.LifecycleRunError{
+		Outcome: shim.OutcomeReadinessTimeout, CleanupObservation: shim.ProcessAbsent,
+	}
+	removeErr := errors.New("fleet record removal failed")
+	release := make(chan struct{})
+	close(release)
+	records := &fakeForegroundRecords{events: events, removeErr: removeErr}
+	runner := NewShimForegroundRunner(
+		&fakeForegroundServer{events: events, release: release, err: lifecycleErr},
+		foregroundAlwaysStarting{}, records,
+		fakeForegroundInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}},
+		ShimLaunchDependencies{
+			LookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+			Executable: func() (string, error) { return "/bin/agentctl", nil },
+			Sleep:      time.Sleep,
+		},
+	)
+	err := runner.Run(context.Background(), ShimForegroundRequest{
+		Session: "fleet", Role: config.RoleConfig{Name: "planner", Harness: config.HarnessClaude}, Directory: "/work",
+		ServerRequest: shim.RunRequest{Session: "fleet", Role: "planner", Harness: "claude"},
+	})
+	var rollback *ShimForegroundRollbackError
+	if !errors.As(err, &rollback) || !errors.Is(rollback.Cause, lifecycleErr) || !errors.Is(rollback.FleetCleanupErr, removeErr) {
+		t.Fatalf("Run() error = %T %v, want separately typed lifecycle and fleet cleanup failures", err, err)
+	}
+}
+
 type foregroundEvents struct {
 	mu     sync.Mutex
 	values []string
@@ -205,12 +236,13 @@ func (e *foregroundEvents) contains(value string) bool {
 type fakeForegroundServer struct {
 	events  *foregroundEvents
 	release chan struct{}
+	err     error
 }
 
 func (s *fakeForegroundServer) Run(context.Context, shim.RunRequest) error {
 	s.events.add("server")
 	<-s.release
-	return nil
+	return s.err
 }
 
 type fakeForegroundLifecycle struct {
@@ -222,6 +254,16 @@ type fakeForegroundLifecycle struct {
 type foregroundStartingThenServerError struct {
 	done chan<- error
 	err  error
+}
+
+type foregroundAlwaysStarting struct{}
+
+func (foregroundAlwaysStarting) Observe(context.Context, string, string) (shim.Response, error) {
+	return shim.Response{Version: 1, Outcome: shim.OutcomeStarting}, nil
+}
+
+func (foregroundAlwaysStarting) Stop(context.Context, string, string) (shim.Response, error) {
+	return shim.Response{}, errors.New("unexpected stop")
 }
 
 func (l foregroundStartingThenServerError) Observe(context.Context, string, string) (shim.Response, error) {
@@ -270,6 +312,7 @@ type fakeForegroundRecords struct {
 	existing  *ShimFleetRecord
 	current   ShimFleetRecord
 	extendErr error
+	removeErr error
 }
 
 func (r *fakeForegroundRecords) Read(string) (ShimFleetRecord, error) {
@@ -287,7 +330,7 @@ func (r *fakeForegroundRecords) Create(record ShimFleetRecord) error {
 func (r *fakeForegroundRecords) ReplaceOwned(ShimFleetRecord, ShimFleetRecord) error { return nil }
 func (r *fakeForegroundRecords) RemoveOwned(ShimFleetRecord) error {
 	r.events.add("remove")
-	return nil
+	return r.removeErr
 }
 func (r *fakeForegroundRecords) ExtendOwned(_ ShimFleetRecord, replacement ShimFleetRecord) error {
 	r.events.add("extend")

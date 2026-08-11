@@ -41,6 +41,24 @@ type ShimForegroundDirectoryMismatchError struct {
 	Current string
 }
 
+// ShimForegroundRollbackError keeps the role-lifecycle failure distinct from
+// a failed removal of the newly created session fleet record. Callers must not
+// report complete cleanup when FleetCleanupErr is non-nil.
+type ShimForegroundRollbackError struct {
+	Session         string
+	Role            string
+	Cause           error
+	FleetCleanupErr error
+}
+
+func (e *ShimForegroundRollbackError) Error() string {
+	return fmt.Sprintf("foreground role %q in session %q failed: %v; durable fleet cleanup failed: %v", e.Role, e.Session, e.Cause, e.FleetCleanupErr)
+}
+
+func (e *ShimForegroundRollbackError) Unwrap() []error {
+	return []error{e.Cause, e.FleetCleanupErr}
+}
+
 func (e *ShimForegroundDirectoryMismatchError) Error() string {
 	return fmt.Sprintf("durable fleet directory %q differs from current working directory %q", e.Stored, e.Current)
 }
@@ -103,7 +121,11 @@ func (r ShimForegroundRunner) Run(ctx context.Context, request ShimForegroundReq
 	go func() { serverDone <- r.server.Run(ctx, request.ServerRequest) }()
 	if err := r.waitForegroundReady(ctx, request.Session, request.Role.Name, serverDone); err != nil {
 		if created {
-			return errors.Join(err, r.records.RemoveOwned(expected))
+			if cleanupErr := r.records.RemoveOwned(expected); cleanupErr != nil {
+				return &ShimForegroundRollbackError{
+					Session: request.Session, Role: request.Role.Name, Cause: err, FleetCleanupErr: cleanupErr,
+				}
+			}
 		}
 		return err
 	}

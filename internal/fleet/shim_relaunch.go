@@ -283,15 +283,23 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 	if err != nil {
 		return ShimRelaunchResult{}, err
 	}
+	if request.Directory != nil {
+		directory, err = r.launcher.resolveDirectory(request.Directory)
+		if err != nil {
+			return ShimRelaunchResult{}, err
+		}
+	}
 	executable, err := preflight.CheckShimExecutables(
 		config.FleetConfig{Roles: []config.RoleConfig{role}}, r.launcher.lookPath, r.launcher.executable,
 	)
 	if err != nil {
 		return ShimRelaunchResult{}, err
 	}
-	directoryInfo, err := r.launcher.stat(directory)
-	if err != nil || directoryInfo == nil || !directoryInfo.IsDir() {
-		return ShimRelaunchResult{}, &StoredDirectoryError{Role: request.Role, Path: directory, Err: err}
+	if request.Directory == nil {
+		directoryInfo, statErr := r.launcher.stat(directory)
+		if statErr != nil || directoryInfo == nil || !directoryInfo.IsDir() {
+			return ShimRelaunchResult{}, &StoredDirectoryError{Role: request.Role, Path: directory, Err: statErr}
+		}
 	}
 	if observation.Outcome == shim.OutcomeStaleRecord {
 		fresh, err := r.inspector.RemoveStale(ctx, session, request.Role, observation.ChildPID)

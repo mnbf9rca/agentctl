@@ -5,12 +5,29 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/mnbf9rca/agentctl/internal/attach"
+	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
+
+func TestRuntimeSessionAttacherRequiresDurableFleetBeforePresentationLookup(t *testing.T) {
+	t.Parallel()
+
+	delegate := &attacherStub{target: tmuxx.Session{ID: "$7", Name: "fleet"}}
+	attacher := runtimeSessionAttacher{records: attachFleetReaderStub{err: os.ErrNotExist}, delegate: delegate}
+	_, err := attacher.ExecutePresentation(context.Background(), "fleet", io.Discard)
+	var missing *fleet.ShimFleetMissingError
+	if !errors.As(err, &missing) || missing.Session != "fleet" {
+		t.Fatalf("ExecutePresentation() error = %T %v, want durable fleet missing", err, err)
+	}
+	if delegate.session != "" {
+		t.Fatalf("presentation delegate received session %q before durable fleet proof", delegate.session)
+	}
+}
 
 func TestRunAttachRefusesNoPresentationWithRuntimeAvailabilityFact(t *testing.T) {
 	t.Parallel()
@@ -21,6 +38,20 @@ func TestRunAttachRefusesNoPresentationWithRuntimeAvailabilityFact(t *testing.T)
 		resolver: &resolverStub{selected: "fleet"}, attacher: attacher,
 	})
 	want := "agentctl: refusing to attach session \"fleet\"; no tmux presentation was observed; status and control remain available without tmux\n"
+	if code != exitSession || stdout.Len() != 0 || stderr.String() != want {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want %d empty/%q", code, stdout.String(), stderr.String(), exitSession, want)
+	}
+}
+
+func TestRunAttachMapsMissingDurableFleetBeforePresentation(t *testing.T) {
+	t.Parallel()
+
+	attacher := &attacherStub{executeErr: &fleet.ShimFleetMissingError{Session: "fleet"}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"attach", "--session", "fleet"}, &stdout, &stderr, dependencies{
+		resolver: &resolverStub{selected: "fleet"}, attacher: attacher,
+	})
+	want := "agentctl: session \"fleet\" has no durable fleet configuration\n"
 	if code != exitSession || stdout.Len() != 0 || stderr.String() != want {
 		t.Fatalf("code=%d stdout=%q stderr=%q, want %d empty/%q", code, stdout.String(), stderr.String(), exitSession, want)
 	}
@@ -62,6 +93,15 @@ type attacherStub struct {
 	stillErr       error
 	session        string
 	stillTarget    tmuxx.Session
+}
+
+type attachFleetReaderStub struct {
+	record fleet.ShimFleetRecord
+	err    error
+}
+
+func (r attachFleetReaderStub) Read(string) (fleet.ShimFleetRecord, error) {
+	return r.record, r.err
 }
 
 func (a *attacherStub) CheckEnvironment() error { return a.environmentErr }

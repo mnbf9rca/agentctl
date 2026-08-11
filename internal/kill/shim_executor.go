@@ -7,19 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
+const (
+	shimRoleCleanupPollInterval = 25 * time.Millisecond
+	shimRoleCleanupTimeout      = 5 * time.Second
+)
+
 // ShimExecutor is the runtime-backed kill implementation used by the public
 // CLI.
 type ShimExecutor struct {
-	lifecycle    fleet.ShimLifecycle
-	records      fleet.ShimFleetRecords
-	inspector    fleet.ShimRoleInspector
-	presentation fleet.ShimPresentation
+	lifecycle           fleet.ShimLifecycle
+	records             fleet.ShimFleetRecords
+	inspector           fleet.ShimRoleInspector
+	presentation        fleet.ShimPresentation
+	cleanupPollInterval time.Duration
+	cleanupTimeout      time.Duration
 }
 
 // ShimKillResult reports only observed stop and optional presentation facts.
@@ -85,6 +93,22 @@ func (e *ShimKillRetainedError) Error() string {
 
 func (e *ShimKillRetainedError) Unwrap() error { return e.Cause }
 
+// ShimKillCleanupRetainedError preserves the already-observed child exit while
+// reporting that post-exit role-artifact cleanup was not observed complete.
+type ShimKillCleanupRetainedError struct {
+	Session     string
+	Role        string
+	ChildPID    int
+	LastOutcome shim.Outcome
+	Cause       error
+}
+
+func (e *ShimKillCleanupRetainedError) Error() string {
+	return fmt.Sprintf("stop for role %q in session %q observed child PID %d exit, but role cleanup remained %s: %v", e.Role, e.Session, e.ChildPID, e.LastOutcome, e.Cause)
+}
+
+func (e *ShimKillCleanupRetainedError) Unwrap() error { return e.Cause }
+
 // NewShimExecutor constructs the runtime-backed kill implementation.
 func NewShimExecutor(
 	lifecycle fleet.ShimLifecycle,
@@ -92,7 +116,10 @@ func NewShimExecutor(
 	inspector fleet.ShimRoleInspector,
 	presentation fleet.ShimPresentation,
 ) ShimExecutor {
-	return ShimExecutor{lifecycle: lifecycle, records: records, inspector: inspector, presentation: presentation}
+	return ShimExecutor{
+		lifecycle: lifecycle, records: records, inspector: inspector, presentation: presentation,
+		cleanupPollInterval: shimRoleCleanupPollInterval, cleanupTimeout: shimRoleCleanupTimeout,
+	}
 }
 
 // Execute observes the complete roster before mutation, then sends only the
@@ -171,6 +198,9 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 			return result, retained
 		}
 		result.StoppedRoles++
+		if err := e.waitForRoleCleanup(ctx, session, role, observation.ChildPID); err != nil {
+			return result, err
+		}
 	}
 	for _, role := range record.Roster {
 		observation := observations[role]
@@ -211,6 +241,40 @@ func (e ShimExecutor) Execute(ctx context.Context, session string) (ShimKillResu
 		return result, err
 	}
 	return result, nil
+}
+
+func (e ShimExecutor) waitForRoleCleanup(ctx context.Context, session, role string, childPID int) error {
+	deadline := time.Now().Add(e.cleanupTimeout)
+	for {
+		observation, err := e.inspector.Inspect(ctx, session, role)
+		if err != nil {
+			return &ShimKillCleanupRetainedError{
+				Session: session, Role: role, ChildPID: childPID,
+				LastOutcome: shim.OutcomeCouldNotObserve, Cause: err,
+			}
+		}
+		if observation.Outcome == shim.OutcomeMissing {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return &ShimKillCleanupRetainedError{
+				Session: session, Role: role, ChildPID: childPID,
+				LastOutcome: observation.Outcome, Cause: errors.New("role cleanup was not observed within 5s"),
+			}
+		}
+		timer := time.NewTimer(e.cleanupPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return &ShimKillCleanupRetainedError{
+				Session: session, Role: role, ChildPID: childPID,
+				LastOutcome: observation.Outcome, Cause: ctx.Err(),
+			}
+		case <-timer.C:
+		}
+	}
 }
 
 func outcomeFromKillProcess(observation shim.ProcessObservation) shim.Outcome {

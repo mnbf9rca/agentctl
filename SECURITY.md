@@ -48,14 +48,20 @@ already has access to that user's terminal processes, files, and agents.
   relaunch rollback, and kill remove only typed IDs/artifacts owned or observed
   by that invocation. Child-before-presentation-before-fleet cleanup order is
   required. Any survivor, absent signal-attempt/exit fact, ambiguous
-  presentation result, record uncertainty, or remaining artifact retains
-  evidence.
+  presentation result, record uncertainty, post-exit role cleanup not observed
+  `missing`, or remaining artifact retains evidence.
 - **Silent configuration drift.** The strict durable fleet record owns one
   session-wide absolute directory, declaration-order roster, and per-role
   harness/model/effort. Relaunch and foreground overrides are persisted only
   after the replacement shim answers ready, through a version-checked
-  session-mutation flock. A cwd disagreement on foreground `run` prints both
-  paths and refuses before role start or record mutation.
+  session-mutation flock. Explicit relaunch directories are made absolute and
+  validated before presentation or runtime mutation. A cwd disagreement on
+  foreground `run` prints both paths and refuses before role start or record
+  mutation.
+- **Presentation mistaken for runtime ownership.** `attach` proves the durable
+  fleet record before looking up an exact-name tmux presentation, then targets
+  only the observed typed session ID. A same-named tmux session alone never
+  authorizes attachment.
 
 ### Out of scope
 
@@ -195,6 +201,15 @@ release invariants:
     big-endian length, 4096-byte JSON maximum, two-second frame deadline, and
     server-hello/request/response order are fixed. Version is pre-parsed before
     schema or operation fields; skew has no negotiation or migration fallback.
+    Partial client frames, timeouts, and non-closure transport failures retain
+    their direction/peer and terminate through owned cleanup. Zero-byte
+    pre-request closure after a client safety refusal and peer closure during
+    response write are nonfatal aborts, never silently promoted to teardown;
+    hello-write failure remains fatal at every byte count.
+11. **Foreground signal relay.** The outer terminal copies the observed nested
+    mode with only `ISIG` cleared, making control characters relayable bytes.
+    The nested PTY retains its own signal policy and delivers them to the owned
+    harness process group; the original outer state is restored on return.
 
 Payload operations and stop share one mutation gate. Stop publishes
 `stopping` before waiting, lets an already-admitted payload finish and report,

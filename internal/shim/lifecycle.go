@@ -414,7 +414,7 @@ func (r *roleRuntime) waitReady(ctx context.Context) error {
 		return err
 	}
 	if r.outerTerminal != nil {
-		if err := r.terminal.SetTermios(r.outerTerminal, state); err != nil {
+		if err := r.terminal.SetTermios(r.outerTerminal, state.RelayInputState()); err != nil {
 			return err
 		}
 		r.mu.Lock()

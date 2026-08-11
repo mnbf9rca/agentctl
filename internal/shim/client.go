@@ -14,13 +14,15 @@ import (
 // Client performs one versioned, answerer-checked Unix-socket round trip per
 // operation. Its public methods cannot carry PTY bytes.
 type Client struct {
-	namespace *Namespace
-	dial      func(context.Context, string) (*net.UnixConn, error)
+	namespace  *Namespace
+	dial       func(context.Context, string) (*net.UnixConn, error)
+	readFrame  func(net.Conn) ([]byte, error)
+	writeFrame func(net.Conn, []byte) (int, error)
 }
 
 // NewClient constructs a client over one descriptor-verified namespace.
 func NewClient(namespace *Namespace) *Client {
-	return &Client{namespace: namespace, dial: dialRoleSocket}
+	return &Client{namespace: namespace, dial: dialRoleSocket, readFrame: ReadFrame, writeFrame: WriteFrame}
 }
 
 func dialRoleSocket(ctx context.Context, path string) (*net.UnixConn, error) {
@@ -105,9 +107,9 @@ func (c *Client) roundTrip(
 	stopCancellationClose := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	defer stopCancellationClose()
 
-	helloPayload, err := ReadFrame(connection)
+	helloPayload, err := c.readFrame(connection)
 	if err != nil {
-		return Response{}, clientContextError(ctx, err)
+		return Response{}, clientProtocolError(ctx, ProtocolFrameRead, err)
 	}
 	if err := DecodeHello(helloPayload); err != nil {
 		return Response{}, err
@@ -131,19 +133,19 @@ func (c *Client) roundTrip(
 	if err != nil {
 		return Response{}, err
 	}
-	if _, err := WriteFrame(connection, requestPayload); err != nil {
-		return Response{}, clientContextError(ctx, err)
+	if _, err := c.writeFrame(connection, requestPayload); err != nil {
+		return Response{}, clientProtocolError(ctx, ProtocolFrameWrite, err)
 	}
-	responsePayload, err := ReadFrame(connection)
+	responsePayload, err := c.readFrame(connection)
 	if err != nil {
-		return Response{}, clientContextError(ctx, err)
+		return Response{}, clientProtocolError(ctx, ProtocolFrameRead, err)
 	}
 	return DecodeResponse(responsePayload)
 }
 
-func clientContextError(ctx context.Context, err error) error {
+func clientProtocolError(ctx context.Context, direction ProtocolFrameDirection, err error) error {
 	if contextErr := ctx.Err(); contextErr != nil {
 		return contextErr
 	}
-	return err
+	return &ProtocolFrameError{Direction: direction, Peer: ProtocolPeerShim, Err: err}
 }

@@ -737,12 +737,13 @@ func (f *fakeShimFleetRecords) RemoveOwned(ShimFleetRecord) error {
 }
 
 type fakeShimPresentation struct {
-	events     *shimEventLog
-	session    tmuxx.CreatedSession
-	sessionErr error
-	windows    []tmuxx.CreatedWindow
-	windowErrs []error
-	found      *tmuxx.Session
+	events      *shimEventLog
+	session     tmuxx.CreatedSession
+	sessionErr  error
+	windows     []tmuxx.CreatedWindow
+	windowErrs  []error
+	found       *tmuxx.Session
+	directories []string
 }
 
 func (f *fakeShimPresentation) FindPresentationSession(_ context.Context, name string) (tmuxx.Session, bool, error) {
@@ -758,8 +759,9 @@ func (f *fakeShimPresentation) CreatePresentationSession(_ context.Context, _, r
 	return f.session, f.sessionErr
 }
 
-func (f *fakeShimPresentation) CreatePresentationWindow(_ context.Context, _ tmuxx.SessionID, role, _, command string) (tmuxx.CreatedWindow, error) {
+func (f *fakeShimPresentation) CreatePresentationWindow(_ context.Context, _ tmuxx.SessionID, role, directory, command string) (tmuxx.CreatedWindow, error) {
 	f.events.add("presentation-window:" + role + ":" + command)
+	f.directories = append(f.directories, directory)
 	if len(f.windowErrs) > 0 {
 		err := f.windowErrs[0]
 		f.windowErrs = f.windowErrs[1:]

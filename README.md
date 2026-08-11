@@ -247,7 +247,9 @@ starting, stopping, orphaned, indeterminate, disagreement, malformed, and
 could-not-observe states without starting beside a possible survivor. Stored
 configuration is used by default. Successful overrides are durably persisted
 only after the replacement shim answers ready; a commit-uncertain replacement
-is retained and reported rather than retried or called absent.
+is retained and reported rather than retried or called absent. An explicit
+relative `--dir` is resolved to an absolute path and validated before tmux or
+runtime mutation.
 
 ### `attach`
 
@@ -255,9 +257,11 @@ is retained and reported rather than retried or called absent.
 agentctl attach [--session SESSION]
 ```
 
-Attach is an optional human-viewer operation for iTerm2, outside tmux. It
-requires an exactly observed tmux presentation and attaches by typed session
-ID. It never creates or infers a presentation. Without one it exits 3 with:
+Attach is an optional human-viewer operation for iTerm2, outside tmux. It first
+requires the selected session's durable fleet configuration, then requires an
+exactly observed tmux presentation and attaches by typed session ID. A
+same-named tmux session alone is not fleet identity. Attach never creates or
+infers a presentation. Without one it exits 3 with:
 
 ```text
 agentctl: refusing to attach session "S"; no tmux presentation was observed; status and control remain available without tmux

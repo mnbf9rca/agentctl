@@ -92,6 +92,8 @@ func TestRunControlMapsDirectProtocolDecodeFailuresExactly(t *testing.T) {
 	}{
 		{name: "schema", err: &shim.ProtocolSchemaError{Kind: shim.ProtocolSchemaUnknownField, Field: "payload"}, outcome: "could not interpret version-1 shim protocol for role \"planner\" in session \"fleet\": \"unknown field \\\"payload\\\"\" (protocol-schema-invalid)"},
 		{name: "json", err: &shim.JSONError{Kind: shim.JSONTrailingBytes}, outcome: "could not read protocol frame from connected shim for role \"planner\" in session \"fleet\": \"payload has trailing bytes after its JSON value\" (protocol-frame-read-invalid)"},
+		{name: "frame read", err: &shim.ProtocolFrameError{Direction: shim.ProtocolFrameRead, Peer: shim.ProtocolPeerShim, Err: errors.New("unexpected EOF")}, outcome: "could not read protocol frame from connected shim for role \"planner\" in session \"fleet\": \"unexpected EOF\" (protocol-frame-read-invalid)"},
+		{name: "frame write", err: &shim.ProtocolFrameError{Direction: shim.ProtocolFrameWrite, Peer: shim.ProtocolPeerShim, Err: errors.New("broken pipe")}, outcome: "could not write protocol request to connected shim for role \"planner\" in session \"fleet\": \"broken pipe\" (protocol-frame-write-failed)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stderr bytes.Buffer

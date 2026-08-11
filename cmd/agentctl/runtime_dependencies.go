@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 
@@ -58,7 +59,10 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv) (de
 		collector:  statusRuntime,
 		killer:     kill.NewShimExecutor(shimClient, records, inspector, tmuxClient),
 		controller: controller,
-		attacher:   attach.New(tmuxClient, attach.LookupEnv(lookupEnv)),
+		attacher: runtimeSessionAttacher{
+			records:  records,
+			delegate: attach.New(tmuxClient, attach.LookupEnv(lookupEnv)),
+		},
 		relauncher: fleet.NewShimRelauncher(tmuxClient, shimClient, records, inspector, launchDependencies),
 		hiddenShim: newProductionHiddenShimCommand(),
 		foreground: foreground,
@@ -121,6 +125,21 @@ type productionForegroundExecutor struct {
 	environment func() []string
 }
 
+// foregroundTerminalRestoreError prevents a known child/lifecycle outcome from
+// hiding failure to restore the caller's terminal state.
+type foregroundTerminalRestoreError struct {
+	RunErr     error
+	RestoreErr error
+}
+
+func (e *foregroundTerminalRestoreError) Error() string {
+	return errors.Join(e.RunErr, e.RestoreErr).Error()
+}
+
+func (e *foregroundTerminalRestoreError) Unwrap() []error {
+	return []error{e.RunErr, e.RestoreErr}
+}
+
 func (e productionForegroundExecutor) Execute(ctx context.Context, sessionName string, role config.RoleConfig, directory string) error {
 	terminal := ptyx.NewTerminal()
 	outerState, err := terminal.Observe(e.stdin)
@@ -139,7 +158,7 @@ func (e productionForegroundExecutor) Execute(ctx context.Context, sessionName s
 	if err != nil {
 		return errors.Join(err, input.Restore())
 	}
-	err = e.runner.Run(ctx, fleet.ShimForegroundRequest{
+	runErr := e.runner.Run(ctx, fleet.ShimForegroundRequest{
 		Session: sessionName, Role: role, Directory: directory,
 		ServerRequest: shim.RunRequest{
 			Session: sessionName, Role: role.Name, Harness: string(role.Harness),
@@ -147,7 +166,11 @@ func (e productionForegroundExecutor) Execute(ctx context.Context, sessionName s
 			OperatorInput: input, OperatorOutput: output, OuterTerminal: e.stdin, OuterState: outerState,
 		},
 	})
-	return errors.Join(err, output.Restore(), input.Restore())
+	restoreErr := errors.Join(output.Restore(), input.Restore())
+	if restoreErr != nil {
+		return &foregroundTerminalRestoreError{RunErr: runErr, RestoreErr: restoreErr}
+	}
+	return runErr
 }
 
 func harnessOptions(role config.RoleConfig) (options harness.Options) {
@@ -156,3 +179,34 @@ func harnessOptions(role config.RoleConfig) (options harness.Options) {
 }
 
 var _ foregroundExecutor = productionForegroundExecutor{}
+
+type shimFleetRecordReader interface {
+	Read(string) (fleet.ShimFleetRecord, error)
+}
+
+// runtimeSessionAttacher proves the durable fleet before consulting optional
+// presentation. An exact tmux name by itself is not a runtime-fleet fact.
+type runtimeSessionAttacher struct {
+	records  shimFleetRecordReader
+	delegate sessionAttacher
+}
+
+func (a runtimeSessionAttacher) CheckEnvironment() error {
+	return a.delegate.CheckEnvironment()
+}
+
+func (a runtimeSessionAttacher) ExecutePresentation(ctx context.Context, sessionName string, out io.Writer) (tmuxx.Session, error) {
+	if _, err := a.records.Read(sessionName); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return tmuxx.Session{}, &fleet.ShimFleetMissingError{Session: sessionName}
+		}
+		return tmuxx.Session{}, err
+	}
+	return a.delegate.ExecutePresentation(ctx, sessionName, out)
+}
+
+func (a runtimeSessionAttacher) StillRunning(ctx context.Context, target tmuxx.Session) (bool, error) {
+	return a.delegate.StillRunning(ctx, target)
+}
+
+var _ sessionAttacher = runtimeSessionAttacher{}

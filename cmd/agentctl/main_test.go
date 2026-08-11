@@ -153,6 +153,23 @@ func TestRunKillPreservesPresentationRetentionFacts(t *testing.T) {
 	}
 }
 
+func TestRunKillReportsPostExitCleanupRetentionWithoutDenyingObservedExit(t *testing.T) {
+	t.Parallel()
+
+	err := &kill.ShimKillCleanupRetainedError{
+		Session: "fleet", Role: "planner", ChildPID: 73,
+		LastOutcome: shim.OutcomeInvalidRecord, Cause: errors.New("role cleanup was not observed within 5s"),
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"kill", "--session", "fleet"}, &bytes.Buffer{}, &stderr, dependencies{
+		resolver: &resolverStub{selected: "fleet"}, killer: &killerStub{err: err},
+	})
+	want := "agentctl: stop for role \"planner\" in session \"fleet\" observed child PID 73 exit, but role cleanup was not observed complete; last outcome was invalid-record: \"role cleanup was not observed within 5s\"; presentation and fleet record were retained (post-exit-cleanup-retained)\n"
+	if code != exitLaunchUnproven || stderr.String() != want || strings.Contains(stderr.String(), "did not observe child") {
+		t.Fatalf("code=%d stderr=%q, want %d truthful post-exit retention %q", code, stderr.String(), exitLaunchUnproven, want)
+	}
+}
+
 type resolverStub struct {
 	selected string
 	err      error

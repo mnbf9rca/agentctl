@@ -8,10 +8,11 @@
 | 3 | `exitSession` | Missing/incompatible fleet configuration, protocol skew, launch collision, or attach without an observed tmux presentation. |
 | 4 | `exitRole` | The role is outside the durable roster or is missing/stale when the operation requires it. |
 | 5 | `exitUnsafe` | Runtime identity, ancestry, state, record, cleanup, or observation did not positively authorize the operation. |
-| 6 | `exitTmux` | A required tmux presentation command actually ran and failed. |
+| 6 | `exitTmux` | An ancestry, process/token observation, protocol frame/schema, or required tmux presentation operation failed without a safe positive fact. |
 | 7 | `exitMissingExecutable` | A required executable was not found on `PATH`. |
 | 8 | `exitLaunch` | Launch/relaunch/run failed after ownership or readiness work; typed cleanup facts accompany it. |
-| 9 | `exitLaunchUnproven` | Launch retained a fleet whose requested roles were created but not all observed ready. |
+| 9 | `exitLaunchUnproven` | Readiness, ownership, stop, or durable-commit evidence was retained because absence or cleanup was not proven. |
 
-Every diagnostic is one stderr line beginning `agentctl: `. Typed prose is
-factual evidence for people; automation must branch on the numeric code.
+Every typed outcome diagnostic is one stderr line beginning `agentctl: `.
+Usage errors may append multiline command help. Prose is factual evidence for
+people; automation must branch on the numeric code.

@@ -42,7 +42,7 @@ func TestShimExecutorInspectsWholeRosterThenObservesEachStopBeforeCleanup(t *tes
 	want := []string{
 		"record-read:fleet", "presentation-find:fleet",
 		"inspect:planner", "inspect:coder",
-		"stop:planner", "stop:coder",
+		"stop:planner", "inspect:planner", "stop:coder", "inspect:coder",
 		"presentation-remove:$4", "record-remove:fleet",
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
@@ -176,6 +176,72 @@ func TestShimExecutorSucceedsWithoutTmuxPresentation(t *testing.T) {
 	}
 }
 
+func TestShimExecutorWaitsForStoppedRoleArtifactsToDisappearBeforeFleetRemoval(t *testing.T) {
+	t.Parallel()
+
+	events := &killEventLog{}
+	record := killFleetRecord(t, oneKillRole())
+	inspector := &killInspector{events: events, sequences: map[string][]fleet.ShimRoleObservation{
+		"planner": {
+			{Outcome: shim.OutcomeRunning, ChildPID: 7001},
+			{Outcome: shim.OutcomeInvalidRecord, ChildPID: 7001},
+			{Outcome: shim.OutcomeStopped, ChildPID: 7001},
+			{Outcome: shim.OutcomeMissing},
+		},
+	}}
+	executor := NewShimExecutor(
+		&killLifecycle{events: events, responses: map[string]shim.Response{"planner": killStoppedResponse(7001)}},
+		&killRecords{events: events, record: record}, inspector, &killPresentation{events: events},
+	)
+
+	result, err := executor.Execute(context.Background(), "fleet")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.StoppedRoles != 1 {
+		t.Fatalf("Execute() = %#v, want one stopped role", result)
+	}
+	want := []string{
+		"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner",
+		"inspect:planner", "inspect:planner", "inspect:planner", "record-remove:fleet",
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanup-drain events = %#v, want %#v", got, want)
+	}
+}
+
+func TestShimExecutorPostExitCleanupTimeoutRetainsPresentationAndFleetTruthfully(t *testing.T) {
+	t.Parallel()
+
+	events := &killEventLog{}
+	record := killFleetRecord(t, oneKillRole())
+	inspector := &killInspector{events: events, sequences: map[string][]fleet.ShimRoleObservation{
+		"planner": {
+			{Outcome: shim.OutcomeRunning, ChildPID: 7001},
+			{Outcome: shim.OutcomeInvalidRecord, ChildPID: 7001},
+		},
+	}}
+	executor := NewShimExecutor(
+		&killLifecycle{events: events, responses: map[string]shim.Response{"planner": killStoppedResponse(7001)}},
+		&killRecords{events: events, record: record}, inspector,
+		&killPresentation{events: events, found: &tmuxx.Session{ID: "$4", Name: "fleet"}},
+	)
+	executor.cleanupTimeout = 0
+
+	result, err := executor.Execute(context.Background(), "fleet")
+	var retained *ShimKillCleanupRetainedError
+	if !errors.As(err, &retained) || retained.ChildPID != 7001 || retained.LastOutcome != shim.OutcomeInvalidRecord || retained.Cause == nil {
+		t.Fatalf("Execute() error = %T %#v, want truthful post-exit cleanup retention", err, err)
+	}
+	if result.StoppedRoles != 1 || result.PresentationRemoved || result.PresentationGone {
+		t.Fatalf("Execute() = %#v, want child-exit fact with presentation/fleet retained", result)
+	}
+	want := []string{"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner", "inspect:planner"}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-exit retention events = %#v, want no presentation/fleet cleanup %#v", got, want)
+	}
+}
+
 func TestShimExecutorObservesPresentationGoneAfterExactIDRemovalRacesAutoDestruction(t *testing.T) {
 	t.Parallel()
 
@@ -207,7 +273,7 @@ func TestShimExecutorObservesPresentationGoneAfterExactIDRemovalRacesAutoDestruc
 	}
 	want := []string{
 		"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner",
-		"presentation-remove:$4", "presentation-find:fleet", "record-remove:fleet",
+		"inspect:planner", "presentation-remove:$4", "presentation-find:fleet", "record-remove:fleet",
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("auto-destruction events = %#v, want %#v", got, want)
@@ -267,7 +333,7 @@ func TestShimExecutorRetainsFleetRecordWhenFailedExactIDRemovalCannotProvePresen
 			}
 			want := []string{
 				"record-read:fleet", "presentation-find:fleet", "inspect:planner", "stop:planner",
-				"presentation-remove:$4", "presentation-find:fleet",
+				"inspect:planner", "presentation-remove:$4", "presentation-find:fleet",
 			}
 			if got := events.snapshot(); !reflect.DeepEqual(got, want) {
 				t.Fatalf("retained presentation events = %#v, want no fleet-record removal %#v", got, want)
@@ -356,10 +422,26 @@ func (r *killRecords) RemoveOwned(record fleet.ShimFleetRecord) error {
 type killInspector struct {
 	events       *killEventLog
 	observations map[string]fleet.ShimRoleObservation
+	sequences    map[string][]fleet.ShimRoleObservation
+	calls        map[string]int
 }
 
 func (i *killInspector) Inspect(_ context.Context, _, role string) (fleet.ShimRoleObservation, error) {
 	i.events.add("inspect:" + role)
+	if i.calls == nil {
+		i.calls = make(map[string]int)
+	}
+	i.calls[role]++
+	if len(i.sequences[role]) > 0 {
+		observation := i.sequences[role][0]
+		i.sequences[role] = i.sequences[role][1:]
+		return observation, nil
+	}
+	if i.calls[role] > 1 {
+		if initial := i.observations[role]; initial.Outcome == shim.OutcomeRunning || initial.Outcome == shim.OutcomeStarting {
+			return fleet.ShimRoleObservation{Outcome: shim.OutcomeMissing}, nil
+		}
+	}
 	return i.observations[role], nil
 }
 func (i *killInspector) RemoveStale(_ context.Context, _, role string, _ int) (shim.ProcessResult, error) {
