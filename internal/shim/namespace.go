@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -524,6 +526,50 @@ func (n *Namespace) ExistingRuntimeRolePath(session, role string) (*RolePath, er
 		Session: session, Role: role, RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
 		Lock: lockPath, Socket: socketPath, Record: recordPath, runtimeSession: runtimeSession,
 	}, nil
+}
+
+// ListRuntimeRoles returns the validated role names that have volatile
+// lockfile anchors in one already-created runtime session. It never consults
+// or creates the independently resolved durable tree.
+func (n *Namespace) ListRuntimeRoles(session string) ([]string, error) {
+	if err := config.ValidateSessionName(session); err != nil {
+		return nil, err
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.runtime == nil {
+		return nil, errors.New("namespace is closed")
+	}
+	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
+		return nil, err
+	}
+	runtimeSession, err := openPrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = runtimeSession.Close() }()
+	directory, err := runtimeSession.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	names, readErr := directory.Readdirnames(-1)
+	closeErr := directory.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	roles := make([]string, 0, len(names))
+	for _, name := range names {
+		if !strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		role := strings.TrimSuffix(name, ".lock")
+		if err := config.ValidateRoleName(role); err != nil {
+			return nil, fmt.Errorf("runtime lockfile %q has invalid role name: %w", name, err)
+		}
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles, nil
 }
 
 // ExistingDurableRolePath opens only the already-created durable role side.

@@ -107,6 +107,11 @@ type controlExecutor interface {
 	Execute(context.Context, string, string, string) (shim.Response, error)
 }
 
+type stateRootGuard interface {
+	CheckRole(string, string) error
+	CheckSession(string) (string, error)
+}
+
 type sessionAttacher interface {
 	CheckEnvironment() error
 	ExecutePresentation(context.Context, string, io.Writer) (tmuxx.Session, error)
@@ -144,6 +149,7 @@ type dependencies struct {
 	collector  statusCollector
 	killer     sessionKiller
 	controller controlExecutor
+	rootGuard  stateRootGuard
 	attacher   sessionAttacher
 	relauncher roleRelauncher
 	hiddenShim hiddenShimCommand
@@ -342,6 +348,9 @@ func runWithDependencies(
 			fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", options.session, err.Error())
 			return exitUnclassified
 		}
+		if guarded, code := checkRoleStateRoot(stderr, deps.rootGuard, "run", options.session, options.role); guarded {
+			return code
+		}
 		if err := deps.foreground.Execute(ctx, options.session, role, directory); err != nil {
 			return foregroundError(stderr, options.session, options.role, err)
 		}
@@ -361,6 +370,9 @@ func runWithDependencies(
 		if deps.launcher == nil {
 			fmt.Fprintf(stderr, "agentctl: launch failed for session %q: %q (unclassified)\n", options.session, "shim launcher is unavailable")
 			return exitUnclassified
+		}
+		if guarded, code := checkSessionStateRoot(stderr, deps.rootGuard, "launch", options.session); guarded {
+			return code
 		}
 		launched, err := deps.launcher.Launch(ctx, options.session, launchConfig.fleet, launchConfig.directory)
 		if err != nil {
@@ -405,6 +417,15 @@ func runWithDependencies(
 	resolved, err := deps.resolver.Select(ctx, explicit)
 	if err != nil {
 		return resolverError(stderr, usage, err)
+	}
+	if command == "clear" || command == "compact" || command == "relaunch" {
+		if guarded, code := checkRoleStateRoot(stderr, deps.rootGuard, command, resolved, options.role); guarded {
+			return code
+		}
+	} else {
+		if guarded, code := checkSessionStateRoot(stderr, deps.rootGuard, command, resolved); guarded {
+			return code
+		}
 	}
 	if command == "status" {
 		if err := writeSelectedShimStatus(ctx, stdout, deps.collector, resolved, options.json); err != nil {
@@ -453,6 +474,27 @@ func runWithDependencies(
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+func checkRoleStateRoot(stderr io.Writer, guard stateRootGuard, operation, sessionName, role string) (bool, int) {
+	if guard == nil {
+		return false, exitOK
+	}
+	if err := guard.CheckRole(sessionName, role); err != nil {
+		return true, shimOperationError(stderr, operation, sessionName, role, err)
+	}
+	return false, exitOK
+}
+
+func checkSessionStateRoot(stderr io.Writer, guard stateRootGuard, operation, sessionName string) (bool, int) {
+	if guard == nil {
+		return false, exitOK
+	}
+	role, err := guard.CheckSession(sessionName)
+	if err != nil {
+		return true, shimOperationError(stderr, operation, sessionName, role, err)
+	}
+	return false, exitOK
 }
 
 func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {

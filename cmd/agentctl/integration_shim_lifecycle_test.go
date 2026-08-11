@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -172,6 +173,81 @@ func TestIntegrationPublicShimCommandsSurvivePresentationLayoutChanges(t *testin
 	}
 	if len(report.Agents) != 2 || report.Agents[0].State != statuspkg.RuntimeStateRunning || report.Agents[1].State != statuspkg.RuntimeStateRunning {
 		t.Fatalf("public status = %#v, want two runtime-running roles", report)
+	}
+}
+
+func TestIntegrationPublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing(t *testing.T) {
+	fixture := newIntegrationFixture(t)
+	launched := fixture.runAgentctl("launch", "--session", "root-guard", "--roles", "planner:claude")
+	if launched.exitCode != exitOK {
+		t.Fatalf("launch = %#v", launched)
+	}
+	fixture.waitStubInvocations(1)
+
+	wrongRoot := filepath.Join(filepath.Dir(fixture.stateRoot), "wrong-state")
+	if err := os.Mkdir(wrongRoot, 0o700); err != nil {
+		t.Fatalf("create divergent state root: %v", err)
+	}
+	localRoot, err := filepath.EvalSymlinks(wrongRoot)
+	if err != nil {
+		t.Fatalf("resolve divergent state root: %v", err)
+	}
+	recordedRoot, err := filepath.EvalSymlinks(fixture.stateRoot)
+	if err != nil {
+		t.Fatalf("resolve recorded state root: %v", err)
+	}
+	t.Setenv("AGENTCTL_STATE_ROOT", wrongRoot)
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	previousPane, paneWasSet := os.LookupEnv("TMUX_PANE")
+	if err := os.Unsetenv("TMUX_PANE"); err != nil {
+		t.Fatalf("unset TMUX_PANE for attach refusal: %v", err)
+	}
+	t.Cleanup(func() {
+		if paneWasSet {
+			_ = os.Setenv("TMUX_PANE", previousPane)
+		} else {
+			_ = os.Unsetenv("TMUX_PANE")
+		}
+	})
+
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		operation string
+	}{
+		{name: "clear", arguments: []string{"clear", "--session", "root-guard", "planner"}, operation: "clear"},
+		{name: "compact", arguments: []string{"compact", "--session", "root-guard", "planner"}, operation: "compact"},
+		{name: "relaunch", arguments: []string{"relaunch", "--session", "root-guard", "planner"}, operation: "relaunch"},
+		{name: "foreground run", arguments: []string{"run", "--session", "root-guard", "--role", "planner", "--harness", "claude"}, operation: "run"},
+		{name: "selected status", arguments: []string{"status", "--session", "root-guard"}, operation: "status"},
+		{name: "kill", arguments: []string{"kill", "--session", "root-guard"}, operation: "kill"},
+		{name: "attach", arguments: []string{"attach", "--session", "root-guard"}, operation: "attach"},
+		{name: "same session launch", arguments: []string{"launch", "--session", "root-guard", "--roles", "planner:claude"}, operation: "launch"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := fixture.runAgentctl(test.arguments...)
+			want := fmt.Sprintf("agentctl: refusing to %s role %q in session %q; resolved state root %q differs from lockfile-recorded state root %q (state-root-disagreement)\n", test.operation, "planner", "root-guard", localRoot, recordedRoot)
+			if result.exitCode != exitUnsafe || result.stdout != "" || result.stderr != want {
+				t.Fatalf("result = %#v, want exit %d and %q", result, exitUnsafe, want)
+			}
+			for _, falseClaim := range []string{"missing", "no durable fleet configuration", "unclassified"} {
+				if strings.Contains(result.stderr, falseClaim) {
+					t.Fatalf("stderr %q contains forbidden divergent-root claim %q", result.stderr, falseClaim)
+				}
+			}
+		})
+	}
+	if got := len(fixture.stubInvocations()); got != 1 {
+		t.Fatalf("stub harness invocations after refusals = %d, want unchanged one child", got)
+	}
+
+	t.Setenv("AGENTCTL_STATE_ROOT", fixture.stateRoot)
+	statusResult := fixture.runAgentctl("status", "--session", "root-guard", "--json")
+	if statusResult.exitCode != exitOK || !strings.Contains(statusResult.stdout, `"state":"running"`) {
+		t.Fatalf("status after restoring state root = %#v, want original live child", statusResult)
+	}
+	if killed := fixture.runAgentctl("kill", "--session", "root-guard"); killed.exitCode != exitOK {
+		t.Fatalf("kill after restoring state root = %#v", killed)
 	}
 }
 

@@ -29,10 +29,14 @@ already has access to that user's terminal processes, files, and agents.
   environment value, or argument can reach the PTY writer. Production contains
   no tmux `send-keys` path.
 - **Controlling the wrong role.** A lifetime `flock` is the sole ownership
-  instant. The client checks the advisory lockfile's recorded state root,
-  connects to the exact role socket, version-gates the hello, obtains the
-  kernel `LOCAL_PEERPID`, compares it with the advisory shim PID, and verifies
-  the held claim/readiness before delivery. tmux names, metadata, windows,
+  instant. Before any named public lifecycle path consults the locally resolved
+  durable store, it checks the advisory lockfile's recorded state root from
+  the unchanged runtime namespace. Session-level paths enumerate validated
+  lockfile role names through the retained runtime descriptor for the same
+  comparison. Only then may the client connect to the exact role socket,
+  version-gate the hello, obtain the kernel `LOCAL_PEERPID`, compare it with
+  the advisory shim PID, and verify the held claim/readiness before delivery.
+  tmux names, metadata, windows,
   panes, layouts, and process rows are presentation facts only.
 - **Accidental self-targeting.** Before writing a payload request, the client
   takes one typed `ps -eo pid=,ppid=` snapshot and walks from the caller PID
@@ -116,7 +120,9 @@ Archive verification refuses a release missing any required material.
    `os.UserConfigDir()`, `AGENTCTL_RUNTIME_ROOT`, and
    `AGENTCTL_STATE_ROOT` are bounded and validated inputs. A changed HOME can
    resolve a different durable tree. The uid-rooted advisory lockfile anchors
-   the recorded root; disagreement refuses before alternate-tree enumeration.
+   the recorded root; disagreement refuses every named public lifecycle path
+   before alternate-tree enumeration, tmux presentation mutation, or an
+   assertion that fleet/role configuration is missing.
 6. **Dead-shim `child-starting` is manually recoverable only.** The reservation
    has no child PID and never expires. Read the recorded state root from the
    existing lockfile body, independently prove no child remains, and only then
@@ -179,7 +185,9 @@ release invariants:
    `LOCAL_PEERPID`; neither side is mislabeled authentication.
 3. **Private bounded roots.** Default and override roots are absolute, capped,
    private, descriptor-verified, and independently checked against Darwin's
-   `sun_path[104]` limit before mutation.
+   `sun_path[104]` limit before mutation. The unchanged runtime lockfile anchor
+   is consulted before named session/role paths may render durable absence; a
+   mismatch reports both roots and never reads the alternate durable tree.
 4. **Closed registry.** Requests cannot carry arbitrary PTY bytes or arguments.
    Only `clear`/`compact` write fixed payloads; `observe`/`stop` never invoke
    the PTY writer.
