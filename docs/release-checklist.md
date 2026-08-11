@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Start at the repository root. The worktree must be clean.
+- Start at the repository root. The worktree must be clean; release evidence must come from a clean checkout.
 - Use macOS and iTerm2. Install `make`, Go, `tmux`, `claude`, `codex`, `amq`, and
   the `install(1)` utility.
 - Be ready to sign in to Claude Code and Codex if the verifier asks.
