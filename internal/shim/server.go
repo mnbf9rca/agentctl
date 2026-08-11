@@ -230,6 +230,7 @@ type Server struct {
 	observeProcess func(int, StartToken) ProcessResult
 	resizeEvents   func() (<-chan os.Signal, func())
 	stopTimeout    time.Duration
+	cleanupTimeout time.Duration
 }
 
 // NewServer composes the production namespace, PTY, process, and protocol
@@ -572,7 +573,6 @@ func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeC
 		}
 	} else {
 		remaining["child"] = true
-		cleanupErrors = append(cleanupErrors, runtime.claim.Close())
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("child cleanup observation was %s", result.Observation))
 	}
 	observedRemaining, observationErr := observeRemainingRoleArtifacts(runtime.path)
@@ -580,13 +580,20 @@ func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeC
 	for _, artifact := range observedRemaining {
 		remaining[artifact] = true
 	}
-	cleanupErrors = append(cleanupErrors, runtime.path.Close())
-	var remainingOrdered []string
-	for _, artifact := range []string{"child", "socket", "record", "lock"} {
-		if remaining[artifact] {
-			remainingOrdered = append(remainingOrdered, artifact)
+	if !result.MayReportAbsent() {
+		failure := CleanupFailure{
+			Cause:       errors.Join(cleanupErrors...).Error(),
+			Observation: cleanupObservationFromProcess(result.Observation),
+			Remaining:   orderedCleanupArtifacts(remaining),
 		}
+		cleanupRecord, err := runtime.record.WithCleanupFailure(runtime.record.ChildPID, runtime.record.ChildStartToken, failure)
+		if err == nil {
+			err = WriteRecord(runtime.path, cleanupRecord)
+		}
+		cleanupErrors = append(cleanupErrors, err, runtime.claim.Close())
 	}
+	cleanupErrors = append(cleanupErrors, runtime.path.Close())
+	remainingOrdered := orderedCleanupArtifacts(remaining)
 	return runtimeCleanupResult{Observation: result.Observation, Err: errors.Join(cleanupErrors...), Remaining: remainingOrdered}
 }
 
@@ -621,7 +628,11 @@ func observeRemainingRoleArtifacts(path *RolePath) ([]string, error) {
 }
 
 func (s *Server) observeUntilDeadline(pid int, token StartToken) ProcessResult {
-	deadline := time.Now().Add(ptyx.ReadinessTimeout)
+	timeout := ptyx.ReadinessTimeout
+	if s.cleanupTimeout != 0 {
+		timeout = s.cleanupTimeout
+	}
+	deadline := time.Now().Add(timeout)
 	for {
 		result := s.observeProcess(pid, token)
 		if result.MayReportAbsent() || !time.Now().Before(deadline) {

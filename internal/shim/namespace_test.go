@@ -398,6 +398,22 @@ func TestNamespaceRefusesPredictableRuntimePrecreation(t *testing.T) {
 	}
 }
 
+func TestSocketPresentReportsNonSocketAsTopologyDisagreement(t *testing.T) {
+	path := newTestRolePath(t)
+	file, err := path.runtimeSession.OpenFile(path.Role+".sock", os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	present, err := SocketPresent(path)
+	var topology *SocketTopologyError
+	if present || !errors.As(err, &topology) {
+		t.Fatalf("SocketPresent() = %v, %T %v, want non-socket topology error", present, err, err)
+	}
+}
+
 func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutation(t *testing.T) {
 	parent := shortTempDir(t)
 	stateRoot := filepath.Join(parent, "state")
@@ -507,6 +523,63 @@ func rootForSocketLength(t *testing.T, parent string, socketBytes int) string {
 		t.Fatalf("temporary path %q is too long for socket fixture", parent)
 	}
 	return filepath.Join(parent, strings.Repeat("x", fillerBytes))
+}
+
+func TestNamespaceOpensRuntimeAndDurableRoleSidesIndependentlyForStatus(t *testing.T) {
+	t.Run("durable record without runtime session", func(t *testing.T) {
+		base := shortTempDir(t)
+		namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = namespace.Close() })
+		path, err := namespace.RolePath("fleet", "planner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteRecord(path, NewChildStartingRecord("fleet", "planner", os.Getpid(), "nonce")); err != nil {
+			t.Fatal(err)
+		}
+		_ = path.Close()
+		if err := os.RemoveAll(base + "/runtime/fleet"); err != nil {
+			t.Fatal(err)
+		}
+
+		durable, err := namespace.ExistingDurableRolePath("fleet", "planner")
+		if err != nil {
+			t.Fatalf("ExistingDurableRolePath() error = %v", err)
+		}
+		defer func() { _ = durable.Close() }()
+		if got, err := ReadRecord(durable); err != nil || got.Role != "planner" {
+			t.Fatalf("ReadRecord() = %#v, %v, want durable role without runtime side", got, err)
+		}
+	})
+
+	t.Run("runtime session without durable session", func(t *testing.T) {
+		base := shortTempDir(t)
+		namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = namespace.Close() })
+		path, err := namespace.RolePath("fleet", "planner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = path.Close()
+		if err := os.RemoveAll(base + "/state/sessions"); err != nil {
+			t.Fatal(err)
+		}
+
+		runtimePath, err := namespace.ExistingRuntimeRolePath("fleet", "planner")
+		if err != nil {
+			t.Fatalf("ExistingRuntimeRolePath() error = %v", err)
+		}
+		defer func() { _ = runtimePath.Close() }()
+		if present, err := SocketPresent(runtimePath); err != nil || present {
+			t.Fatalf("SocketPresent() = %v, %v, want factual absence", present, err)
+		}
+	})
 }
 
 func shortTempDir(t *testing.T) string {

@@ -300,7 +300,20 @@ func TestShimLifecycleRetainsRecordWhenStartedChildCannotBeObservedAbsent(t *tes
 			calls.add("claim")
 			return claim, nil
 		},
-		writeRecord:  func(*RolePath, Record) error { calls.add("record:child-starting"); return nil },
+		writeRecord: func(_ *RolePath, record Record) error {
+			calls.add("record:" + string(record.State))
+			if record.State == RecordStateCleanupFailed {
+				want := &CleanupFailure{
+					Cause:       "token failed",
+					Observation: CleanupObservationCouldNotObserve,
+					Remaining:   []string{"child", "socket", "record", "lock"},
+				}
+				if record.ChildPID != 456 || record.ChildStartToken != nil || !reflect.DeepEqual(record.Cleanup, want) {
+					t.Fatalf("cleanup-failed record = %#v, want child and exact retained facts %#v", record, want)
+				}
+			}
+			return nil
+		},
 		removeRecord: func(*RolePath) error { calls.add("BUG:record-remove"); return nil },
 		starter: lifecycleStarterFunc(func(context.Context, ptyx.StartRequest) (ptyx.Child, error) {
 			calls.add("child-start")
@@ -311,8 +324,16 @@ func TestShimLifecycleRetainsRecordWhenStartedChildCannotBeObservedAbsent(t *tes
 			return StartToken{}, errors.New("token failed")
 		},
 		observeProcess: func(int, StartToken) ProcessResult {
-			calls.add("observe:present-match")
-			return ProcessResult{Observation: ProcessPresentMatch}
+			t.Fatal("token comparison called after start-token observation failed")
+			return ProcessResult{}
+		},
+		observePresence: func(int) ProcessResult {
+			calls.add("observe:present-without-token")
+			return ProcessResult{Observation: ProcessCouldNotObserve, Err: errors.New("start token unavailable")}
+		},
+		observeRemaining: func(*RolePath) ([]string, error) {
+			calls.add("observe-remaining")
+			return []string{"socket", "record", "lock"}, nil
 		},
 	}
 	lifecycle := roleLifecycle{deps: deps}
@@ -320,11 +341,12 @@ func TestShimLifecycleRetainsRecordWhenStartedChildCannotBeObservedAbsent(t *tes
 
 	_, err := lifecycle.start(context.Background(), RunRequest{Session: "fleet", Role: "planner", Harness: "codex"}, spec)
 	var retained *LifecycleOwnershipRetainedError
-	if !errors.As(err, &retained) || retained.Observation != ProcessPresentMatch {
-		t.Fatalf("start() error = %T %v, want LifecycleOwnershipRetainedError(present-match)", err, err)
+	if !errors.As(err, &retained) || retained.Observation != ProcessCouldNotObserve {
+		t.Fatalf("start() error = %T %v, want LifecycleOwnershipRetainedError(could-not-observe)", err, err)
 	}
 	wantCalls := []string{
-		"claim", "record:child-starting", "child-start", "start-token", "child-signal", "observe:present-match", "child-master-close", "claim-close",
+		"claim", "record:child-starting", "child-start", "start-token", "child-signal", "observe:present-without-token", "child-master-close",
+		"observe-remaining", "record:cleanup-failed", "claim-close",
 	}
 	if got := calls.snapshot(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("lifecycle calls = %#v, want %#v", got, wantCalls)

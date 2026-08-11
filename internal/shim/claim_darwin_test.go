@@ -4,6 +4,7 @@ package shim
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -325,6 +326,40 @@ func TestClaimAdvisoryComparisonDetectsKernelAnswererDisagreement(t *testing.T) 
 	}
 	if disagreement.RecordedPID != 501 || disagreement.AnswererPID != 502 {
 		t.Fatalf("disagreement = %#v", disagreement)
+	}
+}
+
+func TestObserveClaimUsesNonAcquiringFGETLKForHeldAndReleasedFlock(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadBefore, err := os.ReadFile(rolePath.Lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := ObserveClaim(rolePath)
+	if err != nil {
+		t.Fatalf("ObserveClaim() held error = %v", err)
+	}
+	if !held.Held || held.ConflictPID != -1 {
+		t.Fatalf("ObserveClaim() held = %#v, want F_WRLCK conflict with pid=-1", held)
+	}
+	if payloadAfter, err := os.ReadFile(rolePath.Lock); err != nil || !bytes.Equal(payloadAfter, payloadBefore) {
+		t.Fatalf("non-acquiring observation changed advisory: after=%q err=%v before=%q", payloadAfter, err, payloadBefore)
+	}
+
+	if err := claim.Close(); err != nil {
+		t.Fatal(err)
+	}
+	released, err := ObserveClaim(rolePath)
+	if err != nil {
+		t.Fatalf("ObserveClaim() released error = %v", err)
+	}
+	if released.Held || released.ConflictPID != 0 {
+		t.Fatalf("ObserveClaim() released = %#v, want F_UNLCK without acquiring role", released)
 	}
 }
 

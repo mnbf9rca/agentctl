@@ -86,6 +86,35 @@ func TestProcessObservationRejectsNonPositivePIDBeforeKill(t *testing.T) {
 	}
 }
 
+func TestProcessPresenceWithoutRecordedTokenNeverClaimsMatchOrDisagreement(t *testing.T) {
+	tests := []struct {
+		name    string
+		killErr error
+		want    ProcessObservation
+	}{
+		{name: "present but identity unavailable", want: ProcessCouldNotObserve},
+		{name: "absent", killErr: unix.ESRCH, want: ProcessAbsent},
+		{name: "present not ours", killErr: unix.EPERM, want: ProcessPresentNotOurs},
+		{name: "other failure", killErr: unix.EINVAL, want: ProcessCouldNotObserve},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := observeProcessPresence(123, func(pid int, signal syscall.Signal) error {
+				if pid != 123 || signal != 0 {
+					t.Fatalf("kill inputs = (%d, %d), want (123, 0)", pid, signal)
+				}
+				return test.killErr
+			})
+			if got.Observation != test.want {
+				t.Fatalf("observeProcessPresence() = %#v, want %q", got, test.want)
+			}
+			if got.Observation == ProcessPresentMatch || got.Observation == ProcessPresentTokenDisagreement || got.ObservedToken != nil {
+				t.Fatalf("tokenless presence invented identity comparison: %#v", got)
+			}
+		})
+	}
+}
+
 func TestProcessObservationRejectsPIDOutsideDarwinPIDTBeforeSyscalls(t *testing.T) {
 	pid := int(math.MaxInt32) + 1
 	killCalls := 0

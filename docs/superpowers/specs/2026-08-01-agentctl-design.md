@@ -1804,6 +1804,24 @@ records the shim PID, nonce, fully resolved state root, and protocol metadata as
 that root and compares it with its independently resolved root. A mismatch is `state-root-disagreement`; it never
 enumerates the alternate tree or reports `missing`.
 
+R19 extends the existing version-1 role record before the 0.5.0 release as a pre-release flag-day schema change. Its
+`state` is exactly `child-starting`, `child-recorded`, or `cleanup-failed`. The first two retain their existing closed
+fields. `cleanup-failed` requires the existing version/session/role/shim PID/nonce fields and `child_pid`, permits
+`child_start_token` only when it was observed, and adds exactly one `cleanup` object:
+
+```json
+{"cause":"CAUSE","observation":"present-match","remaining":["child","socket","record","lock"]}
+```
+
+`cause` is a nonempty observed failure string. `observation` is exactly `present-match`,
+`present-token-disagreement`, `present-not-ours`, or `could-not-observe`. `remaining` is nonempty, contains each
+applicable value from the closed `child`, `socket`, `record`, `lock` vocabulary at most once, and uses that fixed
+order. The nested object rejects duplicate, unknown, missing, wrongly typed, and unknown-valued fields. A cleanup
+object on another state, a missing cleanup object on `cleanup-failed`, or any unknown state is malformed record
+content and therefore `invalid-record`. Filesystem, permission, descriptor-substitution, and other failures to read a
+record are observations that could not be completed, not malformed content. Provenance: planner R19,
+2026-08-10/11.
+
 Launch owns a separate session-level durable fleet record; it does not extend the per-role record above. Its path is
 exactly:
 
@@ -1903,6 +1921,13 @@ orphan/indeterminate/cleanup fact. If child start succeeded but PID/token upgrad
 Listener, readiness, relay, cancellation, and cleanup failures after child start follow the same rule. Fleet rollback
 removes only roles/sessions created by that invocation, in child-before-shim order; it never destroys a peer or calls
 an uncertain child absent.
+
+Before releasing a still-owned claim after a non-ESRCH cleanup observation, the lifecycle atomically replaces its
+existing role record with the R19 `cleanup-failed` form. It records only the child and socket/record/lock artifacts it
+observed remaining. This makes the state reachable from both startup rollback and normal server teardown; a write
+failure remains a reported cleanup error and never licenses absence. If initial start-token observation failed,
+cleanup repeats only `kill(pid,0)`: nil proves presence but cannot prove identity, so the durable observation is
+`could-not-observe` and `child_start_token` is omitted. It never compares against a zero or invented token.
 
 The launch-owned fleet record precedes every presentation command and role start. A presentation creation result that
 does not return valid typed owner IDs cannot prove whether the command started a shim: launch retains the fleet record,
@@ -2044,6 +2069,12 @@ recorded state root and owner observations. Durable records enumerated without a
 carry `"confidence":"anchored"`. Tmux presentation is `present`, `gone`, or `unavailable` and never changes runtime
 identity.
 
+Held-claim observation is non-acquiring only: status opens the existing lockfile and issues `F_GETLK` for a write
+lock. Darwin reports a conflicting BSD `flock` as `F_WRLCK` with `pid=-1`; `F_UNLCK` means no observed holder.
+Status never attempts `LOCK_EX|LOCK_NB`, because owner death between observation steps must not let a diagnostic seize
+the role. A held claim with a temporarily absent socket is `starting`, while a socket with no held claim is
+`answerer-disagreement`.
+
 Fleet-record harness/model/effort and directory values are operator-claim provenance. The shim response, role record,
 answerer, process observation, and readiness are shim-runtime provenance. Status joins those sources without replacing
 one with the other: a fleet value never becomes runtime evidence, and a live shim observation never silently rewrites
@@ -2059,7 +2090,7 @@ Within one role, first match wins:
 | 3 | `protocol-skew` | answerer version absent/different, before other response parsing |
 | 4 | `answerer-disagreement` | advisory shim PID differs from `LOCAL_PEERPID`, or socket/claim topology conflicts |
 | 5 | `cleanup-failed` | prior owned cleanup durably recorded incomplete |
-| 6 | `concurrent-contender` | claim/record observations identify competing owner decision |
+| 6 | `concurrent-contender` | an owner explicitly reports a competing owner decision; status never invents this from a losing launch, which leaves no durable status fact |
 | 7 | `starting` | live claimed shim plus `child-starting`, or child recorded but not ready |
 | 7a | `stopping` | live claimed shim has begun serialized stop and has not yet reported its stop response |
 | 7b | `stopped` | live claimed shim observed child exit and owned teardown is pending |
@@ -2076,9 +2107,16 @@ Within one role, first match wins:
 `stale-record`/`missing` backed by ESRCH or actual record absence can enter relaunch; disagreements and uncertainty
 refuse.
 
+Disagreement output renders both observed sides: advisory and connected answerer PIDs, advisory and durable-record
+shim PIDs, or local and recorded roots as applicable. A same-user concurrent loser contributes no separate contender
+row; already-observed answerer or state-root disagreement remains the factual family. Provenance: planner R19,
+2026-08-10/11.
+
 Before cutover, the tmux collector emits one optional objective report field/table line. Trigger only when every
 roster role is `missing`, exactly one window has empty `@agentctl_role`, and that window has exactly N panes where N is
-roster size. Below, above, multiple role-less windows, or any matched role window suppress it. Exact human text:
+roster size. Below, above, multiple role-less windows, or any window whose actual name matches a roster role suppress
+it. Stale `@agentctl_role` metadata on a differently named window is presentation metadata and does not establish such
+a match. Exact human text:
 
 ```text
 note: all N roster roles are missing; unmanaged window "W" has N panes
@@ -2087,6 +2125,12 @@ note: all N roster roles are missing; unmanaged window "W" has N panes
 The human table emits this exact note immediately after the corresponding session's last row, before any later
 session's rows. JSON carries the same optional `"note"` on that session object. This names no cause: a role-less
 roster-sized window is not proof that panes were joined or that it contains the missing harnesses.
+
+PR 6 lands this contract beside the legacy collector as `RuntimeShimRoleSource`, `ShimCollector`,
+`RuntimePresentationSource`, `WriteShimTable`, and `WriteShimJSON`. The runtime source opens the volatile role side
+before the durable side; its no-lockfile fallback is unanchored by construction. `ShimStatusFleetReader` adapts the
+durable fleet roster without converting its operator-selected fields into runtime evidence. PR 7 owns the atomic CLI
+selection of these compatibility implementations.
 
 ### 15.7 Command outcomes and attach limitation
 
@@ -2241,7 +2285,7 @@ readiness`. This makes cleanup outcome, rather than the initiating observation e
 
 Production invokes no shell beyond the existing tmux window-command site. Canonical future boundaries are optional
 tmux presentation/create/attach/kill argv through `internal/tmuxx.Runner`; one ancestry snapshot
-`ps -eo pid=,ppid=` through that Runner; PTY child start through a narrow interface receiving only harness/AMQ argv;
+`ps -eo pid=,ppid=` through that Runner's `tmuxx.ParentPIDs` wrapper; PTY child start through a narrow interface receiving only harness/AMQ argv;
 and Darwin syscalls for `flock`, `LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` tokens.
 
 `golang.org/x/sys/unix` is approved only for PR 2's lock/socket/process syscalls. Dependency admission is staged
@@ -2270,6 +2314,12 @@ disagreement; (3) §15.2 roots/caps; (4) §§15.1/15.7 operation names; (5) §15
 §§15.3–15.6 orphan/absence/manual remedy; (7) §§15.3/15.7 readiness; (8) §§15.3/15.8 ownership/exits; (9) §15.7
 factual delivery; (10) §§15.5/15.8 version-first refusal. Every implementation PR cites applicable rows; none may
 reopen semantics without an approved design delta.
+
+PR 6 adds structural drift guards for the exact four-field `Request` and empty payloads on every
+`OperationControl` registry entry. Its review evidence mutation-adds a fifth `Payload` field and a non-empty
+`observe` payload separately; each mutant must fail its named invariant before the source is restored. A separate
+transitional inventory pins the sole legacy `internal/target` import and `tmuxx.DeliverPayload` call until PR 7
+removes both.
 
 Gate S runs after PRs 2 and 3 and before PR 4. It records `PASS` only if the merged Darwin evidence satisfies the
 approved `flock`, `LOCAL_PEERPID`, raw `kinfo_proc` token, state-root disagreement, fully resolved socket-length,

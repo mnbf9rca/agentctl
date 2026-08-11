@@ -44,18 +44,40 @@ type RecordState string
 const (
 	RecordStateChildStarting RecordState = "child-starting"
 	RecordStateChildRecorded RecordState = "child-recorded"
+	RecordStateCleanupFailed RecordState = "cleanup-failed"
 )
+
+// CleanupObservation is the closed retained-child observation vocabulary that
+// may accompany a durably recorded cleanup failure.
+type CleanupObservation string
+
+const (
+	CleanupObservationPresentMatch             CleanupObservation = "present-match"
+	CleanupObservationPresentTokenDisagreement CleanupObservation = "present-token-disagreement"
+	CleanupObservationPresentNotOurs           CleanupObservation = "present-not-ours"
+	CleanupObservationCouldNotObserve          CleanupObservation = "could-not-observe"
+)
+
+// CleanupFailure is the single factual record field added by R19. Remaining
+// uses the fixed child/socket/record/lock order and identifies only artifacts
+// observed still present.
+type CleanupFailure struct {
+	Cause       string             `json:"cause"`
+	Observation CleanupObservation `json:"observation"`
+	Remaining   []string           `json:"remaining"`
+}
 
 // Record is durable identity evidence, never a liveness observation.
 type Record struct {
-	Version         int         `json:"version"`
-	State           RecordState `json:"state"`
-	Session         string      `json:"session"`
-	Role            string      `json:"role"`
-	ShimPID         int         `json:"shim_pid"`
-	Nonce           string      `json:"nonce"`
-	ChildPID        int         `json:"child_pid,omitempty"`
-	ChildStartToken *StartToken `json:"child_start_token,omitempty"`
+	Version         int             `json:"version"`
+	State           RecordState     `json:"state"`
+	Session         string          `json:"session"`
+	Role            string          `json:"role"`
+	ShimPID         int             `json:"shim_pid"`
+	Nonce           string          `json:"nonce"`
+	ChildPID        int             `json:"child_pid,omitempty"`
+	ChildStartToken *StartToken     `json:"child_start_token,omitempty"`
+	Cleanup         *CleanupFailure `json:"cleanup,omitempty"`
 }
 
 // RecordParseError identifies malformed durable identity at the record
@@ -107,6 +129,36 @@ func (r Record) WithChild(pid int, token StartToken) (Record, error) {
 	return r, nil
 }
 
+// WithCleanupFailure changes an existing reservation/child record into the
+// durably observable cleanup-failed state without inventing child absence.
+func (r Record) WithCleanupFailure(pid int, token *StartToken, failure CleanupFailure) (Record, error) {
+	if err := validateRecord(r); err != nil {
+		return Record{}, err
+	}
+	if r.State != RecordStateChildStarting && r.State != RecordStateChildRecorded {
+		return Record{}, errors.New("only child-starting or child-recorded may become cleanup-failed")
+	}
+	if !validDarwinPID(pid) {
+		return Record{}, errors.New("cleanup-failed record requires a positive child PID")
+	}
+	if token != nil {
+		if err := token.validate(); err != nil {
+			return Record{}, err
+		}
+		copied := *token
+		token = &copied
+	}
+	failure.Remaining = append([]string(nil), failure.Remaining...)
+	if err := validateCleanupFailure(failure); err != nil {
+		return Record{}, err
+	}
+	r.State = RecordStateCleanupFailed
+	r.ChildPID = pid
+	r.ChildStartToken = token
+	r.Cleanup = &failure
+	return r, nil
+}
+
 func validateRecord(record Record) error {
 	if record.Version != ShimProtocolVersion {
 		return fmt.Errorf("record protocol version is %d; expected %d", record.Version, ShimProtocolVersion)
@@ -125,18 +177,60 @@ func validateRecord(record Record) error {
 	}
 	switch record.State {
 	case RecordStateChildStarting:
-		if record.ChildPID != 0 || record.ChildStartToken != nil {
+		if record.ChildPID != 0 || record.ChildStartToken != nil || record.Cleanup != nil {
 			return errors.New("child-starting record must not carry child identity")
 		}
 	case RecordStateChildRecorded:
-		if !validDarwinPID(record.ChildPID) || record.ChildStartToken == nil {
+		if !validDarwinPID(record.ChildPID) || record.ChildStartToken == nil || record.Cleanup != nil {
 			return errors.New("child-recorded record requires child PID and start token")
 		}
 		if err := record.ChildStartToken.validate(); err != nil {
 			return err
 		}
+	case RecordStateCleanupFailed:
+		if !validDarwinPID(record.ChildPID) || record.Cleanup == nil {
+			return errors.New("cleanup-failed record requires child PID and cleanup facts")
+		}
+		if record.ChildStartToken != nil {
+			if err := record.ChildStartToken.validate(); err != nil {
+				return err
+			}
+		}
+		if err := validateCleanupFailure(*record.Cleanup); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("unknown record state %q", record.State)
+	}
+	return nil
+}
+
+func validateCleanupFailure(failure CleanupFailure) error {
+	if failure.Cause == "" {
+		return errors.New("cleanup failure cause must not be empty")
+	}
+	switch failure.Observation {
+	case CleanupObservationPresentMatch,
+		CleanupObservationPresentTokenDisagreement,
+		CleanupObservationPresentNotOurs,
+		CleanupObservationCouldNotObserve:
+	default:
+		return fmt.Errorf("unknown cleanup observation %q", failure.Observation)
+	}
+	if len(failure.Remaining) == 0 {
+		return errors.New("cleanup failure must identify at least one remaining artifact")
+	}
+	order := map[string]int{"child": 0, "socket": 1, "record": 2, "lock": 3}
+	previous := -1
+	for _, artifact := range failure.Remaining {
+		index, ok := order[artifact]
+		if !ok {
+			return fmt.Errorf("unknown remaining cleanup artifact %q", artifact)
+		}
+		if index <= previous {
+			return errors.New("remaining cleanup artifacts must be unique and in child,socket,record,lock order")
+		}
+		previous = index
 	}
 	return nil
 }
@@ -326,7 +420,7 @@ func ReadRecord(path *RolePath) (Record, error) {
 		return Record{}, err
 	}
 	if len(payload) > recordMaxBytes {
-		return Record{}, fmt.Errorf("durable record exceeds %d bytes", recordMaxBytes)
+		return Record{}, recordParseError(fmt.Errorf("durable record exceeds %d bytes", recordMaxBytes))
 	}
 	fields, err := decodeJSONObject(payload)
 	if err != nil {
@@ -334,14 +428,14 @@ func ReadRecord(path *RolePath) (Record, error) {
 	}
 	allowed := map[string]bool{
 		"version": true, "state": true, "session": true, "role": true,
-		"shim_pid": true, "nonce": true, "child_pid": true, "child_start_token": true,
+		"shim_pid": true, "nonce": true, "child_pid": true, "child_start_token": true, "cleanup": true,
 	}
 	if err := requireFields(fields, allowed, []string{"version", "state", "session", "role", "shim_pid", "nonce"}); err != nil {
 		return Record{}, recordParseError(err)
 	}
 	if err := requireJSONTypes(fields, map[string]string{
 		"version": "integer", "state": "string", "session": "string", "role": "string",
-		"shim_pid": "integer", "nonce": "string", "child_pid": "integer", "child_start_token": "object",
+		"shim_pid": "integer", "nonce": "string", "child_pid": "integer", "child_start_token": "object", "cleanup": "object",
 	}); err != nil {
 		return Record{}, recordParseError(err)
 	}
@@ -359,6 +453,11 @@ func ReadRecord(path *RolePath) (Record, error) {
 			return Record{}, recordParseError(err)
 		}
 	}
+	if len(fields["cleanup"]) == 1 {
+		if err := validateCleanupFailureJSON(fields["cleanup"][0]); err != nil {
+			return Record{}, recordParseError(err)
+		}
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	var record Record
@@ -369,10 +468,36 @@ func ReadRecord(path *RolePath) (Record, error) {
 		return Record{}, recordParseError(errors.New("durable record has trailing JSON"))
 	}
 	if err := validateRecord(record); err != nil {
-		return Record{}, err
+		return Record{}, recordParseError(err)
 	}
 	if record.Session != path.Session || record.Role != path.Role {
-		return Record{}, errors.New("durable record session/role differs from role path")
+		return Record{}, recordParseError(errors.New("durable record session/role differs from role path"))
 	}
 	return record, nil
+}
+
+func validateCleanupFailureJSON(raw json.RawMessage) error {
+	fields, err := decodeJSONObject(raw)
+	if err != nil {
+		return err
+	}
+	allowed := map[string]bool{"cause": true, "observation": true, "remaining": true}
+	if err := requireFields(fields, allowed, []string{"cause", "observation", "remaining"}); err != nil {
+		return err
+	}
+	if err := requireJSONTypes(fields, map[string]string{
+		"cause": "string", "observation": "string", "remaining": "array",
+	}); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var failure CleanupFailure
+	if err := decoder.Decode(&failure); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("cleanup facts have trailing JSON")
+	}
+	return validateCleanupFailure(failure)
 }

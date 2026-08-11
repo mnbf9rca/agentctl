@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -235,6 +236,61 @@ func TestRecordRejectsMalformedAndInconsistentDurableData(t *testing.T) {
 	invalid.ChildStartToken = &malformedToken
 	if err := WriteRecord(rolePath, invalid); err == nil {
 		t.Fatal("WriteRecord accepted malformed raw timeval")
+	}
+}
+
+func TestRecordRoundTripsCleanupFailedStateWithOneClosedFactObject(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	reservation := NewChildStartingRecord("session", "role", 400, "nonce")
+	failure := CleanupFailure{
+		Cause:       "SIGHUP did not produce observed absence",
+		Observation: CleanupObservationPresentMatch,
+		Remaining:   []string{"child", "socket", "record", "lock"},
+	}
+	failed, err := reservation.WithCleanupFailure(401, nil, failure)
+	if err != nil {
+		t.Fatalf("WithCleanupFailure() error = %v", err)
+	}
+	if err := WriteRecord(rolePath, failed); err != nil {
+		t.Fatalf("WriteRecord() error = %v", err)
+	}
+	got, err := ReadRecord(rolePath)
+	if err != nil {
+		t.Fatalf("ReadRecord() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, failed) {
+		t.Fatalf("cleanup record = %#v, want %#v", got, failed)
+	}
+	payload, err := os.ReadFile(rolePath.Record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"SIGHUP did not produce observed absence","observation":"present-match","remaining":["child","socket","record","lock"]}}` + "\n"
+	if string(payload) != want {
+		t.Fatalf("cleanup record payload = %q, want %q", payload, want)
+	}
+}
+
+func TestRecordRejectsMalformedCleanupFailedFacts(t *testing.T) {
+	rolePath := newTestRolePath(t)
+	for _, payload := range []string{
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401}`,
+		`{"version":1,"state":"child-recorded","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"child_start_token":{"sec":1,"usec":0},"cleanup":{"cause":"x","observation":"present-match","remaining":["child"]}}`,
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"missing","remaining":["child"]}}`,
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","cause":"y","observation":"present-match","remaining":["child"]}}`,
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"present-match","remaining":["record","child"]}}`,
+	} {
+		if err := os.WriteFile(rolePath.Record, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadRecord(rolePath); err == nil {
+			t.Fatalf("ReadRecord accepted malformed cleanup facts: %s", payload)
+		} else {
+			var parse *RecordParseError
+			if !errors.As(err, &parse) {
+				t.Fatalf("ReadRecord error = %T %v, want RecordParseError for %s", err, err, payload)
+			}
+		}
 	}
 }
 

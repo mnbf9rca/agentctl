@@ -148,6 +148,61 @@ func TestShimClientRejectsForeignHelloBeforeSendingRequest(t *testing.T) {
 	}
 }
 
+func TestShimClientGuardsLOCALPEERPIDBeforeSendingOperationRequest(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatalf("openNamespaceRoots() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatalf("RolePath() error = %v", err)
+	}
+	t.Cleanup(func() { _ = path.Close() })
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "nonce", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatalf("AcquireClaim() error = %v", err)
+	}
+	t.Cleanup(func() { _ = claim.Close() })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatalf("ListenUnix() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	requestObserved := make(chan bool, 1)
+	go func() {
+		connection, _ := listener.AcceptUnix()
+		defer func() { _ = connection.Close() }()
+		hello, _ := EncodeHello()
+		_, _ = WriteFrame(connection, hello)
+		_ = connection.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		buffer := make([]byte, 1)
+		count, _ := connection.Read(buffer)
+		requestObserved <- count != 0
+	}()
+
+	wantErr := errors.New("ancestry refused")
+	guardedPID := 0
+	_, err = NewClient(namespace).DeliverOperationGuarded(
+		context.Background(), "fleet", "planner", "clear",
+		func(_ context.Context, targetPID int) error {
+			guardedPID = targetPID
+			return wantErr
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("DeliverOperationGuarded() error = %T %v, want %v", err, err, wantErr)
+	}
+	if guardedPID != os.Getpid() {
+		t.Fatalf("guard target PID = %d, want connected LOCAL_PEERPID %d", guardedPID, os.Getpid())
+	}
+	if <-requestObserved {
+		t.Fatal("client sent request bytes after connected-peer guard refused")
+	}
+}
+
 func TestShimClientObservationDoesNotCreateMissingRoleDirectories(t *testing.T) {
 	base := shortTempDir(t)
 	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
