@@ -589,6 +589,10 @@ set -u
 printf '%s\n' "$*" >>"$AGENTCTL_TEST_LOG"
 case "$*" in
   skill\ install|launch\ --session\ skillverify\ *|attach\ --session\ skillverify|kill\ --session\ skillverify)
+    if [ "${AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT:-0}" = 1 ] && [ "${AGENTCTL_RUNTIME_ROOT:-}" != "${HOME%/home}/runtime" ]; then
+      echo "Part C AGENTCTL_RUNTIME_ROOT=${AGENTCTL_RUNTIME_ROOT:-}" >&2
+      exit 2
+    fi
     printf '%s\t%s\t%s\t%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AGENTCTL_ENVIRONMENT_LOG"
     ;;
 esac
@@ -1693,6 +1697,14 @@ func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testin
 		if fields[2] == os.Getenv("HOME") || !strings.HasPrefix(fields[3], wantPathPrefix) {
 			t.Fatalf("Part C agentctl boundary could reach the real HOME or unshimmed tmux context: %q", record)
 		}
+	}
+}
+
+func TestLiveVerificationPartCPinsPrivateRuntimeRoot(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT=1")
+	if err != nil {
+		t.Fatalf("release verification did not pin Part C to its private runtime root: %v\n%s", err, output)
 	}
 }
 

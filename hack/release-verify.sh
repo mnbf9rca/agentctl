@@ -204,9 +204,12 @@ PART_C_REAL_TMUX=''
 PART_C_SOCKET=''
 PART_C_ORIGINAL_HOME=''
 PART_C_ORIGINAL_PATH=''
+PART_C_ORIGINAL_RUNTIME_ROOT=''
+PART_C_ORIGINAL_RUNTIME_ROOT_SET=0
 PART_C_HOME=''
 PART_C_PROJECT=''
 PART_C_BIN=''
+PART_C_RUNTIME_ROOT=''
 PART_C_REAL_SECURITY=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
@@ -268,6 +271,7 @@ part_c_kill_session() {
     cd "$PART_C_PROJECT" || exit 1
     HOME="$PART_C_HOME" \
       PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH" \
+      AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT" \
       "$PART_C_TOP/bin/agentctl" kill --session skillverify
   )
 }
@@ -353,7 +357,12 @@ part_c_teardown() {
   if [ -n "$PART_C_ORIGINAL_PATH" ]; then
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
-  printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
+  if [ "$PART_C_ORIGINAL_RUNTIME_ROOT_SET" -eq 1 ]; then
+    export AGENTCTL_RUNTIME_ROOT="$PART_C_ORIGINAL_RUNTIME_ROOT"
+  else
+    unset AGENTCTL_RUNTIME_ROOT
+  fi
+  printf 'PART C CLEANUP PASS (HOME, PATH, and runtime root restored)\n'
   if [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
     if [ -L "$PART_C_KEYCHAIN_LINK" ]; then
       # Keep this exactly non-recursive and slash-free: rm -rf link/ follows the symlink and destroys the operator's Keychains target.
@@ -1721,6 +1730,10 @@ EOF
     PART_C_ACTIVE=1
     PART_C_ORIGINAL_HOME=$HOME
     PART_C_ORIGINAL_PATH=$PATH
+    if [ "${AGENTCTL_RUNTIME_ROOT+x}" = x ]; then
+      PART_C_ORIGINAL_RUNTIME_ROOT=$AGENTCTL_RUNTIME_ROOT
+      PART_C_ORIGINAL_RUNTIME_ROOT_SET=1
+    fi
     PART_C_SOCKET="agentctl-skill-verify-$$"
     PART_C_REAL_TMUX=$(command -v tmux) || {
       part_c_abort 'could not resolve tmux for Part C'
@@ -1729,6 +1742,7 @@ EOF
     PART_C_HOME="$PART_C_ROOT/home"
     PART_C_PROJECT="$PART_C_ROOT/project"
     PART_C_BIN="$PART_C_ROOT/bin"
+    PART_C_RUNTIME_ROOT="$PART_C_ROOT/runtime"
     PART_C_KEYCHAIN_SOURCE="$PART_C_ORIGINAL_HOME/Library/Keychains"
     PART_C_KEYCHAIN_LINK="$PART_C_HOME/Library/Keychains"
 
@@ -1741,6 +1755,9 @@ EOF
     }
     install -d -m 0755 "$PART_C_PROJECT" "$PART_C_BIN" || {
       part_c_abort 'could not create Part C directories'
+    }
+    install -d -m 0700 "$PART_C_RUNTIME_ROOT" || {
+      part_c_abort 'could not create Part C runtime root'
     }
     printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
     chmod 0755 "$PART_C_BIN/tmux"
@@ -1835,6 +1852,7 @@ EOF
 
     export HOME="$PART_C_HOME"
     export PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH"
+    export AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT"
     cd "$PART_C_PROJECT"
 
     step_start C.3 'initialize isolated AMQ and install the release-candidate skill'
