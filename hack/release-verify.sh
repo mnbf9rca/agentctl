@@ -258,6 +258,20 @@ part_c_kill_session() {
   )
 }
 
+part_c_retry_kill_after_socket() {
+  local attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if part_c_kill_session; then
+      return 0
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 part_c_named_socket_absent() {
   local output=$1
   case "$output" in
@@ -302,7 +316,7 @@ part_c_teardown() {
     fi
   fi
   if [ "$PART_C_SESSION_OWNED" -eq 1 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
-    if part_c_kill_session; then
+    if part_c_retry_kill_after_socket; then
       printf 'PART C CLEANUP PASS (skillverify kill retry after socket removal)\n'
       PART_C_SESSION_OWNED=0
       teardown_status=0
@@ -1883,7 +1897,7 @@ operator repairs the ambiguity with raw tmux.
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
 EOF
-    if ! TERM_PROGRAM=iTerm.app "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
+    if ! env -u TMUX -u TMUX_PANE TERM_PROGRAM=iTerm.app "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
       step_fail C.4 'skill fleet attach failed'
       part_c_abort 'Part C attach guidance failed'
     fi

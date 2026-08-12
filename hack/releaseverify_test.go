@@ -687,8 +687,8 @@ case "$1" in
     echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
     ;;
   attach)
-    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && [ "${TERM_PROGRAM:-}" != iTerm.app ]; then
-      echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-}" >&2
+    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
+      echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-} TMUX=${TMUX:-} TMUX_PANE=${TMUX_PANE:-}" >&2
       exit 2
     fi
     if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_PART_C_ATTACH_FAIL:-0}" = 1 ]; then
@@ -1272,6 +1272,8 @@ func TestLiveVerificationPartCAttachDeclaresITermEnvironment(t *testing.T) {
 	output, err := fixture.run(t, strings.Repeat("y\n", 15),
 		"AGENTCTL_TEST_REQUIRE_PART_C_ITERM=1",
 		"TERM_PROGRAM=tmux",
+		"TMUX=fixture-tmux",
+		"TMUX_PANE=%28",
 	)
 	if err != nil {
 		t.Fatalf("release verification omitted Part C iTerm attach environment: %v\n%s", err, output)
