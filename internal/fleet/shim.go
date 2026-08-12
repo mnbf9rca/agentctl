@@ -284,7 +284,7 @@ func (l ShimLauncher) waitReady(ctx context.Context, session, role string, creat
 			if err != nil {
 				return err
 			}
-			return &ShimRoleStateError{Session: session, Role: role, Outcome: shim.OutcomeStarting}
+			return &ShimRoleStateError{Session: session, Role: role, Outcome: response.Outcome}
 		}
 		l.sleep(ptyx.ReadinessPollInterval)
 	}

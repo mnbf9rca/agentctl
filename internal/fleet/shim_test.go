@@ -499,6 +499,27 @@ func TestShimLauncherTreatsPreStartMissingAsTransientUntilCreatedShimRuns(t *tes
 	}
 }
 
+func TestShimLauncherReportsLastObservedOutcomeWhenReadinessTimesOut(t *testing.T) {
+	t.Parallel()
+
+	observationCount := int(shimLaunchObservationTimeout/ptyx.ReadinessPollInterval) + 1
+	responses := make([]shim.Response, observationCount)
+	for index := range responses {
+		responses[index] = shim.Response{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeMissing}
+	}
+	now := time.Unix(1000, 0)
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: &shimEventLog{}, observe: responses}, nil, ShimLaunchDependencies{
+		Now:   func() time.Time { return now },
+		Sleep: func(duration time.Duration) { now = now.Add(duration) },
+	})
+
+	err := launcher.waitReady(context.Background(), "fleet", "coder", 4321)
+	want := "role \"coder\" in session \"fleet\" reported missing while launch waited for running"
+	if err == nil || err.Error() != want {
+		t.Fatalf("waitReady() error = %v, want %q", err, want)
+	}
+}
+
 func TestShimLauncherRetainsFleetRecordWhenPresentationFailureReturnsNoOwnerIDs(t *testing.T) {
 	t.Parallel()
 
