@@ -15,7 +15,7 @@ Usage:
   hack/release-verify.sh --shim-version-matrix CURRENT_BINARY ARTIFACT_DIR
   hack/release-verify.sh --task8 CURRENT_BINARY ARTIFACT_DIR
 
-Runs preflight and the four hack/probe-*.sh contract probes. By default it
+Runs preflight and the release contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
 compact, relaunch, kill, status, and a separate skill-discovery fleet. With
 --non-interactive each live checkpoint reads y/n from stdin while retaining all
@@ -156,6 +156,20 @@ part_b_keeper_teardown() {
   return 1
 }
 
+part_b_retry_kill() {
+  local attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if "$PART_B_TOP/bin/agentctl" kill --session "$PART_B_SESSION"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 part_b_teardown() {
   local kill_status=0
   if [ "$PART_B_SESSION_OWNED" -eq 0 ]; then
@@ -168,6 +182,18 @@ part_b_teardown() {
   else
     kill_status=$?
   fi
+  if [ "$kill_status" -eq 9 ]; then
+    printf 'PART B CLEANUP OBSERVED (%s kill exited 9; retrying within bounded observation window)\n' "$PART_B_SESSION"
+    if part_b_retry_kill; then
+      printf 'PART B CLEANUP PASS (%s kill retry exited 0)\n' "$PART_B_SESSION"
+      PART_B_SESSION_OWNED=0
+      return 0
+    else
+      kill_status=$?
+    fi
+    printf 'PART B CLEANUP FAIL (%s kill retry exited %s)\n' "$PART_B_SESSION" "$kill_status" >&2
+    return 1
+  fi
   printf 'PART B CLEANUP FAIL (%s kill exited %s)\n' "$PART_B_SESSION" "$kill_status" >&2
   return 1
 }
@@ -178,9 +204,13 @@ PART_C_REAL_TMUX=''
 PART_C_SOCKET=''
 PART_C_ORIGINAL_HOME=''
 PART_C_ORIGINAL_PATH=''
+PART_C_ORIGINAL_RUNTIME_ROOT=''
+PART_C_ORIGINAL_RUNTIME_ROOT_SET=0
 PART_C_HOME=''
 PART_C_PROJECT=''
+PART_C_PROJECT_REAL=''
 PART_C_BIN=''
+PART_C_RUNTIME_ROOT=''
 PART_C_REAL_SECURITY=''
 PART_C_SESSION_OWNED=0
 PART_C_SOCKET_ARMED=0
@@ -209,6 +239,14 @@ part_c_print_seedable_auth() {
 part_c_seed_auth() {
   install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
   install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
+}
+
+part_c_seed_codex_trust() {
+  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
+  (
+    umask 077
+    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$PART_C_PROJECT_REAL" >"$PART_C_HOME/.codex/config.toml"
+  )
 }
 
 part_c_has_keychain_source() {
@@ -242,8 +280,23 @@ part_c_kill_session() {
     cd "$PART_C_PROJECT" || exit 1
     HOME="$PART_C_HOME" \
       PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH" \
+      AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT" \
       "$PART_C_TOP/bin/agentctl" kill --session skillverify
   )
+}
+
+part_c_retry_kill_after_socket() {
+  local attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if part_c_kill_session; then
+      return 0
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 part_c_named_socket_absent() {
@@ -278,10 +331,6 @@ part_c_teardown() {
     if [ "$socket_status" -eq 0 ]; then
       printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
       PART_C_SOCKET_ARMED=0
-      if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
-        printf 'PART C CLEANUP OBSERVED (named tmux socket removal proves skillverify absent)\n'
-        PART_C_SESSION_OWNED=0
-      fi
     elif part_c_named_socket_absent "$socket_output"; then
       # Accept only tmux's complete single-line response for this internally
       # named socket when it was armed but no server was ever created.
@@ -290,6 +339,16 @@ part_c_teardown() {
       PART_C_SESSION_OWNED=0
     else
       printf 'PART C CLEANUP FAIL (named tmux socket kill-server exited %s): %s\n' "$socket_status" "$socket_output" >&2
+      teardown_status=1
+    fi
+  fi
+  if [ "$PART_C_SESSION_OWNED" -eq 1 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
+    if part_c_retry_kill_after_socket; then
+      printf 'PART C CLEANUP PASS (skillverify kill retry after socket removal)\n'
+      PART_C_SESSION_OWNED=0
+      teardown_status=0
+    else
+      printf 'PART C CLEANUP FAIL (skillverify kill retry after socket removal)\n' >&2
       teardown_status=1
     fi
   fi
@@ -307,7 +366,12 @@ part_c_teardown() {
   if [ -n "$PART_C_ORIGINAL_PATH" ]; then
     export PATH="$PART_C_ORIGINAL_PATH"
   fi
-  printf 'PART C CLEANUP PASS (HOME and PATH restored)\n'
+  if [ "$PART_C_ORIGINAL_RUNTIME_ROOT_SET" -eq 1 ]; then
+    export AGENTCTL_RUNTIME_ROOT="$PART_C_ORIGINAL_RUNTIME_ROOT"
+  else
+    unset AGENTCTL_RUNTIME_ROOT
+  fi
+  printf 'PART C CLEANUP PASS (HOME, PATH, and runtime root restored)\n'
   if [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
     if [ -L "$PART_C_KEYCHAIN_LINK" ]; then
       # Keep this exactly non-recursive and slash-free: rm -rf link/ follows the symlink and destroys the operator's Keychains target.
@@ -406,7 +470,10 @@ session_absent() {
 
   case "$STATUS_EXIT" in
     3)
-      grep -qF "session \"$session_name\" not found" "$stderr_file" || return 2
+      grep -qF \
+        -e "session \"$session_name\" not found" \
+        -e "session \"$session_name\" has no durable fleet configuration" \
+        "$stderr_file" || return 2
       ;;
     6)
       # Keep the pre-#147 exited-server contract; the keeper path is scoped to connect ENOENT.
@@ -455,13 +522,13 @@ resolve_role_window() {
   local format
   local records
   local record
-  local observed_role
-  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{@agentctl_role}"
+  local observed_name
+  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{window_name}"
   records=$(tmux list-windows -t "$session_id" -F "$format") || return 1
   record=$(printf '%s\n' "$records" | awk -F '\t' -v role="$role" '$3 == role { print }')
   [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
-  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_role <<<"$record"
-  [ "$observed_role" = "$role" ] || return 1
+  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_name <<<"$record"
+  [ "$observed_name" = "$role" ] || return 1
   valid_tmux_id "$ROLE_WINDOW_ID" '@' && valid_tmux_id "$ROLE_PANE_ID" '%'
 }
 
@@ -476,8 +543,52 @@ assert_role_state() {
     return 1
   fi
   cat "$output_file"
-  states=$(awk -v session="$session_name" -v role="$role" '$1 == session && $2 == role { print $NF }' "$output_file")
+  states=$(awk -v session="$session_name" -v role="$role" -v expected="$expected" '
+    $1 == session && $2 == role {
+      for (field = 3; field <= NF; field++) {
+        if ($field == expected) print $field
+      }
+    }
+  ' "$output_file")
   [ "$states" = "$expected" ]
+}
+
+ROLE_SHIM_PID=''
+ROLE_CHILD_PID=''
+resolve_running_role_processes() {
+  local session_name=$1
+  local role=$2
+  local output_file=$3
+  local records
+  local record
+  if ! ./bin/agentctl status --session "$session_name" >"$output_file"; then
+    cat "$output_file"
+    return 1
+  fi
+  cat "$output_file"
+  records=$(awk -v session="$session_name" -v role="$role" '
+    $1 == session && $2 == role && $10 == "running" { print $7 "\t" $8 }
+  ' "$output_file")
+  record=$(printf '%s\n' "$records" | awk 'NF { print }')
+  [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
+  IFS=$'\t' read -r ROLE_SHIM_PID ROLE_CHILD_PID <<<"$record"
+  case "$ROLE_SHIM_PID:$ROLE_CHILD_PID" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  [ "$ROLE_SHIM_PID" -gt 0 ] && [ "$ROLE_CHILD_PID" -gt 0 ]
+}
+
+wait_process_absent() {
+  local pid=$1
+  local attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  return 1
 }
 
 # Markdown backticks below are literal; command substitution is deliberately
@@ -536,7 +647,7 @@ render_results() {
       printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-      printf -- '- Checkpoint B.C9 relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+      printf -- '- Checkpoint B.C9 relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
       printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
       if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
@@ -572,7 +683,7 @@ render_results() {
       printf -- '- Claude clear: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
       printf -- '- Codex clear: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
       printf -- '- Compact (claude): operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-      printf -- '- Relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+      printf -- '- Relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
     fi
     case "$(field teardown_status_exit "$metadata")" in
@@ -656,6 +767,7 @@ require_probe_text() {
 assert_probe_output() {
   local probe_name=$1
   local PROBE_OUTPUT=$2
+	local probe_harness probe_version shim_pid child_pid child_outcome
 
   case "$probe_name" in
     probe-1-argv.sh)
@@ -709,6 +821,33 @@ exit=1" &&
         require_probe_text "$probe_name" "attach-session -t '=alpha'  : open terminal failed: not a terminal" &&
         require_probe_text "$probe_name" "attach-session -t '=nope'   : can't find session: nope" &&
         require_probe_text "$probe_name" "-CC attach-session -t \$SESSION_ID : tcgetattr failed: Operation not supported by device"
+      ;;
+    probe-shim-sighup.sh)
+      probe_harness=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^harness=//p' | sed -n '1p')
+      probe_version=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^harness_version=//p' | sed -n '1p')
+      shim_pid=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^shim_pid=//p' | sed -n '1p')
+      child_pid=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^child_pid=//p' | sed -n '1p')
+      child_outcome=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^child_outcome=//p' | sed -n '1p')
+      case "$probe_harness" in
+        claude|codex) ;;
+        *) printf 'PROBE ASSERT FAIL (%s): missing valid harness observation\n' "$probe_name" >&2; return 1 ;;
+      esac
+      [ -n "$probe_version" ] || { printf 'PROBE ASSERT FAIL (%s): missing harness version observation\n' "$probe_name" >&2; return 1; }
+      case "$shim_pid:$child_pid" in
+        *[!0-9:]*|:*|*:) printf 'PROBE ASSERT FAIL (%s): missing positive shim/child PID observations\n' "$probe_name" >&2; return 1 ;;
+      esac
+      case "$child_outcome" in
+        survived|terminated) ;;
+        *) printf 'PROBE ASSERT FAIL (%s): missing closed child outcome observation\n' "$probe_name" >&2; return 1 ;;
+      esac
+      require_probe_text "$probe_name" 'topology=shim-parent-of-harness-child-on-pty' &&
+        require_probe_text "$probe_name" 'child_ppid_matches=true' &&
+        require_probe_text "$probe_name" 'child_tty=' &&
+        require_probe_text "$probe_name" 'child_command=' &&
+        require_probe_text "$probe_name" 'signal_target=owned-shim-only' &&
+        require_probe_text "$probe_name" 'signal=SIGHUP' &&
+        require_probe_text "$probe_name" 'shim_terminated=true' &&
+        require_probe_text "$probe_name" 'default_tmux_targeted=false'
       ;;
     *)
       printf 'PROBE ASSERT FAIL (%s): no assertion defined\n' "$probe_name" >&2
@@ -1103,8 +1242,8 @@ step_pass A.1 'build and version capture completed'
 step_start A.2 'run contract probes'
 echo '== Probes =='
 probe_index=1
-for probe in "$TOP"/hack/probe-*.sh; do
-  probe_name=$(basename "$probe")
+for probe_name in probe-1-argv.sh probe-2-targeting.sh probe-3-ids.sh probe-4-attach.sh; do
+  probe="$TOP/hack/$probe_name"
   echo "-- $probe_name --"
   probe_status=0
   probe_out=$(bash "$probe" </dev/null 2>&1) || probe_status=$?
@@ -1119,6 +1258,30 @@ for probe in "$TOP"/hack/probe-*.sh; do
     exit 1
   fi
   step_pass "A.$((probe_index + 1))" "$probe_name assertion completed"
+  probe_index=$((probe_index + 1))
+done
+
+probe_name='probe-shim-sighup.sh'
+probe="$TOP/hack/$probe_name"
+for probe_harness in claude codex; do
+  probe_output_file="$EVIDENCE_DIR/probe-shim-sighup-$probe_harness.txt"
+  echo "-- $probe_name ($probe_harness) --"
+  probe_status=0
+  probe_stdout=$(bash "$probe" --harness "$probe_harness" --output "$probe_output_file" </dev/null 2>&1) || probe_status=$?
+  printf '%s\n' "$probe_stdout"
+  if [ "$probe_status" -ne 0 ]; then
+    step_fail "A.$((probe_index + 1))" "$probe_name ($probe_harness) failed"
+    echo "PROBES FAIL ($probe_name, $probe_harness: exit $probe_status)"
+    exit 1
+  fi
+  [ -r "$probe_output_file" ] || die "$probe_name ($probe_harness) produced no readable evidence"
+  probe_out=$(cat "$probe_output_file")
+  printf '%s\n' "$probe_out"
+  if ! assert_probe_output "$probe_name" "$probe_out"; then
+    step_fail "A.$((probe_index + 1))" "$probe_name ($probe_harness) assertion failed"
+    exit 1
+  fi
+  step_pass "A.$((probe_index + 1))" "$probe_name ($probe_harness) assertion completed"
   probe_index=$((probe_index + 1))
 done
 
@@ -1340,8 +1503,12 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
-    echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
-    if checkpoint B.C6 'claude compact setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the compact spot check?'; then
+    echo 'Before the compact spot check, create compactable context in the claude tab:'
+    echo 'type "Reply with FIRST READY and one sentence about this repository." and press Enter.'
+    echo "Wait for Claude's complete response, then submit this second message:"
+    echo '"Reply with SECOND READY and one different sentence about testing this repository."'
+    echo "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
+    if checkpoint B.C6 'claude compact setup' "Claude's two responses are complete, and junk is visible in the claude input without being submitted." 'Are both Claude responses complete and the junk ready for the compact spot check?'; then
       echo 'Running:'
       echo '  ./bin/agentctl compact --session relverify a'
       if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
@@ -1369,21 +1536,25 @@ EOF
     if ! resolve_live_session_id "$LIVE_SESSION"; then
       echo 'RELAUNCH FAIL (could not resolve relverify to one exact tmux session ID)'
       LIVE_STATUS=1
-    elif ! resolve_role_window "$LIVE_SESSION_ID" b; then
-      echo 'RELAUNCH FAIL (could not resolve role b to one exact tmux window and pane ID)'
+    elif ! resolve_role_window "$LIVE_SESSION_ID" a; then
+      echo 'RELAUNCH FAIL (could not resolve role a to one exact tmux window and pane ID)'
+      LIVE_STATUS=1
+    elif ! resolve_running_role_processes "$LIVE_SESSION" a "$ARTIFACT_DIR/relaunch-before.status"; then
+      echo 'RELAUNCH FAIL (could not resolve role a to one running shim and child PID)'
       LIVE_STATUS=1
     else
-      original_window_id=$ROLE_WINDOW_ID
       original_pane_id=$ROLE_PANE_ID
-      echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
-    if checkpoint B.C8 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
-        echo 'Running exact-ID missing-role setup:'
-        printf '  tmux kill-window -t %s\n' "$original_window_id"
-        if ! tmux kill-window -t "$original_window_id"; then
-          echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
+      original_shim_pid=$ROLE_SHIM_PID
+      original_child_pid=$ROLE_CHILD_PID
+      echo 'In the claude tab, type junk into the input box again; do NOT press Enter.'
+    if checkpoint B.C8 'relaunch setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the relaunch process-discontinuity check?'; then
+        echo 'Running exact-PID shim termination setup:'
+        printf '  kill -HUP %s  # role a shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
+        if ! kill -HUP "$original_shim_pid"; then
+          echo "RELAUNCH FAIL (could not signal role a shim PID $original_shim_pid)"
           LIVE_STATUS=1
         else
-          step_pass B.6 'exact-ID role removal completed'
+          step_pass B.6 'exact-PID role shim termination completed'
         fi
       else
         LIVE_STATUS=1
@@ -1393,43 +1564,44 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl status --session relverify'
-    if assert_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
-      echo 'RELAUNCH PASS (role b reported missing after exact-ID removal)'
-      step_pass B.7 'missing-role state observed'
+    printf '  kill -0 %s  # wait for recorded role a child absence\n' "$original_child_pid"
+    if wait_process_absent "$original_child_pid"; then
+      echo 'RELAUNCH PASS (recorded role a child no longer responds to signal 0)'
+      step_pass B.7 'recorded role a child absence observed'
     else
-      echo 'RELAUNCH FAIL (role b did not report missing after exact-ID removal)'
+      echo "RELAUNCH FAIL (recorded role a child PID $original_child_pid still responds to signal 0)"
       LIVE_STATUS=1
     fi
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl relaunch --session relverify b'
-    if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
-      cat "$ARTIFACT_DIR/relaunch.stdout"
-      step_pass B.8 'relaunch command completed'
+    echo '  ./bin/agentctl relaunch --session relverify a'
+    if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.output" 2>&1; then
+      cat "$ARTIFACT_DIR/relaunch.output"
+      echo 'RELAUNCH PASS (role a relaunched through the ESRCH-gated command)'
+      step_pass B.8 'ESRCH-gated relaunch command completed'
     else
-      cat "$ARTIFACT_DIR/relaunch.stdout"
+      cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH FAIL (agentctl relaunch failed)'
       LIVE_STATUS=1
     fi
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    if ! resolve_role_window "$LIVE_SESSION_ID" b; then
-      echo 'RELAUNCH FAIL (could not resolve the recreated role b window and pane IDs)'
+    if ! resolve_role_window "$LIVE_SESSION_ID" a; then
+      echo 'RELAUNCH FAIL (could not resolve the recreated role a window and pane IDs)'
       LIVE_STATUS=1
     elif [ "$ROLE_PANE_ID" = "$original_pane_id" ]; then
-      echo "RELAUNCH FAIL (recreated role b reused original pane $original_pane_id)"
+      echo "RELAUNCH FAIL (recreated role a reused original pane $original_pane_id)"
       LIVE_STATUS=1
     else
-      printf 'RELAUNCH PASS (role b pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
+      printf 'RELAUNCH PASS (role a pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
       step_pass B.9 'replacement pane ID differs from original'
-      expected_relaunch="agentctl: relaunched b in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness codex (stored), model default (stored), effort high (stored), dir $TOP (stored)"
-      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
+      expected_relaunch='agentctl: relaunched role "a" in session "relverify"; the shim is ready'
+      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.output")
       if [ "$actual_relaunch" != "$expected_relaunch" ]; then
-        printf 'RELAUNCH FAIL (provenance output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
+        printf 'RELAUNCH FAIL (success output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
         LIVE_STATUS=1
       fi
     fi
@@ -1438,11 +1610,11 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
     echo '  ./bin/agentctl status --session relverify'
-    if assert_role_state "$LIVE_SESSION" b running "$ARTIFACT_DIR/relaunch-running.status"; then
-      echo 'RELAUNCH PASS (role b restored to running)'
+    if assert_role_state "$LIVE_SESSION" a running "$ARTIFACT_DIR/relaunch-running.status"; then
+      echo 'RELAUNCH PASS (role a restored to running)'
       step_pass B.10 'recreated role is running'
     else
-      echo 'RELAUNCH FAIL (role b did not return to running)'
+      echo 'RELAUNCH FAIL (role a did not return to running)'
       LIVE_STATUS=1
     fi
   fi
@@ -1454,12 +1626,12 @@ the fleet's stored configuration. The new pane is a new process: its harness,
 model and effort carry over; its conversation does not, so the junk you typed
 is gone.
 
-Do you see a fresh, ready codex input surface with no trace of that junk?
+Do you see a fresh, ready claude input surface with no trace of that junk?
 EOF
 )
-    if checkpoint B.C9 'live delivery and relaunch' 'the replacement codex pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
+    if checkpoint B.C9 'live delivery and relaunch' 'the replacement claude pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
-      RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
+      RELAUNCH_CHECK='PASS (stored claude/default/default provenance; pane ID changed)'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -1567,6 +1739,10 @@ EOF
     PART_C_ACTIVE=1
     PART_C_ORIGINAL_HOME=$HOME
     PART_C_ORIGINAL_PATH=$PATH
+    if [ "${AGENTCTL_RUNTIME_ROOT+x}" = x ]; then
+      PART_C_ORIGINAL_RUNTIME_ROOT=$AGENTCTL_RUNTIME_ROOT
+      PART_C_ORIGINAL_RUNTIME_ROOT_SET=1
+    fi
     PART_C_SOCKET="agentctl-skill-verify-$$"
     PART_C_REAL_TMUX=$(command -v tmux) || {
       part_c_abort 'could not resolve tmux for Part C'
@@ -1575,6 +1751,7 @@ EOF
     PART_C_HOME="$PART_C_ROOT/home"
     PART_C_PROJECT="$PART_C_ROOT/project"
     PART_C_BIN="$PART_C_ROOT/bin"
+    PART_C_RUNTIME_ROOT="$PART_C_ROOT/runtime"
     PART_C_KEYCHAIN_SOURCE="$PART_C_ORIGINAL_HOME/Library/Keychains"
     PART_C_KEYCHAIN_LINK="$PART_C_HOME/Library/Keychains"
 
@@ -1582,12 +1759,24 @@ EOF
     install -d -m 0700 "$PART_C_HOME" || {
       part_c_abort 'could not create Part C temporary HOME'
     }
+    install -d -m 0700 "$PART_C_HOME/Library/Application Support" || {
+      part_c_abort 'could not create Part C user-config root'
+    }
     install -d -m 0755 "$PART_C_PROJECT" "$PART_C_BIN" || {
       part_c_abort 'could not create Part C directories'
     }
+    install -d -m 0700 "$PART_C_RUNTIME_ROOT" || {
+      part_c_abort 'could not create Part C runtime root'
+    }
+    PART_C_PROJECT_REAL=$(cd "$PART_C_PROJECT" && pwd -P) || {
+      part_c_abort 'could not resolve Part C project path'
+    }
+    if ! part_c_seed_codex_trust; then
+      part_c_abort 'could not seed deterministic Codex trust for the Part C fixture project'
+    fi
     printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
     chmod 0755 "$PART_C_BIN/tmux"
-    step_pass C.1 'isolated Part C filesystem is active'
+    step_pass C.1 'isolated Part C filesystem and deterministic Codex project trust are active'
 
     step_start C.2 'choose authentication path for the isolated HOME'
     if part_c_has_seedable_auth; then
@@ -1678,6 +1867,7 @@ EOF
 
     export HOME="$PART_C_HOME"
     export PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH"
+    export AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT"
     cd "$PART_C_PROJECT"
 
     step_start C.3 'initialize isolated AMQ and install the release-candidate skill'
@@ -1745,16 +1935,16 @@ After both harnesses are ready:
 
 Then ask each harness exactly:
 
-  What does `ambiguous` mean in agentctl status, and which commands refuse on it?
+  What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?
 
-Expected meaning: more than one window has the role's exact name, no window is
-selected as real, and role-targeted `clear` and `compact` refuse until an
-operator repairs the ambiguity with raw tmux.
+Expected meaning: `kill(pid, 0)` returned `EPERM`; that claims neither child
+absence nor ownership. It does not authorize relaunch because only
+`stale-record` or `missing` can authorize relaunch.
 
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
 EOF
-    if ! "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
+    if ! env -u TMUX -u TMUX_PANE TERM_PROGRAM=iTerm.app "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
       step_fail C.4 'skill fleet attach failed'
       part_c_abort 'Part C attach guidance failed'
     fi
@@ -1787,8 +1977,8 @@ EOF
       part_c_abort 'Part C skill inventory checkpoint failed'
     fi
 
-    meaning_expected='ambiguous means more than one exact-name role window exists, no window is selected as real, and clear and compact refuse until raw tmux repairs it.'
-    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
+    meaning_expected='present-not-ours means kill(pid, 0) returned EPERM; that claims neither child absence nor ownership, and it does not authorize relaunch because only stale-record or missing can authorize relaunch.'
+    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for present-not-ours and its refusal to authorize relaunch?'; then
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
     else
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER

@@ -11,6 +11,6 @@
 - Claude clear: operator confirmed: y
 - Codex clear: operator confirmed: y
 - Compact (claude): operator confirmed: y
-- Relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y
 - Teardown status: exit 3 (session absent; other tmux sessions remained)
 - Teardown check: PASS

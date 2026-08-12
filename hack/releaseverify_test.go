@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -480,6 +481,7 @@ type liveFixture struct {
 	environmentLog         string
 	evidenceDirLog         string
 	partCRootLog           string
+	sighupProbeLog         string
 	operatorHome           string
 	keychainTarget         string
 	keychainSentinel       string
@@ -522,8 +524,10 @@ func newLiveFixture(t *testing.T) liveFixture {
 	environmentLog := filepath.Join(t.TempDir(), "environment.log")
 	evidenceDirLog := filepath.Join(t.TempDir(), "evidence-dir.log")
 	partCRootLog := filepath.Join(t.TempDir(), "part-c-root.log")
+	sighupProbeLog := filepath.Join(t.TempDir(), "sighup-probe.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
+	agentctlRoleA := filepath.Join(t.TempDir(), "role-a")
 	agentctlRoleB := filepath.Join(t.TempDir(), "role-b")
 	agentctlRelaunched := filepath.Join(t.TempDir(), "relaunched")
 	keeperOwned := filepath.Join(t.TempDir(), "keeper-owned")
@@ -542,6 +546,39 @@ func newLiveFixture(t *testing.T) liveFixture {
 			t.Fatal(err)
 		}
 	}
+	sighupProbe := `#!/usr/bin/env bash
+set -eu
+[ "$#" -eq 4 ] || { echo 'probe-shim-sighup: expected --harness and --output' >&2; exit 64; }
+[ "$1" = --harness ] || exit 64
+harness=$2
+[ "$3" = --output ] || exit 64
+output=$4
+case "$harness" in claude|codex) ;; *) exit 64 ;; esac
+case "$output" in /*) ;; *) exit 64 ;; esac
+[ ! -e "$output" ] || exit 64
+printf '%s|%s\n' "$harness" "$output" >>"$AGENTCTL_TEST_SIGHUP_PROBE_LOG"
+case "$harness" in
+  claude) harness_version='2.1.220 (Claude Code)' ;;
+  codex) harness_version='codex-cli 0.146.0' ;;
+esac
+cat >"$output" <<PROBE_OUTPUT
+harness=$harness
+harness_version=$harness_version
+topology=shim-parent-of-harness-child-on-pty
+shim_pid=123
+child_pid=124
+child_ppid_matches=true
+child_tty=ttys999
+child_command=/fixture/bin/$harness
+signal_target=owned-shim-only
+signal=SIGHUP
+shim_terminated=true
+child_outcome=terminated
+default_tmux_targeted=false
+PROBE_OUTPUT
+echo "probe-shim-sighup: recorded $harness result in $output"
+`
+	writeTestFile(t, filepath.Join(dir, "hack/probe-shim-sighup.sh"), []byte(sighupProbe), 0o755)
 	keychainSentinel := filepath.Join(keychainTarget, "operator-login-keychain-sentinel")
 	writeTestFile(t, keychainSentinel, []byte("real-keychain-target-must-survive"), 0o600)
 	writeTestFile(t, filepath.Join(operatorHome, ".claude.json"), []byte(fakeClaudeAuthBody), 0o600)
@@ -552,6 +589,10 @@ set -u
 printf '%s\n' "$*" >>"$AGENTCTL_TEST_LOG"
 case "$*" in
   skill\ install|launch\ --session\ skillverify\ *|attach\ --session\ skillverify|kill\ --session\ skillverify)
+    if [ "${AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT:-0}" = 1 ] && [ "${AGENTCTL_RUNTIME_ROOT:-}" != "${HOME%/home}/runtime" ]; then
+      echo "Part C AGENTCTL_RUNTIME_ROOT=${AGENTCTL_RUNTIME_ROOT:-}" >&2
+      exit 2
+    fi
     printf '%s\t%s\t%s\t%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AGENTCTL_ENVIRONMENT_LOG"
     ;;
 esac
@@ -569,16 +610,18 @@ case "$1" in
       exit 0
     fi
     if [ -e "$AGENTCTL_TEST_OWNED" ]; then
-      echo 'SESSION ROLE HARNESS MODEL EFFORT PANE PROCESS STATE'
-      echo 'relverify a claude default default %5 2.1.220 running'
-      if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
+      echo 'SESSION ROLE HARNESS MODEL EFFORT CONFIDENCE SHIM CHILD PRESENTATION STATE FACTS'
+      if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
         if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-          echo "relverify b codex default high ${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12} codex running"
+          echo 'relverify a claude default default anchored 301 302 present running -'
+        elif kill -0 "$AGENTCTL_TEST_SHIM_PID" 2>/dev/null; then
+          echo "relverify a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
         else
-          echo 'relverify b codex default high %9 codex running'
+          echo "relverify a claude default default unanchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID absent stale-record ESRCH"
         fi
-      else
-        echo 'relverify b codex default high   missing'
+      fi
+      if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
+        echo 'relverify b codex default high anchored 205 206 present running -'
       fi
       exit 0
     fi
@@ -586,7 +629,7 @@ case "$1" in
       echo "${AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE:-agentctl: transport failure}" >&2
       exit "$AGENTCTL_TEST_STATUS_AFTER_KILL_CODE"
     fi
-    echo 'agentctl: session "relverify" not found' >&2
+    echo "${AGENTCTL_TEST_INITIAL_STATUS_MESSAGE:-agentctl: session \"relverify\" not found}" >&2
     exit 3
     ;;
   skill)
@@ -596,6 +639,22 @@ case "$1" in
     ;;
   launch)
     if [ "$3" = skillverify ]; then
+      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT:-0}" = 1 ] && [ ! -d "$HOME/Library/Application Support" ]; then
+        echo 'missing Part C Library/Application Support' >&2
+        exit 2
+      fi
+      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST:-0}" = 1 ]; then
+        expected_project=$(pwd -P)
+        expected_config=$(printf '[projects."%s"]\ntrust_level = "trusted"\n' "$expected_project")
+        actual_config=$(/bin/cat "$HOME/.codex/config.toml" 2>/dev/null) || {
+          echo 'missing Part C Codex trust config' >&2
+          exit 2
+        }
+        if [ "$actual_config" != "$expected_config" ] || [ "$(/usr/bin/stat -f '%Lp' "$HOME/.codex/config.toml")" != 600 ]; then
+          echo 'incorrect Part C Codex trust config' >&2
+          exit 2
+        fi
+      fi
       : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
       if [ -f "$HOME/.claude.json" ]; then
         /bin/cp "$HOME/.claude.json" "$AGENTCTL_TEST_CLAUDE_CONFIG_LOG"
@@ -632,6 +691,7 @@ case "$1" in
       exit 3
     fi
     touch "$AGENTCTL_TEST_OWNED"
+    touch "$AGENTCTL_TEST_ROLE_A"
     touch "$AGENTCTL_TEST_ROLE_B"
     echo 'launched relverify'
     ;;
@@ -639,11 +699,14 @@ case "$1" in
     echo "delivered $1"
     ;;
   relaunch)
-    touch "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
-    pane_id=${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}
-    echo "agentctl: relaunched b in relverify: window @11, pane $pane_id, harness codex (stored), model default (stored), effort high (stored), dir $PWD (stored)"
+    touch "$AGENTCTL_TEST_ROLE_A" "$AGENTCTL_TEST_RELAUNCHED"
+    echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
     ;;
   attach)
+    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
+      echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-} TMUX=${TMUX:-} TMUX_PANE=${TMUX_PANE:-}" >&2
+      exit 2
+    fi
     if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_PART_C_ATTACH_FAIL:-0}" = 1 ]; then
       echo 'attach failed' >&2
       exit 1
@@ -669,9 +732,20 @@ case "$1" in
       rm -f "$AGENTCTL_TEST_SKILL_OWNED"
       touch "$AGENTCTL_TEST_SKILL_KILLED"
     else
-      if [ "${AGENTCTL_TEST_PART_B_KILL_CODE:-0}" -ne 0 ]; then
+      code=${AGENTCTL_TEST_PART_B_KILL_CODE:-0}
+      if [ -n "${AGENTCTL_TEST_PART_B_KILL_CODES:-}" ]; then
+        calls=0
+        [ ! -e "$AGENTCTL_TEST_PART_B_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_B_KILL_CALLS")
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_B_KILL_CALLS"
+        IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_B_KILL_CODES"
+        index=$((calls - 1))
+        [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
+        code=${codes[$index]}
+      fi
+      if [ "$code" -ne 0 ]; then
         echo 'simulated relverify kill failure' >&2
-        exit "$AGENTCTL_TEST_PART_B_KILL_CODE"
+        exit "$code"
       fi
       rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
       touch "$AGENTCTL_TEST_KILLED"
@@ -758,17 +832,16 @@ case "$1" in
     touch "$AGENTCTL_TEST_KEEPER_KILLED"
     ;;
   list-windows)
-    if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
+    if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
       if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-        printf '@11\t%s\tb\n' "${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}"
+        printf '@11\t%s\ta\n' "${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}"
       else
-        printf '@8\t%%9\tb\n'
+        printf '@7\t%%5\ta\n'
       fi
     fi
-    ;;
-  kill-window)
-    [ "$2" = -t ] && [ "$3" = @8 ] || exit 65
-    rm -f "$AGENTCTL_TEST_ROLE_B"
+    if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
+      printf '@8\t%%9\tb\n'
+    fi
     ;;
   *)
     exit 64
@@ -884,8 +957,10 @@ esac
 	t.Setenv("AGENTCTL_TEST_ENVIRONMENT_LOG", environmentLog)
 	t.Setenv("AGENTCTL_TEST_EVIDENCE_DIR_LOG", evidenceDirLog)
 	t.Setenv("AGENTCTL_TEST_PART_C_ROOT_LOG", partCRootLog)
+	t.Setenv("AGENTCTL_TEST_SIGHUP_PROBE_LOG", sighupProbeLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
+	t.Setenv("AGENTCTL_TEST_ROLE_A", agentctlRoleA)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
 	t.Setenv("AGENTCTL_TEST_KEEPER_OWNED", keeperOwned)
@@ -893,6 +968,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILLED", filepath.Join(t.TempDir(), "skill-killed"))
 	t.Setenv("AGENTCTL_TEST_PART_C_KILL_CALLS", filepath.Join(t.TempDir(), "skill-kill-calls"))
+	t.Setenv("AGENTCTL_TEST_PART_B_KILL_CALLS", filepath.Join(t.TempDir(), "relverify-kill-calls"))
 	t.Setenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED", filepath.Join(t.TempDir(), "skill-socket-killed"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS", filepath.Join(t.TempDir(), "skill-kill-server-calls"))
 	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
@@ -911,9 +987,28 @@ esac
 		environmentLog:         environmentLog,
 		evidenceDirLog:         evidenceDirLog,
 		partCRootLog:           partCRootLog,
+		sighupProbeLog:         sighupProbeLog,
 		operatorHome:           operatorHome,
 		keychainTarget:         keychainTarget,
 		keychainSentinel:       keychainSentinel,
+	}
+}
+
+func TestLiveVerificationSuppliesEachHarnessContractToSIGHUPProbe(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification did not satisfy the SIGHUP probe argument contract: %v\n%s", err, output)
+	}
+	invocations := strings.Split(strings.TrimSpace(readTestFile(t, fixture.sighupProbeLog)), "\n")
+	if len(invocations) != 2 || !strings.HasPrefix(invocations[0], "claude|") || !strings.HasPrefix(invocations[1], "codex|") {
+		t.Fatalf("SIGHUP probe invocations = %q, want exactly claude then codex", invocations)
+	}
+	for _, invocation := range invocations {
+		parts := strings.SplitN(invocation, "|", 2)
+		if len(parts) != 2 || !filepath.IsAbs(parts[1]) {
+			t.Fatalf("SIGHUP probe invocation did not receive an absolute output path: %q", invocation)
+		}
 	}
 }
 
@@ -935,10 +1030,50 @@ func runCommand(t *testing.T, dir, name string, arguments ...string) {
 
 func (fixture liveFixture) run(t *testing.T, input string, environment ...string) (string, error) {
 	t.Helper()
+	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
+	shimScript := `child_pid=''
+on_hup() {
+  kill -HUP "$child_pid"
+  wait "$child_pid"
+  exit 0
+}
+trap on_hup HUP
+sleep 60 &
+child_pid=$!
+printf '%s\n' "$child_pid" >"$1"
+wait "$child_pid"`
+	shimProcess := exec.Command("bash", "-c", shimScript, "releaseverify-fixture", childPIDFile)
+	if err := shimProcess.Start(); err != nil {
+		t.Fatal(err)
+	}
+	shimDone := make(chan struct{})
+	go func() {
+		_ = shimProcess.Wait()
+		close(shimDone)
+	}()
+	defer func() {
+		_ = shimProcess.Process.Kill()
+		<-shimDone
+	}()
+	var childPID string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(childPIDFile)
+		if err == nil && strings.TrimSpace(string(body)) != "" {
+			childPID = strings.TrimSpace(string(body))
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if childPID == "" {
+		t.Fatal("fixture shim did not report its child PID")
+	}
 	command := exec.Command("bash", "hack/release-verify.sh", "--non-interactive")
 	command.Dir = fixture.dir
 	command.Stdin = strings.NewReader(input)
-	command.Env = append(os.Environ(), environment...)
+	command.Env = append(os.Environ(), "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
+	command.Env = append(command.Env, "AGENTCTL_TEST_CHILD_PID="+childPID)
+	command.Env = append(command.Env, environment...)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
@@ -978,7 +1113,9 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"=== Part C — Live skill discovery and meaning ===",
 		"harness lists the agentctl skill",
 		"probe answer matches references/status-states.md",
-		"no window is selected as real",
+		"What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?",
+		"kill(pid, 0) returned EPERM",
+		"only stale-record or missing can authorize relaunch",
 		"press esc to detach cleanly; do not use uppercase X",
 		"ALL VERIFIED — evidence appended",
 	} {
@@ -1024,7 +1161,7 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"clear --session relverify b",
 		"compact --session relverify a",
 		"status --session relverify",
-		"relaunch --session relverify b",
+		"relaunch --session relverify a",
 		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
@@ -1110,6 +1247,80 @@ func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) 
 	}
 	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KILLED")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("fixture falsely marked relverify killed: %v", statErr)
+	}
+}
+
+func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_PART_B_KILL_CODES=9,5,0",
+	)
+	if err != nil {
+		t.Fatalf("release verification did not recover from transient Part B child observation: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"PART B CLEANUP OBSERVED (relverify kill exited 9; retrying within bounded observation window)",
+		"PART B CLEANUP PASS (relverify kill retry exited 0)",
+		"ALL VERIFIED — evidence appended",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_B_KILL_CALLS"))); got != "3" {
+		t.Fatalf("Part B kill call count = %q, want 3", got)
+	}
+}
+
+func TestLiveVerificationCreatesPartCUserConfigRoot(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT=1",
+	)
+	if err != nil {
+		t.Fatalf("release verification omitted the isolated user-config root: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
+		t.Fatalf("release verification did not complete after creating user-config root:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCAttachDeclaresITermEnvironment(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_REQUIRE_PART_C_ITERM=1",
+		"TERM_PROGRAM=tmux",
+		"TMUX=fixture-tmux",
+		"TMUX_PANE=%28",
+	)
+	if err != nil {
+		t.Fatalf("release verification omitted Part C iTerm attach environment: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
+		t.Fatalf("release verification did not complete with pinned Part C iTerm environment:\n%s", output)
+	}
+}
+
+func TestLiveVerificationRetriesPartCKillAfterSocketRemoval(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 12)+"n\n",
+		"AGENTCTL_TEST_PART_C_KILL_CODES=9,0",
+	)
+	if err == nil {
+		t.Fatalf("release verification accepted refused Part C checkpoint:\n%s", output)
+	}
+	for _, want := range []string{
+		"PART C CLEANUP FAIL (skillverify kill)",
+		"PART C CLEANUP PASS (named tmux socket killed)",
+		"PART C CLEANUP PASS (skillverify kill retry after socket removal)",
+		"PART C CLEANUP PASS (temporary root removed)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_C_KILL_CALLS"))); got != "2" {
+		t.Fatalf("Part C kill call count = %q, want 2", got)
 	}
 }
 
@@ -1218,6 +1429,39 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 		if strings.Contains(output, impossible) {
 			t.Fatalf("output gives impossible or operator-owned Part C attach guidance %q:\n%s", impossible, output)
 		}
+	}
+}
+
+func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	seed := "Before the compact spot check, create compactable context in the claude tab:"
+	firstPrompt := "Reply with FIRST READY and one sentence about this repository."
+	firstWait := "Wait for Claude's complete response, then submit this second message:"
+	secondPrompt := "Reply with SECOND READY and one different sentence about testing this repository."
+	secondWait := "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
+	checkpoint := "[CHECKPOINT B.C6] claude compact setup"
+	positions := []int{
+		strings.Index(output, seed),
+		strings.Index(output, firstPrompt),
+		strings.Index(output, firstWait),
+		strings.Index(output, secondPrompt),
+		strings.Index(output, secondWait),
+		strings.Index(output, checkpoint),
+	}
+	for index, position := range positions {
+		if position < 0 {
+			t.Fatalf("output missing compact-context instruction %d:\n%s", index, output)
+		}
+		if index > 0 && position <= positions[index-1] {
+			t.Fatalf("compact-context instructions are out of order: positions=%v\n%s", positions, output)
+		}
+	}
+	if !strings.Contains(output, "Claude's two responses are complete, and junk is visible in the claude input without being submitted.") {
+		t.Fatalf("B.C6 does not require both compactable context and unsent junk:\n%s", output)
 	}
 }
 
@@ -1467,6 +1711,22 @@ func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testin
 		if fields[2] == os.Getenv("HOME") || !strings.HasPrefix(fields[3], wantPathPrefix) {
 			t.Fatalf("Part C agentctl boundary could reach the real HOME or unshimmed tmux context: %q", record)
 		}
+	}
+}
+
+func TestLiveVerificationPartCPinsPrivateRuntimeRoot(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT=1")
+	if err != nil {
+		t.Fatalf("release verification did not pin Part C to its private runtime root: %v\n%s", err, output)
+	}
+}
+
+func TestLiveVerificationPartCSeedsCodexFixtureTrust(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST=1")
+	if err != nil {
+		t.Fatalf("release verification did not seed deterministic Codex trust for its fixture project: %v\n%s", err, output)
 	}
 }
 
@@ -1831,20 +2091,16 @@ func TestLiveVerificationRejectsAttachNarrationAndTearsDown(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
+func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
-	canonicalDir, canonicalErr := filepath.EvalSymlinks(fixture.dir)
-	if canonicalErr != nil {
-		t.Fatal(canonicalErr)
-	}
 	for _, want := range []string{
-		"RELAUNCH PASS (role b reported missing after exact-ID removal)",
-		"agentctl: relaunched b in relverify: window @11, pane %12, harness codex (stored), model default (stored), effort high (stored), dir " + canonicalDir + " (stored)",
-		"RELAUNCH PASS (role b restored to running)",
+		"RELAUNCH PASS (role a relaunched through the ESRCH-gated command)",
+		`agentctl: relaunched role "a" in session "relverify"; the shim is ready`,
+		"RELAUNCH PASS (role a restored to running)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -1858,7 +2114,7 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		"clear --session relverify b",
 		"compact --session relverify a",
 		"status --session relverify",
-		"relaunch --session relverify b",
+		"relaunch --session relverify a",
 		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
@@ -1873,9 +2129,8 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 	wantTmux := []string{
 		"-V",
 		"list-sessions -F #{session_id}\t#{session_name}",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{@agentctl_role}",
-		"kill-window -t @8",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{@agentctl_role}",
+		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
+		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
 	}
 	gotTmux := fixture.tmuxCalls(t)
 	if len(gotTmux) != len(wantTmux)+1 || strings.Join(gotTmux[:len(wantTmux)], "\n") != strings.Join(wantTmux, "\n") || !strings.HasPrefix(gotTmux[len(wantTmux)], "-L agentctl-skill-verify-") || !strings.HasSuffix(gotTmux[len(wantTmux)], " kill-server") {
@@ -1886,11 +2141,48 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"- Checkpoint B.C9 relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y",
+		"- Checkpoint B.C9 relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y",
 		"- Teardown status: exit 3 (session absent; other tmux sessions remained)",
 	} {
 		if !strings.Contains(string(notes), want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
+		}
+	}
+}
+
+func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	var roleResolutionCall string
+	for _, call := range fixture.tmuxCalls(t) {
+		if strings.HasPrefix(call, "list-windows -t $4 -F ") {
+			roleResolutionCall = call
+			break
+		}
+	}
+	if roleResolutionCall == "" {
+		t.Fatalf("tmux calls omit exact-session role-window resolution:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
+	}
+	if !strings.Contains(roleResolutionCall, "#{window_name}") || strings.Contains(roleResolutionCall, "#{@agentctl_role}") {
+		t.Fatalf("role-window resolution uses stale metadata instead of the exact window name: %q", roleResolutionCall)
+	}
+}
+
+func TestLiveVerificationWaitsForRecordedClaudeChildAbsenceBeforeOneRelaunch(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification did not wait for recorded child absence: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"RELAUNCH PASS (recorded role a child no longer responds to signal 0)",
+		"RELAUNCH PASS (role a relaunched through the ESRCH-gated command)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("release verification omitted %q:\n%s", want, output)
 		}
 	}
 }
@@ -1902,8 +2194,8 @@ func TestLiveVerificationPairsNewPaneWithFreshInputObservation(t *testing.T) {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"In the codex tab, type junk into the input box again; do NOT press Enter.",
-		"RELAUNCH PASS (role b pane changed from %9 to %12)",
+		"In the claude tab, type junk into the input box again; do NOT press Enter.",
+		"RELAUNCH PASS (role a pane changed from %5 to %12)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -1914,7 +2206,7 @@ the fleet's stored configuration. The new pane is a new process: its harness,
 model and effort carry over; its conversation does not, so the junk you typed
 is gone.
 
-Do you see a fresh, ready codex input surface with no trace of that junk?`
+Do you see a fresh, ready claude input surface with no trace of that junk?`
 	if !strings.Contains(output, wantPrompt) {
 		t.Fatalf("release verifier missing final relaunch prompt:\n%s", wantPrompt)
 	}
@@ -1922,11 +2214,11 @@ Do you see a fresh, ready codex input surface with no trace of that junk?`
 
 func TestLiveVerificationRejectsReusedRelaunchPaneID(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_RELAUNCHED_PANE_ID=%9")
+	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_RELAUNCHED_PANE_ID=%5")
 	if err == nil {
 		t.Fatalf("release verification accepted reused pane ID:\n%s", output)
 	}
-	if !strings.Contains(output, "RELAUNCH FAIL (recreated role b reused original pane %9)") {
+	if !strings.Contains(output, "RELAUNCH FAIL (recreated role a reused original pane %5)") {
 		t.Fatalf("output missing reused-pane failure:\n%s", output)
 	}
 }
@@ -2107,6 +2399,17 @@ func TestLiveVerificationAcceptsNoServerStatusAsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(string(notes), "- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)") {
 		t.Fatalf("notes did not record expected exit 6 outcome:\n%s", notes)
+	}
+}
+
+func TestLiveVerificationAcceptsMissingDurableFleetAsAbsent(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_INITIAL_STATUS_MESSAGE=agentctl: session \"relverify\" has no durable fleet configuration")
+	if err != nil {
+		t.Fatalf("missing durable fleet was not accepted as absence: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "[PASS B.1] release-candidate fleet launched") {
+		t.Fatalf("Part B did not launch after observed fleet absence:\n%s", output)
 	}
 }
 

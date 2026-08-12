@@ -36,6 +36,30 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-12
+
+- agentctl: `agentctl 21cfecf`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.228 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.Ui9Fw8/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 attach narration: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 detach: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
+- Teardown check: PASS
+
 ### 2026-08-11
 
 Issue #182 Task 8 implementation evidence (pre-PR release-candidate run):

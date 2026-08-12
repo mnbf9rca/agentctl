@@ -49,6 +49,26 @@ func TestRelayKeepsReadingChildOutputAfterOperatorInputEOF(t *testing.T) {
 	}
 }
 
+func TestRelayCompletesPartialOperatorOutputWrites(t *testing.T) {
+	childBytes := []byte("child output larger than one destination write")
+	operatorOutput := &shortWriter{limit: 5}
+	relay := NewRelay(
+		&scriptedReader{steps: []readStep{{err: io.EOF}}},
+		operatorOutput,
+		&scriptedEndpoint{reader: scriptedReader{steps: []readStep{
+			{value: childBytes},
+			{err: io.EOF},
+		}}},
+	)
+
+	if err := relay.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := operatorOutput.bytes(); !bytes.Equal(got, childBytes) {
+		t.Fatalf("operator output = %q, want %q", got, childBytes)
+	}
+}
+
 func TestRelayCancelsBothDirectionsWhenContextEnds(t *testing.T) {
 	operatorInput := &blockingReader{done: make(chan struct{})}
 	master := &blockingEndpoint{done: make(chan struct{})}
@@ -450,6 +470,27 @@ func (e *roundTripEndpoint) written() []byte {
 type bufferWriter struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
+}
+
+type shortWriter struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (w *shortWriter) Write(_ context.Context, value []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(value) > w.limit {
+		value = value[:w.limit]
+	}
+	return w.buffer.Write(value)
+}
+
+func (w *shortWriter) bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.buffer.Bytes()...)
 }
 
 func (w *bufferWriter) Write(_ context.Context, value []byte) (int, error) {

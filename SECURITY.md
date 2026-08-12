@@ -244,10 +244,13 @@ payloads on control registry entries, and the single shell-composition site.
 ## Release verifier credential handling
 
 `hack/release-verify.sh` uses isolated temporary HOME and tmux resources. On
-macOS it may copy only `~/.codex/auth.json` after explicit consent. For Claude,
-it separately offers an exact temporary `Library/Keychains` symlink to the
-operator's real Keychains and states that probe harnesses can reach the login
-keychain through it; with that consent it synthesizes only mode-`0600`
+macOS it synthesizes a mode-`0600` `.codex/config.toml` containing only the
+canonical throwaway project path marked trusted, so Codex does not stop at a
+fixture trust prompt. It may copy only `~/.codex/auth.json` after explicit
+consent and never reads or copies the operator's real Codex configuration. For
+Claude, it separately offers an exact temporary `Library/Keychains` symlink to
+the operator's real Keychains and states that probe harnesses can reach the
+login keychain through it; with that consent it synthesizes only mode-`0600`
 `{"hasCompletedOnboarding":true}` in the temporary `.claude.json`. It never
 reads or copies the operator's real Claude configuration or Keychain data.
 
