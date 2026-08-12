@@ -1281,6 +1281,29 @@ func TestLiveVerificationPartCAttachDeclaresITermEnvironment(t *testing.T) {
 	}
 }
 
+func TestLiveVerificationRetriesPartCKillAfterSocketRemoval(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 12)+"n\n",
+		"AGENTCTL_TEST_PART_C_KILL_CODES=9,0",
+	)
+	if err == nil {
+		t.Fatalf("release verification accepted refused Part C checkpoint:\n%s", output)
+	}
+	for _, want := range []string{
+		"PART C CLEANUP FAIL (skillverify kill)",
+		"PART C CLEANUP PASS (named tmux socket killed)",
+		"PART C CLEANUP PASS (skillverify kill retry after socket removal)",
+		"PART C CLEANUP PASS (temporary root removed)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_C_KILL_CALLS"))); got != "2" {
+		t.Fatalf("Part C kill call count = %q, want 2", got)
+	}
+}
+
 func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n")

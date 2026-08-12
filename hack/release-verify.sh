@@ -290,10 +290,6 @@ part_c_teardown() {
     if [ "$socket_status" -eq 0 ]; then
       printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
       PART_C_SOCKET_ARMED=0
-      if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
-        printf 'PART C CLEANUP OBSERVED (named tmux socket removal proves skillverify absent)\n'
-        PART_C_SESSION_OWNED=0
-      fi
     elif part_c_named_socket_absent "$socket_output"; then
       # Accept only tmux's complete single-line response for this internally
       # named socket when it was armed but no server was ever created.
@@ -302,6 +298,16 @@ part_c_teardown() {
       PART_C_SESSION_OWNED=0
     else
       printf 'PART C CLEANUP FAIL (named tmux socket kill-server exited %s): %s\n' "$socket_status" "$socket_output" >&2
+      teardown_status=1
+    fi
+  fi
+  if [ "$PART_C_SESSION_OWNED" -eq 1 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
+    if part_c_kill_session; then
+      printf 'PART C CLEANUP PASS (skillverify kill retry after socket removal)\n'
+      PART_C_SESSION_OWNED=0
+      teardown_status=0
+    else
+      printf 'PART C CLEANUP FAIL (skillverify kill retry after socket removal)\n' >&2
       teardown_status=1
     fi
   fi
