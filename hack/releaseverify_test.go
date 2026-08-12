@@ -1276,6 +1276,35 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 	}
 }
 
+func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	seed := "Before the compact spot check, create compactable context in the claude tab:"
+	prompt := "Reply with READY and one sentence about this repository."
+	wait := "Wait for Claude's complete response. Then type junk into the input box; do NOT press Enter."
+	checkpoint := "[CHECKPOINT B.C6] claude compact setup"
+	positions := []int{
+		strings.Index(output, seed),
+		strings.Index(output, prompt),
+		strings.Index(output, wait),
+		strings.Index(output, checkpoint),
+	}
+	for index, position := range positions {
+		if position < 0 {
+			t.Fatalf("output missing compact-context instruction %d:\n%s", index, output)
+		}
+		if index > 0 && position <= positions[index-1] {
+			t.Fatalf("compact-context instructions are out of order: positions=%v\n%s", positions, output)
+		}
+	}
+	if !strings.Contains(output, "Claude's response is complete, and junk is visible in the claude input without being submitted.") {
+		t.Fatalf("B.C6 does not require both compactable context and unsent junk:\n%s", output)
+	}
+}
+
 func TestLiveVerificationRequiresAMQBeforePartB(t *testing.T) {
 	fixture := newLiveFixture(t)
 	if err := os.Remove(filepath.Join(fixture.dir, "stubs", "amq")); err != nil {
