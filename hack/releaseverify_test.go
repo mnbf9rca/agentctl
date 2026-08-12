@@ -708,9 +708,20 @@ case "$1" in
       rm -f "$AGENTCTL_TEST_SKILL_OWNED"
       touch "$AGENTCTL_TEST_SKILL_KILLED"
     else
-      if [ "${AGENTCTL_TEST_PART_B_KILL_CODE:-0}" -ne 0 ]; then
+      code=${AGENTCTL_TEST_PART_B_KILL_CODE:-0}
+      if [ -n "${AGENTCTL_TEST_PART_B_KILL_CODES:-}" ]; then
+        calls=0
+        [ ! -e "$AGENTCTL_TEST_PART_B_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_B_KILL_CALLS")
+        calls=$((calls + 1))
+        printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_B_KILL_CALLS"
+        IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_B_KILL_CODES"
+        index=$((calls - 1))
+        [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
+        code=${codes[$index]}
+      fi
+      if [ "$code" -ne 0 ]; then
         echo 'simulated relverify kill failure' >&2
-        exit "$AGENTCTL_TEST_PART_B_KILL_CODE"
+        exit "$code"
       fi
       rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
       touch "$AGENTCTL_TEST_KILLED"
@@ -933,6 +944,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILLED", filepath.Join(t.TempDir(), "skill-killed"))
 	t.Setenv("AGENTCTL_TEST_PART_C_KILL_CALLS", filepath.Join(t.TempDir(), "skill-kill-calls"))
+	t.Setenv("AGENTCTL_TEST_PART_B_KILL_CALLS", filepath.Join(t.TempDir(), "relverify-kill-calls"))
 	t.Setenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED", filepath.Join(t.TempDir(), "skill-socket-killed"))
 	t.Setenv("AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS", filepath.Join(t.TempDir(), "skill-kill-server-calls"))
 	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
@@ -1209,6 +1221,28 @@ func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) 
 	}
 	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KILLED")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("fixture falsely marked relverify killed: %v", statErr)
+	}
+}
+
+func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_PART_B_KILL_CODES=9,0",
+	)
+	if err != nil {
+		t.Fatalf("release verification did not recover from transient Part B child observation: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"PART B CLEANUP OBSERVED (relverify kill exited 9; retrying once)",
+		"PART B CLEANUP PASS (relverify kill retry exited 0)",
+		"ALL VERIFIED — evidence appended",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
+	}
+	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_B_KILL_CALLS"))); got != "2" {
+		t.Fatalf("Part B kill call count = %q, want 2", got)
 	}
 }
 

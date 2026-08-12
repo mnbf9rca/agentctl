@@ -168,6 +168,18 @@ part_b_teardown() {
   else
     kill_status=$?
   fi
+  if [ "$kill_status" -eq 9 ]; then
+    printf 'PART B CLEANUP OBSERVED (%s kill exited 9; retrying once)\n' "$PART_B_SESSION"
+    if "$PART_B_TOP/bin/agentctl" kill --session "$PART_B_SESSION"; then
+      printf 'PART B CLEANUP PASS (%s kill retry exited 0)\n' "$PART_B_SESSION"
+      PART_B_SESSION_OWNED=0
+      return 0
+    else
+      kill_status=$?
+    fi
+    printf 'PART B CLEANUP FAIL (%s kill retry exited %s)\n' "$PART_B_SESSION" "$kill_status" >&2
+    return 1
+  fi
   printf 'PART B CLEANUP FAIL (%s kill exited %s)\n' "$PART_B_SESSION" "$kill_status" >&2
   return 1
 }
