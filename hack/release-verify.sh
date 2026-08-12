@@ -483,6 +483,28 @@ assert_role_state() {
   [ "$states" = "$expected" ]
 }
 
+wait_role_state() {
+  local session_name=$1
+  local role=$2
+  local expected=$3
+  local output_file=$4
+  local attempt=0
+  local states
+  while [ "$attempt" -lt 100 ]; do
+    if ./bin/agentctl status --session "$session_name" >"$output_file"; then
+      states=$(awk -v session="$session_name" -v role="$role" '$1 == session && $2 == role { print $NF }' "$output_file")
+      if [ "$states" = "$expected" ]; then
+        cat "$output_file"
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  cat "$output_file"
+  return 1
+}
+
 # Markdown backticks below are literal; command substitution is deliberately
 # suppressed throughout this function. One function-level directive replaces
 # what would otherwise be a repeated per-line disable comment.
@@ -1453,7 +1475,7 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
     echo '  ./bin/agentctl status --session relverify'
-    if assert_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
+    if wait_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
       echo 'RELAUNCH PASS (role b reported missing after exact-ID removal)'
       step_pass B.7 'missing-role state observed'
     else

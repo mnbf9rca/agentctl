@@ -613,7 +613,19 @@ case "$1" in
           echo 'relverify b codex default high %9 codex running'
         fi
       else
-        echo 'relverify b codex default high   missing'
+        if [ "${AGENTCTL_TEST_TRANSIENT_ROLE_B_STATE:-0}" = 1 ]; then
+          calls=0
+          [ ! -e "$AGENTCTL_TEST_ROLE_B_STATUS_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_ROLE_B_STATUS_CALLS")
+          calls=$((calls + 1))
+          printf '%s\n' "$calls" >"$AGENTCTL_TEST_ROLE_B_STATUS_CALLS"
+          if [ "$calls" -eq 1 ]; then
+            echo 'relverify b codex default high %9 agentctl answerer-disagreement'
+          else
+            echo 'relverify b codex default high   missing'
+          fi
+        else
+          echo 'relverify b codex default high   missing'
+        fi
       fi
       exit 0
     fi
@@ -2001,6 +2013,24 @@ func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
 	}
 	if !strings.Contains(roleResolutionCall, "#{window_name}") || strings.Contains(roleResolutionCall, "#{@agentctl_role}") {
 		t.Fatalf("role-window resolution uses stale metadata instead of the exact window name: %q", roleResolutionCall)
+	}
+}
+
+func TestLiveVerificationWaitsForShimCleanupBeforeMissingRelaunch(t *testing.T) {
+	fixture := newLiveFixture(t)
+	statusCalls := filepath.Join(t.TempDir(), "role-b-status-calls")
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_TRANSIENT_ROLE_B_STATE=1",
+		"AGENTCTL_TEST_ROLE_B_STATUS_CALLS="+statusCalls,
+	)
+	if err != nil {
+		t.Fatalf("release verification did not wait through transient shim cleanup: %v\n%s", err, output)
+	}
+	if got := strings.TrimSpace(readTestFile(t, statusCalls)); got != "2" {
+		t.Fatalf("role-b status attempts = %q, want 2 (transient then missing)\n%s", got, output)
+	}
+	if !strings.Contains(output, "RELAUNCH PASS (role b reported missing after exact-ID removal)") {
+		t.Fatalf("release verification omitted final missing observation:\n%s", output)
 	}
 }
 
