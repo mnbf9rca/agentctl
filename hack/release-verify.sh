@@ -583,7 +583,7 @@ render_results() {
       printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-      printf -- '- Checkpoint B.C9 relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+      printf -- '- Checkpoint B.C9 relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
       printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
       if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
@@ -619,7 +619,7 @@ render_results() {
       printf -- '- Claude clear: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
       printf -- '- Codex clear: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
       printf -- '- Compact (claude): operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-      printf -- '- Relaunch: %s; fresh codex input with no junk: operator confirmed: %s\n' \
+      printf -- '- Relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
     fi
     case "$(field teardown_status_exit "$metadata")" in
@@ -1472,22 +1472,22 @@ EOF
     if ! resolve_live_session_id "$LIVE_SESSION"; then
       echo 'RELAUNCH FAIL (could not resolve relverify to one exact tmux session ID)'
       LIVE_STATUS=1
-    elif ! resolve_role_window "$LIVE_SESSION_ID" b; then
-      echo 'RELAUNCH FAIL (could not resolve role b to one exact tmux window and pane ID)'
+    elif ! resolve_role_window "$LIVE_SESSION_ID" a; then
+      echo 'RELAUNCH FAIL (could not resolve role a to one exact tmux window and pane ID)'
       LIVE_STATUS=1
-    elif ! resolve_running_role_processes "$LIVE_SESSION" b "$ARTIFACT_DIR/relaunch-before.status"; then
-      echo 'RELAUNCH FAIL (could not resolve role b to one running shim and child PID)'
+    elif ! resolve_running_role_processes "$LIVE_SESSION" a "$ARTIFACT_DIR/relaunch-before.status"; then
+      echo 'RELAUNCH FAIL (could not resolve role a to one running shim and child PID)'
       LIVE_STATUS=1
     else
       original_pane_id=$ROLE_PANE_ID
       original_shim_pid=$ROLE_SHIM_PID
       original_child_pid=$ROLE_CHILD_PID
-      echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
-    if checkpoint B.C8 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
+      echo 'In the claude tab, type junk into the input box again; do NOT press Enter.'
+    if checkpoint B.C8 'relaunch setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the relaunch process-discontinuity check?'; then
         echo 'Running exact-PID shim termination setup:'
-        printf '  kill -HUP %s  # role b shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
+        printf '  kill -HUP %s  # role a shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
         if ! kill -HUP "$original_shim_pid"; then
-          echo "RELAUNCH FAIL (could not signal role b shim PID $original_shim_pid)"
+          echo "RELAUNCH FAIL (could not signal role a shim PID $original_shim_pid)"
           LIVE_STATUS=1
         else
           step_pass B.6 'exact-PID role shim termination completed'
@@ -1500,22 +1500,22 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    printf '  kill -0 %s  # wait for recorded role b child absence\n' "$original_child_pid"
+    printf '  kill -0 %s  # wait for recorded role a child absence\n' "$original_child_pid"
     if wait_process_absent "$original_child_pid"; then
-      echo 'RELAUNCH PASS (recorded role b child no longer responds to signal 0)'
-      step_pass B.7 'recorded role b child absence observed'
+      echo 'RELAUNCH PASS (recorded role a child no longer responds to signal 0)'
+      step_pass B.7 'recorded role a child absence observed'
     else
-      echo "RELAUNCH FAIL (recorded role b child PID $original_child_pid still responds to signal 0)"
+      echo "RELAUNCH FAIL (recorded role a child PID $original_child_pid still responds to signal 0)"
       LIVE_STATUS=1
     fi
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl relaunch --session relverify b'
-    if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
+    echo '  ./bin/agentctl relaunch --session relverify a'
+    if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.stdout"; then
       cat "$ARTIFACT_DIR/relaunch.stdout"
-      echo 'RELAUNCH PASS (role b relaunched through the ESRCH-gated command)'
+      echo 'RELAUNCH PASS (role a relaunched through the ESRCH-gated command)'
       step_pass B.8 'ESRCH-gated relaunch command completed'
     else
       cat "$ARTIFACT_DIR/relaunch.stdout"
@@ -1525,16 +1525,16 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    if ! resolve_role_window "$LIVE_SESSION_ID" b; then
-      echo 'RELAUNCH FAIL (could not resolve the recreated role b window and pane IDs)'
+    if ! resolve_role_window "$LIVE_SESSION_ID" a; then
+      echo 'RELAUNCH FAIL (could not resolve the recreated role a window and pane IDs)'
       LIVE_STATUS=1
     elif [ "$ROLE_PANE_ID" = "$original_pane_id" ]; then
-      echo "RELAUNCH FAIL (recreated role b reused original pane $original_pane_id)"
+      echo "RELAUNCH FAIL (recreated role a reused original pane $original_pane_id)"
       LIVE_STATUS=1
     else
-      printf 'RELAUNCH PASS (role b pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
+      printf 'RELAUNCH PASS (role a pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
       step_pass B.9 'replacement pane ID differs from original'
-      expected_relaunch="agentctl: relaunched b in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness codex (stored), model default (stored), effort high (stored), dir $TOP (stored)"
+      expected_relaunch="agentctl: relaunched a in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness claude (stored), model default (stored), effort default (stored), dir $TOP (stored)"
       actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
       if [ "$actual_relaunch" != "$expected_relaunch" ]; then
         printf 'RELAUNCH FAIL (provenance output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
@@ -1546,11 +1546,11 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
     echo '  ./bin/agentctl status --session relverify'
-    if assert_role_state "$LIVE_SESSION" b running "$ARTIFACT_DIR/relaunch-running.status"; then
-      echo 'RELAUNCH PASS (role b restored to running)'
+    if assert_role_state "$LIVE_SESSION" a running "$ARTIFACT_DIR/relaunch-running.status"; then
+      echo 'RELAUNCH PASS (role a restored to running)'
       step_pass B.10 'recreated role is running'
     else
-      echo 'RELAUNCH FAIL (role b did not return to running)'
+      echo 'RELAUNCH FAIL (role a did not return to running)'
       LIVE_STATUS=1
     fi
   fi
@@ -1562,12 +1562,12 @@ the fleet's stored configuration. The new pane is a new process: its harness,
 model and effort carry over; its conversation does not, so the junk you typed
 is gone.
 
-Do you see a fresh, ready codex input surface with no trace of that junk?
+Do you see a fresh, ready claude input surface with no trace of that junk?
 EOF
 )
-    if checkpoint B.C9 'live delivery and relaunch' 'the replacement codex pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
+    if checkpoint B.C9 'live delivery and relaunch' 'the replacement claude pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
-      RELAUNCH_CHECK='PASS (stored codex/default/high provenance; pane ID changed)'
+      RELAUNCH_CHECK='PASS (stored claude/default/default provenance; pane ID changed)'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
