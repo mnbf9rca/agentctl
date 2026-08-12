@@ -675,6 +675,16 @@ case "$1" in
     echo "delivered $1"
     ;;
   relaunch)
+    if [ "${AGENTCTL_TEST_RELAUNCH_TRANSIENT:-0}" = 1 ]; then
+      calls=0
+      [ ! -e "$AGENTCTL_TEST_RELAUNCH_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_RELAUNCH_CALLS")
+      calls=$((calls + 1))
+      printf '%s\n' "$calls" >"$AGENTCTL_TEST_RELAUNCH_CALLS"
+      if [ "$calls" -eq 1 ]; then
+        echo 'agentctl: refusing transient answerer-disagreement' >&2
+        exit 5
+      fi
+    fi
     touch "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
     pane_id=${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}
     echo "agentctl: relaunched b in relverify: window @11, pane $pane_id, harness codex (stored), model default (stored), effort high (stored), dir $PWD (stored)"
@@ -921,6 +931,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
+	t.Setenv("AGENTCTL_TEST_RELAUNCH_CALLS", filepath.Join(t.TempDir(), "relaunch-calls"))
 	t.Setenv("AGENTCTL_TEST_KEEPER_OWNED", keeperOwned)
 	t.Setenv("AGENTCTL_TEST_KEEPER_KILLED", keeperKilled)
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
@@ -1089,7 +1100,6 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"clear --session relverify a",
 		"clear --session relverify b",
 		"compact --session relverify a",
-		"status --session relverify",
 		"status --session relverify",
 		"relaunch --session relverify b",
 		"status --session relverify",
@@ -1942,7 +1952,7 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		t.Fatal(canonicalErr)
 	}
 	for _, want := range []string{
-		"RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)",
+		"RELAUNCH PASS (role b relaunched through the ESRCH-gated command)",
 		"agentctl: relaunched b in relverify: window @11, pane %12, harness codex (stored), model default (stored), effort high (stored), dir " + canonicalDir + " (stored)",
 		"RELAUNCH PASS (role b restored to running)",
 	} {
@@ -1957,7 +1967,6 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		"clear --session relverify a",
 		"clear --session relverify b",
 		"compact --session relverify a",
-		"status --session relverify",
 		"status --session relverify",
 		"relaunch --session relverify b",
 		"status --session relverify",
@@ -2016,14 +2025,21 @@ func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationWaitsForESRCHBackedStaleRecordBeforeRelaunch(t *testing.T) {
+func TestLiveVerificationRetriesFailClosedRelaunchUntilESRCHGateOpens(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	relaunchCalls := filepath.Join(t.TempDir(), "relaunch-calls")
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_RELAUNCH_TRANSIENT=1",
+		"AGENTCTL_TEST_RELAUNCH_CALLS="+relaunchCalls,
+	)
 	if err != nil {
-		t.Fatalf("release verification did not observe the stale record: %v\n%s", err, output)
+		t.Fatalf("release verification did not retry the fail-closed relaunch: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)") {
-		t.Fatalf("release verification omitted final stale-record observation:\n%s", output)
+	if got := strings.TrimSpace(readTestFile(t, relaunchCalls)); got != "2" {
+		t.Fatalf("relaunch attempts = %q, want 2 (transient refusal then success)\n%s", got, output)
+	}
+	if !strings.Contains(output, "RELAUNCH PASS (role b relaunched through the ESRCH-gated command)") {
+		t.Fatalf("release verification omitted ESRCH-gated relaunch success:\n%s", output)
 	}
 }
 

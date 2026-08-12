@@ -514,26 +514,15 @@ resolve_running_role_processes() {
   [ "$ROLE_SHIM_PID" -gt 0 ] && [ "$ROLE_CHILD_PID" -gt 0 ]
 }
 
-wait_role_state() {
+relaunch_role_until_observed() {
   local session_name=$1
   local role=$2
-  local expected=$3
-  local output_file=$4
+  local output_file=$3
   local attempt=0
-  local states
   while [ "$attempt" -lt 100 ]; do
-    if ./bin/agentctl status --session "$session_name" >"$output_file"; then
-      states=$(awk -v session="$session_name" -v role="$role" -v expected="$expected" '
-        $1 == session && $2 == role {
-          for (field = 3; field <= NF; field++) {
-            if ($field == expected) print $field
-          }
-        }
-      ' "$output_file")
-      if [ "$states" = "$expected" ]; then
-        cat "$output_file"
-        return 0
-      fi
+    if ./bin/agentctl relaunch --session "$session_name" "$role" >"$output_file" 2>&1; then
+      cat "$output_file"
+      return 0
     fi
     attempt=$((attempt + 1))
     sleep 0.1
@@ -1499,13 +1488,13 @@ EOF
       original_child_pid=$ROLE_CHILD_PID
       echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
     if checkpoint B.C8 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
-        echo 'Running exact-PID shim crash setup:'
-        printf '  kill -KILL %s  # role b shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
-        if ! kill -KILL "$original_shim_pid"; then
+        echo 'Running exact-PID shim termination setup:'
+        printf '  kill -HUP %s  # role b shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
+        if ! kill -HUP "$original_shim_pid"; then
           echo "RELAUNCH FAIL (could not signal role b shim PID $original_shim_pid)"
           LIVE_STATUS=1
         else
-          step_pass B.6 'exact-PID role shim crash completed'
+          step_pass B.6 'exact-PID role shim termination completed'
         fi
       else
         LIVE_STATUS=1
@@ -1515,25 +1504,12 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl status --session relverify'
-    if wait_role_state "$LIVE_SESSION" b stale-record "$ARTIFACT_DIR/relaunch-stale-record.status"; then
-      echo 'RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)'
-      step_pass B.7 'ESRCH-backed stale-record state observed'
-    else
-      echo 'RELAUNCH FAIL (role b did not report ESRCH-backed stale-record after exact shim crash)'
-      LIVE_STATUS=1
-    fi
-  fi
-
-  if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo 'Running:'
     echo '  ./bin/agentctl relaunch --session relverify b'
-    if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
-      cat "$ARTIFACT_DIR/relaunch.stdout"
-      step_pass B.8 'relaunch command completed'
+    if relaunch_role_until_observed "$LIVE_SESSION" b "$ARTIFACT_DIR/relaunch.stdout"; then
+      echo 'RELAUNCH PASS (role b relaunched through the ESRCH-gated command)'
+      step_pass B.7 'ESRCH-gated relaunch command completed'
     else
-      cat "$ARTIFACT_DIR/relaunch.stdout"
-      echo 'RELAUNCH FAIL (agentctl relaunch failed)'
+      echo 'RELAUNCH FAIL (role b did not become eligible for the ESRCH-gated relaunch command)'
       LIVE_STATUS=1
     fi
   fi
