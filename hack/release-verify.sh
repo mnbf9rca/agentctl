@@ -208,6 +208,7 @@ PART_C_ORIGINAL_RUNTIME_ROOT=''
 PART_C_ORIGINAL_RUNTIME_ROOT_SET=0
 PART_C_HOME=''
 PART_C_PROJECT=''
+PART_C_PROJECT_REAL=''
 PART_C_BIN=''
 PART_C_RUNTIME_ROOT=''
 PART_C_REAL_SECURITY=''
@@ -238,6 +239,14 @@ part_c_print_seedable_auth() {
 part_c_seed_auth() {
   install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
   install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
+}
+
+part_c_seed_codex_trust() {
+  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
+  (
+    umask 077
+    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$PART_C_PROJECT_REAL" >"$PART_C_HOME/.codex/config.toml"
+  )
 }
 
 part_c_has_keychain_source() {
@@ -1759,9 +1768,15 @@ EOF
     install -d -m 0700 "$PART_C_RUNTIME_ROOT" || {
       part_c_abort 'could not create Part C runtime root'
     }
+    PART_C_PROJECT_REAL=$(cd "$PART_C_PROJECT" && pwd -P) || {
+      part_c_abort 'could not resolve Part C project path'
+    }
+    if ! part_c_seed_codex_trust; then
+      part_c_abort 'could not seed deterministic Codex trust for the Part C fixture project'
+    fi
     printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
     chmod 0755 "$PART_C_BIN/tmux"
-    step_pass C.1 'isolated Part C filesystem is active'
+    step_pass C.1 'isolated Part C filesystem and deterministic Codex project trust are active'
 
     step_start C.2 'choose authentication path for the isolated HOME'
     if part_c_has_seedable_auth; then

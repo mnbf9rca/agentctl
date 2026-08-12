@@ -643,6 +643,18 @@ case "$1" in
         echo 'missing Part C Library/Application Support' >&2
         exit 2
       fi
+      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST:-0}" = 1 ]; then
+        expected_project=$(pwd -P)
+        expected_config=$(printf '[projects."%s"]\ntrust_level = "trusted"\n' "$expected_project")
+        actual_config=$(/bin/cat "$HOME/.codex/config.toml" 2>/dev/null) || {
+          echo 'missing Part C Codex trust config' >&2
+          exit 2
+        }
+        if [ "$actual_config" != "$expected_config" ] || [ "$(/usr/bin/stat -f '%Lp' "$HOME/.codex/config.toml")" != 600 ]; then
+          echo 'incorrect Part C Codex trust config' >&2
+          exit 2
+        fi
+      fi
       : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
       if [ -f "$HOME/.claude.json" ]; then
         /bin/cp "$HOME/.claude.json" "$AGENTCTL_TEST_CLAUDE_CONFIG_LOG"
@@ -1705,6 +1717,14 @@ func TestLiveVerificationPartCPinsPrivateRuntimeRoot(t *testing.T) {
 	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT=1")
 	if err != nil {
 		t.Fatalf("release verification did not pin Part C to its private runtime root: %v\n%s", err, output)
+	}
+}
+
+func TestLiveVerificationPartCSeedsCodexFixtureTrust(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST=1")
+	if err != nil {
+		t.Fatalf("release verification did not seed deterministic Codex trust for its fixture project: %v\n%s", err, output)
 	}
 }
 
