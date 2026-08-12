@@ -406,7 +406,10 @@ session_absent() {
 
   case "$STATUS_EXIT" in
     3)
-      grep -qF "session \"$session_name\" not found" "$stderr_file" || return 2
+      grep -qF \
+        -e "session \"$session_name\" not found" \
+        -e "session \"$session_name\" has no durable fleet configuration" \
+        "$stderr_file" || return 2
       ;;
     6)
       # Keep the pre-#147 exited-server contract; the keeper path is scoped to connect ENOENT.

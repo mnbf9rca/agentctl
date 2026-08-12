@@ -621,7 +621,7 @@ case "$1" in
       echo "${AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE:-agentctl: transport failure}" >&2
       exit "$AGENTCTL_TEST_STATUS_AFTER_KILL_CODE"
     fi
-    echo 'agentctl: session "relverify" not found' >&2
+    echo "${AGENTCTL_TEST_INITIAL_STATUS_MESSAGE:-agentctl: session \"relverify\" not found}" >&2
     exit 3
     ;;
   skill)
@@ -2162,6 +2162,17 @@ func TestLiveVerificationAcceptsNoServerStatusAsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(string(notes), "- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)") {
 		t.Fatalf("notes did not record expected exit 6 outcome:\n%s", notes)
+	}
+}
+
+func TestLiveVerificationAcceptsMissingDurableFleetAsAbsent(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_INITIAL_STATUS_MESSAGE=agentctl: session \"relverify\" has no durable fleet configuration")
+	if err != nil {
+		t.Fatalf("missing durable fleet was not accepted as absence: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "[PASS B.1] release-candidate fleet launched") {
+		t.Fatalf("Part B did not launch after observed fleet absence:\n%s", output)
 	}
 }
 
