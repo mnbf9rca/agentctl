@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -604,27 +605,15 @@ case "$1" in
       exit 0
     fi
     if [ -e "$AGENTCTL_TEST_OWNED" ]; then
-      echo 'SESSION ROLE HARNESS MODEL EFFORT PANE PROCESS STATE'
-      echo 'relverify a claude default default %5 2.1.220 running'
+      echo 'SESSION ROLE HARNESS MODEL EFFORT CONFIDENCE SHIM CHILD PRESENTATION STATE FACTS'
+      echo 'relverify a claude default default anchored 201 202 present running -'
       if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
         if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-          echo "relverify b codex default high ${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12} codex running"
+          echo "relverify b codex default high anchored 301 302 present running -"
+        elif kill -0 "$AGENTCTL_TEST_SHIM_PID" 2>/dev/null; then
+          echo "relverify b codex default high anchored $AGENTCTL_TEST_SHIM_PID 204 present running -"
         else
-          echo 'relverify b codex default high %9 codex running'
-        fi
-      else
-        if [ "${AGENTCTL_TEST_TRANSIENT_ROLE_B_STATE:-0}" = 1 ]; then
-          calls=0
-          [ ! -e "$AGENTCTL_TEST_ROLE_B_STATUS_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_ROLE_B_STATUS_CALLS")
-          calls=$((calls + 1))
-          printf '%s\n' "$calls" >"$AGENTCTL_TEST_ROLE_B_STATUS_CALLS"
-          if [ "$calls" -eq 1 ]; then
-            echo 'relverify b codex default high %9 agentctl answerer-disagreement'
-          else
-            echo 'relverify b codex default high   missing'
-          fi
-        else
-          echo 'relverify b codex default high   missing'
+          echo "relverify b codex default high unanchored $AGENTCTL_TEST_SHIM_PID 204 absent stale-record ESRCH"
         fi
       fi
       exit 0
@@ -813,10 +802,6 @@ case "$1" in
       fi
     fi
     ;;
-  kill-window)
-    [ "$2" = -t ] && [ "$3" = @8 ] || exit 65
-    rm -f "$AGENTCTL_TEST_ROLE_B"
-    ;;
   *)
     exit 64
     ;;
@@ -1002,10 +987,24 @@ func runCommand(t *testing.T, dir, name string, arguments ...string) {
 
 func (fixture liveFixture) run(t *testing.T, input string, environment ...string) (string, error) {
 	t.Helper()
+	shimProcess := exec.Command("sleep", "60")
+	if err := shimProcess.Start(); err != nil {
+		t.Fatal(err)
+	}
+	shimDone := make(chan struct{})
+	go func() {
+		_ = shimProcess.Wait()
+		close(shimDone)
+	}()
+	defer func() {
+		_ = shimProcess.Process.Kill()
+		<-shimDone
+	}()
 	command := exec.Command("bash", "hack/release-verify.sh", "--non-interactive")
 	command.Dir = fixture.dir
 	command.Stdin = strings.NewReader(input)
-	command.Env = append(os.Environ(), environment...)
+	command.Env = append(os.Environ(), "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
+	command.Env = append(command.Env, environment...)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
@@ -1090,6 +1089,7 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"clear --session relverify a",
 		"clear --session relverify b",
 		"compact --session relverify a",
+		"status --session relverify",
 		"status --session relverify",
 		"relaunch --session relverify b",
 		"status --session relverify",
@@ -1942,7 +1942,7 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		t.Fatal(canonicalErr)
 	}
 	for _, want := range []string{
-		"RELAUNCH PASS (role b reported missing after exact-ID removal)",
+		"RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)",
 		"agentctl: relaunched b in relverify: window @11, pane %12, harness codex (stored), model default (stored), effort high (stored), dir " + canonicalDir + " (stored)",
 		"RELAUNCH PASS (role b restored to running)",
 	} {
@@ -1957,6 +1957,7 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		"clear --session relverify a",
 		"clear --session relverify b",
 		"compact --session relverify a",
+		"status --session relverify",
 		"status --session relverify",
 		"relaunch --session relverify b",
 		"status --session relverify",
@@ -1974,7 +1975,6 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		"-V",
 		"list-sessions -F #{session_id}\t#{session_name}",
 		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
-		"kill-window -t @8",
 		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
 	}
 	gotTmux := fixture.tmuxCalls(t)
@@ -2016,21 +2016,14 @@ func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationWaitsForShimCleanupBeforeMissingRelaunch(t *testing.T) {
+func TestLiveVerificationWaitsForESRCHBackedStaleRecordBeforeRelaunch(t *testing.T) {
 	fixture := newLiveFixture(t)
-	statusCalls := filepath.Join(t.TempDir(), "role-b-status-calls")
-	output, err := fixture.run(t, strings.Repeat("y\n", 15),
-		"AGENTCTL_TEST_TRANSIENT_ROLE_B_STATE=1",
-		"AGENTCTL_TEST_ROLE_B_STATUS_CALLS="+statusCalls,
-	)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
-		t.Fatalf("release verification did not wait through transient shim cleanup: %v\n%s", err, output)
+		t.Fatalf("release verification did not observe the stale record: %v\n%s", err, output)
 	}
-	if got := strings.TrimSpace(readTestFile(t, statusCalls)); got != "2" {
-		t.Fatalf("role-b status attempts = %q, want 2 (transient then missing)\n%s", got, output)
-	}
-	if !strings.Contains(output, "RELAUNCH PASS (role b reported missing after exact-ID removal)") {
-		t.Fatalf("release verification omitted final missing observation:\n%s", output)
+	if !strings.Contains(output, "RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)") {
+		t.Fatalf("release verification omitted final stale-record observation:\n%s", output)
 	}
 }
 

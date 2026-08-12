@@ -479,8 +479,39 @@ assert_role_state() {
     return 1
   fi
   cat "$output_file"
-  states=$(awk -v session="$session_name" -v role="$role" '$1 == session && $2 == role { print $NF }' "$output_file")
+  states=$(awk -v session="$session_name" -v role="$role" -v expected="$expected" '
+    $1 == session && $2 == role {
+      for (field = 3; field <= NF; field++) {
+        if ($field == expected) print $field
+      }
+    }
+  ' "$output_file")
   [ "$states" = "$expected" ]
+}
+
+ROLE_SHIM_PID=''
+ROLE_CHILD_PID=''
+resolve_running_role_processes() {
+  local session_name=$1
+  local role=$2
+  local output_file=$3
+  local records
+  local record
+  if ! ./bin/agentctl status --session "$session_name" >"$output_file"; then
+    cat "$output_file"
+    return 1
+  fi
+  cat "$output_file"
+  records=$(awk -v session="$session_name" -v role="$role" '
+    $1 == session && $2 == role && $10 == "running" { print $7 "\t" $8 }
+  ' "$output_file")
+  record=$(printf '%s\n' "$records" | awk 'NF { print }')
+  [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
+  IFS=$'\t' read -r ROLE_SHIM_PID ROLE_CHILD_PID <<<"$record"
+  case "$ROLE_SHIM_PID:$ROLE_CHILD_PID" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  [ "$ROLE_SHIM_PID" -gt 0 ] && [ "$ROLE_CHILD_PID" -gt 0 ]
 }
 
 wait_role_state() {
@@ -492,7 +523,13 @@ wait_role_state() {
   local states
   while [ "$attempt" -lt 100 ]; do
     if ./bin/agentctl status --session "$session_name" >"$output_file"; then
-      states=$(awk -v session="$session_name" -v role="$role" '$1 == session && $2 == role { print $NF }' "$output_file")
+      states=$(awk -v session="$session_name" -v role="$role" -v expected="$expected" '
+        $1 == session && $2 == role {
+          for (field = 3; field <= NF; field++) {
+            if ($field == expected) print $field
+          }
+        }
+      ' "$output_file")
       if [ "$states" = "$expected" ]; then
         cat "$output_file"
         return 0
@@ -1453,18 +1490,22 @@ EOF
     elif ! resolve_role_window "$LIVE_SESSION_ID" b; then
       echo 'RELAUNCH FAIL (could not resolve role b to one exact tmux window and pane ID)'
       LIVE_STATUS=1
+    elif ! resolve_running_role_processes "$LIVE_SESSION" b "$ARTIFACT_DIR/relaunch-before.status"; then
+      echo 'RELAUNCH FAIL (could not resolve role b to one running shim and child PID)'
+      LIVE_STATUS=1
     else
-      original_window_id=$ROLE_WINDOW_ID
       original_pane_id=$ROLE_PANE_ID
+      original_shim_pid=$ROLE_SHIM_PID
+      original_child_pid=$ROLE_CHILD_PID
       echo 'In the codex tab, type junk into the input box again; do NOT press Enter.'
     if checkpoint B.C8 'relaunch setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for the relaunch process-discontinuity check?'; then
-        echo 'Running exact-ID missing-role setup:'
-        printf '  tmux kill-window -t %s\n' "$original_window_id"
-        if ! tmux kill-window -t "$original_window_id"; then
-          echo "RELAUNCH FAIL (could not remove role b window $original_window_id)"
+        echo 'Running exact-PID shim crash setup:'
+        printf '  kill -KILL %s  # role b shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
+        if ! kill -KILL "$original_shim_pid"; then
+          echo "RELAUNCH FAIL (could not signal role b shim PID $original_shim_pid)"
           LIVE_STATUS=1
         else
-          step_pass B.6 'exact-ID role removal completed'
+          step_pass B.6 'exact-PID role shim crash completed'
         fi
       else
         LIVE_STATUS=1
@@ -1475,11 +1516,11 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
     echo '  ./bin/agentctl status --session relverify'
-    if wait_role_state "$LIVE_SESSION" b missing "$ARTIFACT_DIR/relaunch-missing.status"; then
-      echo 'RELAUNCH PASS (role b reported missing after exact-ID removal)'
-      step_pass B.7 'missing-role state observed'
+    if wait_role_state "$LIVE_SESSION" b stale-record "$ARTIFACT_DIR/relaunch-stale-record.status"; then
+      echo 'RELAUNCH PASS (role b reported ESRCH-backed stale-record after exact shim crash)'
+      step_pass B.7 'ESRCH-backed stale-record state observed'
     else
-      echo 'RELAUNCH FAIL (role b did not report missing after exact-ID removal)'
+      echo 'RELAUNCH FAIL (role b did not report ESRCH-backed stale-record after exact shim crash)'
       LIVE_STATUS=1
     fi
   fi
