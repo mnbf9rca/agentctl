@@ -223,12 +223,19 @@ func copyContext(ctx context.Context, destination ContextWriter, source ContextR
 			return fmt.Errorf("reader returned invalid byte count %d", count)
 		}
 		if count > 0 {
-			written, writeErr := destination.Write(ctx, buffer[:count])
-			if writeErr != nil {
-				return writeErr
-			}
-			if written != count {
-				return io.ErrShortWrite
+			written := 0
+			for written < count {
+				writeCount, writeErr := destination.Write(ctx, buffer[written:count])
+				if writeCount < 0 || writeCount > count-written {
+					return fmt.Errorf("writer returned invalid byte count %d", writeCount)
+				}
+				written += writeCount
+				if writeErr != nil {
+					return writeErr
+				}
+				if writeCount == 0 {
+					return io.ErrNoProgress
+				}
 			}
 		}
 		if readErr != nil {
