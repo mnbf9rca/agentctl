@@ -480,6 +480,7 @@ type liveFixture struct {
 	environmentLog         string
 	evidenceDirLog         string
 	partCRootLog           string
+	sighupProbeLog         string
 	operatorHome           string
 	keychainTarget         string
 	keychainSentinel       string
@@ -522,6 +523,7 @@ func newLiveFixture(t *testing.T) liveFixture {
 	environmentLog := filepath.Join(t.TempDir(), "environment.log")
 	evidenceDirLog := filepath.Join(t.TempDir(), "evidence-dir.log")
 	partCRootLog := filepath.Join(t.TempDir(), "part-c-root.log")
+	sighupProbeLog := filepath.Join(t.TempDir(), "sighup-probe.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
 	agentctlRoleB := filepath.Join(t.TempDir(), "role-b")
@@ -542,6 +544,39 @@ func newLiveFixture(t *testing.T) liveFixture {
 			t.Fatal(err)
 		}
 	}
+	sighupProbe := `#!/usr/bin/env bash
+set -eu
+[ "$#" -eq 4 ] || { echo 'probe-shim-sighup: expected --harness and --output' >&2; exit 64; }
+[ "$1" = --harness ] || exit 64
+harness=$2
+[ "$3" = --output ] || exit 64
+output=$4
+case "$harness" in claude|codex) ;; *) exit 64 ;; esac
+case "$output" in /*) ;; *) exit 64 ;; esac
+[ ! -e "$output" ] || exit 64
+printf '%s|%s\n' "$harness" "$output" >>"$AGENTCTL_TEST_SIGHUP_PROBE_LOG"
+case "$harness" in
+  claude) harness_version='2.1.220 (Claude Code)' ;;
+  codex) harness_version='codex-cli 0.146.0' ;;
+esac
+cat >"$output" <<PROBE_OUTPUT
+harness=$harness
+harness_version=$harness_version
+topology=shim-parent-of-harness-child-on-pty
+shim_pid=123
+child_pid=124
+child_ppid_matches=true
+child_tty=ttys999
+child_command=/fixture/bin/$harness
+signal_target=owned-shim-only
+signal=SIGHUP
+shim_terminated=true
+child_outcome=terminated
+default_tmux_targeted=false
+PROBE_OUTPUT
+echo "probe-shim-sighup: recorded $harness result in $output"
+`
+	writeTestFile(t, filepath.Join(dir, "hack/probe-shim-sighup.sh"), []byte(sighupProbe), 0o755)
 	keychainSentinel := filepath.Join(keychainTarget, "operator-login-keychain-sentinel")
 	writeTestFile(t, keychainSentinel, []byte("real-keychain-target-must-survive"), 0o600)
 	writeTestFile(t, filepath.Join(operatorHome, ".claude.json"), []byte(fakeClaudeAuthBody), 0o600)
@@ -884,6 +919,7 @@ esac
 	t.Setenv("AGENTCTL_TEST_ENVIRONMENT_LOG", environmentLog)
 	t.Setenv("AGENTCTL_TEST_EVIDENCE_DIR_LOG", evidenceDirLog)
 	t.Setenv("AGENTCTL_TEST_PART_C_ROOT_LOG", partCRootLog)
+	t.Setenv("AGENTCTL_TEST_SIGHUP_PROBE_LOG", sighupProbeLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
@@ -911,9 +947,28 @@ esac
 		environmentLog:         environmentLog,
 		evidenceDirLog:         evidenceDirLog,
 		partCRootLog:           partCRootLog,
+		sighupProbeLog:         sighupProbeLog,
 		operatorHome:           operatorHome,
 		keychainTarget:         keychainTarget,
 		keychainSentinel:       keychainSentinel,
+	}
+}
+
+func TestLiveVerificationSuppliesEachHarnessContractToSIGHUPProbe(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification did not satisfy the SIGHUP probe argument contract: %v\n%s", err, output)
+	}
+	invocations := strings.Split(strings.TrimSpace(readTestFile(t, fixture.sighupProbeLog)), "\n")
+	if len(invocations) != 2 || !strings.HasPrefix(invocations[0], "claude|") || !strings.HasPrefix(invocations[1], "codex|") {
+		t.Fatalf("SIGHUP probe invocations = %q, want exactly claude then codex", invocations)
+	}
+	for _, invocation := range invocations {
+		parts := strings.SplitN(invocation, "|", 2)
+		if len(parts) != 2 || !filepath.IsAbs(parts[1]) {
+			t.Fatalf("SIGHUP probe invocation did not receive an absolute output path: %q", invocation)
+		}
 	}
 }
 

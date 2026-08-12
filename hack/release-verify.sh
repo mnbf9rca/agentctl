@@ -15,7 +15,7 @@ Usage:
   hack/release-verify.sh --shim-version-matrix CURRENT_BINARY ARTIFACT_DIR
   hack/release-verify.sh --task8 CURRENT_BINARY ARTIFACT_DIR
 
-Runs preflight and the four hack/probe-*.sh contract probes. By default it
+Runs preflight and the release contract probes. By default it
 then guides a live verification through ./bin/agentctl launch, attach, clear,
 compact, relaunch, kill, status, and a separate skill-discovery fleet. With
 --non-interactive each live checkpoint reads y/n from stdin while retaining all
@@ -656,6 +656,7 @@ require_probe_text() {
 assert_probe_output() {
   local probe_name=$1
   local PROBE_OUTPUT=$2
+	local probe_harness probe_version shim_pid child_pid child_outcome
 
   case "$probe_name" in
     probe-1-argv.sh)
@@ -709,6 +710,33 @@ exit=1" &&
         require_probe_text "$probe_name" "attach-session -t '=alpha'  : open terminal failed: not a terminal" &&
         require_probe_text "$probe_name" "attach-session -t '=nope'   : can't find session: nope" &&
         require_probe_text "$probe_name" "-CC attach-session -t \$SESSION_ID : tcgetattr failed: Operation not supported by device"
+      ;;
+    probe-shim-sighup.sh)
+      probe_harness=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^harness=//p' | sed -n '1p')
+      probe_version=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^harness_version=//p' | sed -n '1p')
+      shim_pid=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^shim_pid=//p' | sed -n '1p')
+      child_pid=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^child_pid=//p' | sed -n '1p')
+      child_outcome=$(printf '%s\n' "$PROBE_OUTPUT" | sed -n 's/^child_outcome=//p' | sed -n '1p')
+      case "$probe_harness" in
+        claude|codex) ;;
+        *) printf 'PROBE ASSERT FAIL (%s): missing valid harness observation\n' "$probe_name" >&2; return 1 ;;
+      esac
+      [ -n "$probe_version" ] || { printf 'PROBE ASSERT FAIL (%s): missing harness version observation\n' "$probe_name" >&2; return 1; }
+      case "$shim_pid:$child_pid" in
+        *[!0-9:]*|:*|*:) printf 'PROBE ASSERT FAIL (%s): missing positive shim/child PID observations\n' "$probe_name" >&2; return 1 ;;
+      esac
+      case "$child_outcome" in
+        survived|terminated) ;;
+        *) printf 'PROBE ASSERT FAIL (%s): missing closed child outcome observation\n' "$probe_name" >&2; return 1 ;;
+      esac
+      require_probe_text "$probe_name" 'topology=shim-parent-of-harness-child-on-pty' &&
+        require_probe_text "$probe_name" 'child_ppid_matches=true' &&
+        require_probe_text "$probe_name" 'child_tty=' &&
+        require_probe_text "$probe_name" 'child_command=' &&
+        require_probe_text "$probe_name" 'signal_target=owned-shim-only' &&
+        require_probe_text "$probe_name" 'signal=SIGHUP' &&
+        require_probe_text "$probe_name" 'shim_terminated=true' &&
+        require_probe_text "$probe_name" 'default_tmux_targeted=false'
       ;;
     *)
       printf 'PROBE ASSERT FAIL (%s): no assertion defined\n' "$probe_name" >&2
@@ -1103,8 +1131,8 @@ step_pass A.1 'build and version capture completed'
 step_start A.2 'run contract probes'
 echo '== Probes =='
 probe_index=1
-for probe in "$TOP"/hack/probe-*.sh; do
-  probe_name=$(basename "$probe")
+for probe_name in probe-1-argv.sh probe-2-targeting.sh probe-3-ids.sh probe-4-attach.sh; do
+  probe="$TOP/hack/$probe_name"
   echo "-- $probe_name --"
   probe_status=0
   probe_out=$(bash "$probe" </dev/null 2>&1) || probe_status=$?
@@ -1119,6 +1147,30 @@ for probe in "$TOP"/hack/probe-*.sh; do
     exit 1
   fi
   step_pass "A.$((probe_index + 1))" "$probe_name assertion completed"
+  probe_index=$((probe_index + 1))
+done
+
+probe_name='probe-shim-sighup.sh'
+probe="$TOP/hack/$probe_name"
+for probe_harness in claude codex; do
+  probe_output_file="$EVIDENCE_DIR/probe-shim-sighup-$probe_harness.txt"
+  echo "-- $probe_name ($probe_harness) --"
+  probe_status=0
+  probe_stdout=$(bash "$probe" --harness "$probe_harness" --output "$probe_output_file" </dev/null 2>&1) || probe_status=$?
+  printf '%s\n' "$probe_stdout"
+  if [ "$probe_status" -ne 0 ]; then
+    step_fail "A.$((probe_index + 1))" "$probe_name ($probe_harness) failed"
+    echo "PROBES FAIL ($probe_name, $probe_harness: exit $probe_status)"
+    exit 1
+  fi
+  [ -r "$probe_output_file" ] || die "$probe_name ($probe_harness) produced no readable evidence"
+  probe_out=$(cat "$probe_output_file")
+  printf '%s\n' "$probe_out"
+  if ! assert_probe_output "$probe_name" "$probe_out"; then
+    step_fail "A.$((probe_index + 1))" "$probe_name ($probe_harness) assertion failed"
+    exit 1
+  fi
+  step_pass "A.$((probe_index + 1))" "$probe_name ($probe_harness) assertion completed"
   probe_index=$((probe_index + 1))
 done
 
