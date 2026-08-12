@@ -635,6 +635,10 @@ case "$1" in
     ;;
   launch)
     if [ "$3" = skillverify ]; then
+      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT:-0}" = 1 ] && [ ! -d "$HOME/Library/Application Support" ]; then
+        echo 'missing Part C Library/Application Support' >&2
+        exit 2
+      fi
       : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
       if [ -f "$HOME/.claude.json" ]; then
         /bin/cp "$HOME/.claude.json" "$AGENTCTL_TEST_CLAUDE_CONFIG_LOG"
@@ -1243,6 +1247,19 @@ func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T)
 	}
 	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_B_KILL_CALLS"))); got != "2" {
 		t.Fatalf("Part B kill call count = %q, want 2", got)
+	}
+}
+
+func TestLiveVerificationCreatesPartCUserConfigRoot(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT=1",
+	)
+	if err != nil {
+		t.Fatalf("release verification omitted the isolated user-config root: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
+		t.Fatalf("release verification did not complete after creating user-config root:\n%s", output)
 	}
 }
 

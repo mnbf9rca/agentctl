@@ -1702,6 +1702,9 @@ EOF
     install -d -m 0700 "$PART_C_HOME" || {
       part_c_abort 'could not create Part C temporary HOME'
     }
+    install -d -m 0700 "$PART_C_HOME/Library/Application Support" || {
+      part_c_abort 'could not create Part C user-config root'
+    }
     install -d -m 0755 "$PART_C_PROJECT" "$PART_C_BIN" || {
       part_c_abort 'could not create Part C directories'
     }
