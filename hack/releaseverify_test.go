@@ -687,6 +687,10 @@ case "$1" in
     echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
     ;;
   attach)
+    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && [ "${TERM_PROGRAM:-}" != iTerm.app ]; then
+      echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-}" >&2
+      exit 2
+    fi
     if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_PART_C_ATTACH_FAIL:-0}" = 1 ]; then
       echo 'attach failed' >&2
       exit 1
@@ -1260,6 +1264,20 @@ func TestLiveVerificationCreatesPartCUserConfigRoot(t *testing.T) {
 	}
 	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
 		t.Fatalf("release verification did not complete after creating user-config root:\n%s", output)
+	}
+}
+
+func TestLiveVerificationPartCAttachDeclaresITermEnvironment(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_REQUIRE_PART_C_ITERM=1",
+		"TERM_PROGRAM=tmux",
+	)
+	if err != nil {
+		t.Fatalf("release verification omitted Part C iTerm attach environment: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
+		t.Fatalf("release verification did not complete with pinned Part C iTerm environment:\n%s", output)
 	}
 }
 

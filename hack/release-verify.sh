@@ -1877,7 +1877,7 @@ operator repairs the ambiguity with raw tmux.
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
 EOF
-    if ! "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
+    if ! TERM_PROGRAM=iTerm.app "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
       step_fail C.4 'skill fleet attach failed'
       part_c_abort 'Part C attach guidance failed'
     fi
