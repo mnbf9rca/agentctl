@@ -611,9 +611,9 @@ case "$1" in
         if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
           echo "relverify b codex default high anchored 301 302 present running -"
         elif kill -0 "$AGENTCTL_TEST_SHIM_PID" 2>/dev/null; then
-          echo "relverify b codex default high anchored $AGENTCTL_TEST_SHIM_PID 204 present running -"
+          echo "relverify b codex default high anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
         else
-          echo "relverify b codex default high unanchored $AGENTCTL_TEST_SHIM_PID 204 absent stale-record ESRCH"
+          echo "relverify b codex default high unanchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID absent stale-record ESRCH"
         fi
       fi
       exit 0
@@ -675,16 +675,6 @@ case "$1" in
     echo "delivered $1"
     ;;
   relaunch)
-    if [ "${AGENTCTL_TEST_RELAUNCH_TRANSIENT:-0}" = 1 ]; then
-      calls=0
-      [ ! -e "$AGENTCTL_TEST_RELAUNCH_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_RELAUNCH_CALLS")
-      calls=$((calls + 1))
-      printf '%s\n' "$calls" >"$AGENTCTL_TEST_RELAUNCH_CALLS"
-      if [ "$calls" -eq 1 ]; then
-        echo 'agentctl: refusing transient answerer-disagreement' >&2
-        exit 5
-      fi
-    fi
     touch "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
     pane_id=${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}
     echo "agentctl: relaunched b in relverify: window @11, pane $pane_id, harness codex (stored), model default (stored), effort high (stored), dir $PWD (stored)"
@@ -931,7 +921,6 @@ esac
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
 	t.Setenv("AGENTCTL_TEST_ROLE_B", agentctlRoleB)
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
-	t.Setenv("AGENTCTL_TEST_RELAUNCH_CALLS", filepath.Join(t.TempDir(), "relaunch-calls"))
 	t.Setenv("AGENTCTL_TEST_KEEPER_OWNED", keeperOwned)
 	t.Setenv("AGENTCTL_TEST_KEEPER_KILLED", keeperKilled)
 	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
@@ -998,7 +987,19 @@ func runCommand(t *testing.T, dir, name string, arguments ...string) {
 
 func (fixture liveFixture) run(t *testing.T, input string, environment ...string) (string, error) {
 	t.Helper()
-	shimProcess := exec.Command("sleep", "60")
+	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
+	shimScript := `child_pid=''
+on_hup() {
+  kill -HUP "$child_pid"
+  wait "$child_pid"
+  exit 0
+}
+trap on_hup HUP
+sleep 60 &
+child_pid=$!
+printf '%s\n' "$child_pid" >"$1"
+wait "$child_pid"`
+	shimProcess := exec.Command("bash", "-c", shimScript, "releaseverify-fixture", childPIDFile)
 	if err := shimProcess.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -1011,10 +1012,24 @@ func (fixture liveFixture) run(t *testing.T, input string, environment ...string
 		_ = shimProcess.Process.Kill()
 		<-shimDone
 	}()
+	var childPID string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(childPIDFile)
+		if err == nil && strings.TrimSpace(string(body)) != "" {
+			childPID = strings.TrimSpace(string(body))
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if childPID == "" {
+		t.Fatal("fixture shim did not report its child PID")
+	}
 	command := exec.Command("bash", "hack/release-verify.sh", "--non-interactive")
 	command.Dir = fixture.dir
 	command.Stdin = strings.NewReader(input)
 	command.Env = append(os.Environ(), "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
+	command.Env = append(command.Env, "AGENTCTL_TEST_CHILD_PID="+childPID)
 	command.Env = append(command.Env, environment...)
 	output, err := command.CombinedOutput()
 	return string(output), err
@@ -2025,21 +2040,19 @@ func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationRetriesFailClosedRelaunchUntilESRCHGateOpens(t *testing.T) {
+func TestLiveVerificationWaitsForRecordedChildAbsenceBeforeOneRelaunch(t *testing.T) {
 	fixture := newLiveFixture(t)
-	relaunchCalls := filepath.Join(t.TempDir(), "relaunch-calls")
-	output, err := fixture.run(t, strings.Repeat("y\n", 15),
-		"AGENTCTL_TEST_RELAUNCH_TRANSIENT=1",
-		"AGENTCTL_TEST_RELAUNCH_CALLS="+relaunchCalls,
-	)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
-		t.Fatalf("release verification did not retry the fail-closed relaunch: %v\n%s", err, output)
+		t.Fatalf("release verification did not wait for recorded child absence: %v\n%s", err, output)
 	}
-	if got := strings.TrimSpace(readTestFile(t, relaunchCalls)); got != "2" {
-		t.Fatalf("relaunch attempts = %q, want 2 (transient refusal then success)\n%s", got, output)
-	}
-	if !strings.Contains(output, "RELAUNCH PASS (role b relaunched through the ESRCH-gated command)") {
-		t.Fatalf("release verification omitted ESRCH-gated relaunch success:\n%s", output)
+	for _, want := range []string{
+		"RELAUNCH PASS (recorded role b child no longer responds to signal 0)",
+		"RELAUNCH PASS (role b relaunched through the ESRCH-gated command)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("release verification omitted %q:\n%s", want, output)
+		}
 	}
 }
 

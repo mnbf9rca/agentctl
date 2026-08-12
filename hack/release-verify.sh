@@ -514,20 +514,16 @@ resolve_running_role_processes() {
   [ "$ROLE_SHIM_PID" -gt 0 ] && [ "$ROLE_CHILD_PID" -gt 0 ]
 }
 
-relaunch_role_until_observed() {
-  local session_name=$1
-  local role=$2
-  local output_file=$3
+wait_process_absent() {
+  local pid=$1
   local attempt=0
   while [ "$attempt" -lt 100 ]; do
-    if ./bin/agentctl relaunch --session "$session_name" "$role" >"$output_file" 2>&1; then
-      cat "$output_file"
+    if ! kill -0 "$pid" 2>/dev/null; then
       return 0
     fi
     attempt=$((attempt + 1))
     sleep 0.1
   done
-  cat "$output_file"
   return 1
 }
 
@@ -1504,12 +1500,26 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl relaunch --session relverify b'
-    if relaunch_role_until_observed "$LIVE_SESSION" b "$ARTIFACT_DIR/relaunch.stdout"; then
-      echo 'RELAUNCH PASS (role b relaunched through the ESRCH-gated command)'
-      step_pass B.7 'ESRCH-gated relaunch command completed'
+    printf '  kill -0 %s  # wait for recorded role b child absence\n' "$original_child_pid"
+    if wait_process_absent "$original_child_pid"; then
+      echo 'RELAUNCH PASS (recorded role b child no longer responds to signal 0)'
+      step_pass B.7 'recorded role b child absence observed'
     else
-      echo 'RELAUNCH FAIL (role b did not become eligible for the ESRCH-gated relaunch command)'
+      echo "RELAUNCH FAIL (recorded role b child PID $original_child_pid still responds to signal 0)"
+      LIVE_STATUS=1
+    fi
+  fi
+
+  if [ "$LIVE_STATUS" -eq 0 ]; then
+    echo 'Running:'
+    echo '  ./bin/agentctl relaunch --session relverify b'
+    if ./bin/agentctl relaunch --session "$LIVE_SESSION" b >"$ARTIFACT_DIR/relaunch.stdout"; then
+      cat "$ARTIFACT_DIR/relaunch.stdout"
+      echo 'RELAUNCH PASS (role b relaunched through the ESRCH-gated command)'
+      step_pass B.8 'ESRCH-gated relaunch command completed'
+    else
+      cat "$ARTIFACT_DIR/relaunch.stdout"
+      echo 'RELAUNCH FAIL (agentctl relaunch failed)'
       LIVE_STATUS=1
     fi
   fi
