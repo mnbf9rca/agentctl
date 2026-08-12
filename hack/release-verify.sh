@@ -156,6 +156,20 @@ part_b_keeper_teardown() {
   return 1
 }
 
+part_b_retry_kill() {
+  local attempt=1
+  while [ "$attempt" -le 6 ]; do
+    if "$PART_B_TOP/bin/agentctl" kill --session "$PART_B_SESSION"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      sleep 1
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 part_b_teardown() {
   local kill_status=0
   if [ "$PART_B_SESSION_OWNED" -eq 0 ]; then
@@ -169,8 +183,8 @@ part_b_teardown() {
     kill_status=$?
   fi
   if [ "$kill_status" -eq 9 ]; then
-    printf 'PART B CLEANUP OBSERVED (%s kill exited 9; retrying once)\n' "$PART_B_SESSION"
-    if "$PART_B_TOP/bin/agentctl" kill --session "$PART_B_SESSION"; then
+    printf 'PART B CLEANUP OBSERVED (%s kill exited 9; retrying within bounded observation window)\n' "$PART_B_SESSION"
+    if part_b_retry_kill; then
       printf 'PART B CLEANUP PASS (%s kill retry exited 0)\n' "$PART_B_SESSION"
       PART_B_SESSION_OWNED=0
       return 0

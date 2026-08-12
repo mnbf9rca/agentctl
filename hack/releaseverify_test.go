@@ -1235,13 +1235,13 @@ func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) 
 func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15),
-		"AGENTCTL_TEST_PART_B_KILL_CODES=9,0",
+		"AGENTCTL_TEST_PART_B_KILL_CODES=9,5,0",
 	)
 	if err != nil {
 		t.Fatalf("release verification did not recover from transient Part B child observation: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"PART B CLEANUP OBSERVED (relverify kill exited 9; retrying once)",
+		"PART B CLEANUP OBSERVED (relverify kill exited 9; retrying within bounded observation window)",
 		"PART B CLEANUP PASS (relverify kill retry exited 0)",
 		"ALL VERIFIED — evidence appended",
 	} {
@@ -1249,8 +1249,8 @@ func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T)
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
 	}
-	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_B_KILL_CALLS"))); got != "2" {
-		t.Fatalf("Part B kill call count = %q, want 2", got)
+	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_B_KILL_CALLS"))); got != "3" {
+		t.Fatalf("Part B kill call count = %q, want 3", got)
 	}
 }
 
