@@ -1283,13 +1283,17 @@ func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
 	seed := "Before the compact spot check, create compactable context in the claude tab:"
-	prompt := "Reply with READY and one sentence about this repository."
-	wait := "Wait for Claude's complete response. Then type junk into the input box; do NOT press Enter."
+	firstPrompt := "Reply with FIRST READY and one sentence about this repository."
+	firstWait := "Wait for Claude's complete response, then submit this second message:"
+	secondPrompt := "Reply with SECOND READY and one different sentence about testing this repository."
+	secondWait := "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
 	checkpoint := "[CHECKPOINT B.C6] claude compact setup"
 	positions := []int{
 		strings.Index(output, seed),
-		strings.Index(output, prompt),
-		strings.Index(output, wait),
+		strings.Index(output, firstPrompt),
+		strings.Index(output, firstWait),
+		strings.Index(output, secondPrompt),
+		strings.Index(output, secondWait),
 		strings.Index(output, checkpoint),
 	}
 	for index, position := range positions {
@@ -1300,7 +1304,7 @@ func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.
 			t.Fatalf("compact-context instructions are out of order: positions=%v\n%s", positions, output)
 		}
 	}
-	if !strings.Contains(output, "Claude's response is complete, and junk is visible in the claude input without being submitted.") {
+	if !strings.Contains(output, "Claude's two responses are complete, and junk is visible in the claude input without being submitted.") {
 		t.Fatalf("B.C6 does not require both compactable context and unsent junk:\n%s", output)
 	}
 }

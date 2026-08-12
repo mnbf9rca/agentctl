@@ -1396,9 +1396,11 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo 'Before the compact spot check, create compactable context in the claude tab:'
-    echo 'type "Reply with READY and one sentence about this repository." and press Enter.'
-    echo "Wait for Claude's complete response. Then type junk into the input box; do NOT press Enter."
-    if checkpoint B.C6 'claude compact setup' "Claude's response is complete, and junk is visible in the claude input without being submitted." 'Is the claude response complete and the junk ready for the compact spot check?'; then
+    echo 'type "Reply with FIRST READY and one sentence about this repository." and press Enter.'
+    echo "Wait for Claude's complete response, then submit this second message:"
+    echo '"Reply with SECOND READY and one different sentence about testing this repository."'
+    echo "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
+    if checkpoint B.C6 'claude compact setup' "Claude's two responses are complete, and junk is visible in the claude input without being submitted." 'Are both Claude responses complete and the junk ready for the compact spot check?'; then
       echo 'Running:'
       echo '  ./bin/agentctl compact --session relverify a'
       if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
