@@ -1961,9 +1961,9 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 	wantTmux := []string{
 		"-V",
 		"list-sessions -F #{session_id}\t#{session_name}",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{@agentctl_role}",
+		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
 		"kill-window -t @8",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{@agentctl_role}",
+		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
 	}
 	gotTmux := fixture.tmuxCalls(t)
 	if len(gotTmux) != len(wantTmux)+1 || strings.Join(gotTmux[:len(wantTmux)], "\n") != strings.Join(wantTmux, "\n") || !strings.HasPrefix(gotTmux[len(wantTmux)], "-L agentctl-skill-verify-") || !strings.HasSuffix(gotTmux[len(wantTmux)], " kill-server") {
@@ -1980,6 +1980,27 @@ func TestLiveVerificationRelaunchesCodexFromStoredQuadByExactIDs(t *testing.T) {
 		if !strings.Contains(string(notes), want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
 		}
+	}
+}
+
+func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	var roleResolutionCall string
+	for _, call := range fixture.tmuxCalls(t) {
+		if strings.HasPrefix(call, "list-windows -t $4 -F ") {
+			roleResolutionCall = call
+			break
+		}
+	}
+	if roleResolutionCall == "" {
+		t.Fatalf("tmux calls omit exact-session role-window resolution:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
+	}
+	if !strings.Contains(roleResolutionCall, "#{window_name}") || strings.Contains(roleResolutionCall, "#{@agentctl_role}") {
+		t.Fatalf("role-window resolution uses stale metadata instead of the exact window name: %q", roleResolutionCall)
 	}
 }
 

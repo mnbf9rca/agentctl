@@ -458,13 +458,13 @@ resolve_role_window() {
   local format
   local records
   local record
-  local observed_role
-  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{@agentctl_role}"
+  local observed_name
+  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{window_name}"
   records=$(tmux list-windows -t "$session_id" -F "$format") || return 1
   record=$(printf '%s\n' "$records" | awk -F '\t' -v role="$role" '$3 == role { print }')
   [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
-  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_role <<<"$record"
-  [ "$observed_role" = "$role" ] || return 1
+  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_name <<<"$record"
+  [ "$observed_name" = "$role" ] || return 1
   valid_tmux_id "$ROLE_WINDOW_ID" '@' && valid_tmux_id "$ROLE_PANE_ID" '%'
 }
 
