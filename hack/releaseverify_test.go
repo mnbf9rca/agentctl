@@ -680,8 +680,7 @@ case "$1" in
     ;;
   relaunch)
     touch "$AGENTCTL_TEST_ROLE_A" "$AGENTCTL_TEST_RELAUNCHED"
-    pane_id=${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}
-    echo "agentctl: relaunched a in relverify: window @11, pane $pane_id, harness claude (stored), model default (stored), effort default (stored), dir $PWD (stored)"
+    echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
     ;;
   attach)
     if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_PART_C_ATTACH_FAIL:-0}" = 1 ]; then
@@ -1970,13 +1969,9 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
-	canonicalDir, canonicalErr := filepath.EvalSymlinks(fixture.dir)
-	if canonicalErr != nil {
-		t.Fatal(canonicalErr)
-	}
 	for _, want := range []string{
 		"RELAUNCH PASS (role a relaunched through the ESRCH-gated command)",
-		"agentctl: relaunched a in relverify: window @11, pane %12, harness claude (stored), model default (stored), effort default (stored), dir " + canonicalDir + " (stored)",
+		`agentctl: relaunched role "a" in session "relverify"; the shim is ready`,
 		"RELAUNCH PASS (role a restored to running)",
 	} {
 		if !strings.Contains(output, want) {

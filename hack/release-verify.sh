@@ -1513,12 +1513,12 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
     echo '  ./bin/agentctl relaunch --session relverify a'
-    if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.stdout"; then
-      cat "$ARTIFACT_DIR/relaunch.stdout"
+    if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.output" 2>&1; then
+      cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH PASS (role a relaunched through the ESRCH-gated command)'
       step_pass B.8 'ESRCH-gated relaunch command completed'
     else
-      cat "$ARTIFACT_DIR/relaunch.stdout"
+      cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH FAIL (agentctl relaunch failed)'
       LIVE_STATUS=1
     fi
@@ -1534,10 +1534,10 @@ EOF
     else
       printf 'RELAUNCH PASS (role a pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
       step_pass B.9 'replacement pane ID differs from original'
-      expected_relaunch="agentctl: relaunched a in relverify: window $ROLE_WINDOW_ID, pane $ROLE_PANE_ID, harness claude (stored), model default (stored), effort default (stored), dir $TOP (stored)"
-      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.stdout")
+      expected_relaunch='agentctl: relaunched role "a" in session "relverify"; the shim is ready'
+      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.output")
       if [ "$actual_relaunch" != "$expected_relaunch" ]; then
-        printf 'RELAUNCH FAIL (provenance output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
+        printf 'RELAUNCH FAIL (success output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
         LIVE_STATUS=1
       fi
     fi
