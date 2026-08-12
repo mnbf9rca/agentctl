@@ -20,6 +20,12 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
+// The outer launcher starts observing before the shim begins its own bounded
+// readiness poll. Give that inner 5s contract a complete window rather than
+// racing its inclusive final observation with an outer deadline of the same
+// duration.
+const shimLaunchObservationTimeout = 2 * ptyx.ReadinessTimeout
+
 // ShimFleetRecords is the durable session-level roster/configuration seam.
 type ShimFleetRecords interface {
 	Create(ShimFleetRecord) error
@@ -256,7 +262,7 @@ func shimWindowCommand(executable, session string, role config.RoleConfig) strin
 }
 
 func (l ShimLauncher) waitReady(ctx context.Context, session, role string, createdPID int) error {
-	deadline := l.now().Add(ptyx.ReadinessTimeout)
+	deadline := l.now().Add(shimLaunchObservationTimeout)
 	for {
 		response, err := l.lifecycle.Observe(ctx, session, role)
 		if err == nil {

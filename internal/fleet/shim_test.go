@@ -11,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -448,6 +450,30 @@ func TestShimLauncherRecordsWholeFleetBeforeStartingShimWindows(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, wantEvents) {
 		t.Fatalf("launch events = %#v, want %#v", got, wantEvents)
+	}
+}
+
+func TestShimLauncherWaitsPastInnerReadinessBoundaryForPublishedRunning(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	responses := make([]shim.Response, 0, 103)
+	for range 102 {
+		responses = append(responses, shim.Response{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStarting})
+	}
+	responses = append(responses, runningShimResponse(4321, 7001))
+	lifecycle := &fakeShimLifecycle{events: events, observe: responses}
+	now := time.Unix(1000, 0)
+	launcher := NewShimLauncher(nil, lifecycle, nil, ShimLaunchDependencies{
+		Now:   func() time.Time { return now },
+		Sleep: func(duration time.Duration) { now = now.Add(duration) },
+	})
+
+	if err := launcher.waitReady(context.Background(), "fleet", "coder", 4321); err != nil {
+		t.Fatalf("waitReady() error = %v, want running published just after the inner 5s readiness boundary", err)
+	}
+	if elapsed := now.Sub(time.Unix(1000, 0)); elapsed != 102*ptyx.ReadinessPollInterval {
+		t.Fatalf("waitReady() elapsed = %s, want %s", elapsed, 102*ptyx.ReadinessPollInterval)
 	}
 }
 
