@@ -1113,7 +1113,9 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"=== Part C — Live skill discovery and meaning ===",
 		"harness lists the agentctl skill",
 		"probe answer matches references/status-states.md",
-		"no window is selected as real",
+		"What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?",
+		"kill(pid, 0) returned EPERM",
+		"only stale-record or missing can authorize relaunch",
 		"press esc to detach cleanly; do not use uppercase X",
 		"ALL VERIFIED — evidence appended",
 	} {

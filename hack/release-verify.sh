@@ -1935,11 +1935,11 @@ After both harnesses are ready:
 
 Then ask each harness exactly:
 
-  What does `ambiguous` mean in agentctl status, and which commands refuse on it?
+  What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?
 
-Expected meaning: more than one window has the role's exact name, no window is
-selected as real, and role-targeted `clear` and `compact` refuse until an
-operator repairs the ambiguity with raw tmux.
+Expected meaning: `kill(pid, 0)` returned `EPERM`; that claims neither child
+absence nor ownership. It does not authorize relaunch because only
+`stale-record` or `missing` can authorize relaunch.
 
 After both observations, press esc to detach cleanly; do not use uppercase X.
 Wait for the post-detach session-state report before continuing.
@@ -1977,8 +1977,8 @@ EOF
       part_c_abort 'Part C skill inventory checkpoint failed'
     fi
 
-    meaning_expected='ambiguous means more than one exact-name role window exists, no window is selected as real, and clear and compact refuse until raw tmux repairs it.'
-    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for ambiguous and the refusing clear/compact commands?'; then
+    meaning_expected='present-not-ours means kill(pid, 0) returned EPERM; that claims neither child absence nor ownership, and it does not authorize relaunch because only stale-record or missing can authorize relaunch.'
+    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for present-not-ours and its refusal to authorize relaunch?'; then
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
     else
       PART_C_MEANING_ATTESTATION=$ASK_ANSWER
