@@ -477,6 +477,28 @@ func TestShimLauncherWaitsPastInnerReadinessBoundaryForPublishedRunning(t *testi
 	}
 }
 
+func TestShimLauncherTreatsPreStartMissingAsTransientUntilCreatedShimRuns(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{
+		{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeMissing},
+		runningShimResponse(4321, 7001),
+	}}
+	now := time.Unix(1000, 0)
+	launcher := NewShimLauncher(nil, lifecycle, nil, ShimLaunchDependencies{
+		Now:   func() time.Time { return now },
+		Sleep: func(duration time.Duration) { now = now.Add(duration) },
+	})
+
+	if err := launcher.waitReady(context.Background(), "fleet", "coder", 4321); err != nil {
+		t.Fatalf("waitReady() error = %v, want pre-start missing retried until the created shim publishes running", err)
+	}
+	if elapsed := now.Sub(time.Unix(1000, 0)); elapsed != ptyx.ReadinessPollInterval {
+		t.Fatalf("waitReady() elapsed = %s, want one poll interval", elapsed)
+	}
+}
+
 func TestShimLauncherRetainsFleetRecordWhenPresentationFailureReturnsNoOwnerIDs(t *testing.T) {
 	t.Parallel()
 

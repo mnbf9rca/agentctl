@@ -275,7 +275,7 @@ func (l ShimLauncher) waitReady(ctx context.Context, session, role string, creat
 					return &ShimReadyOwnerDisagreementError{Session: session, Role: role, CreatedPID: createdPID, ObservedPID: *response.ShimPID}
 				}
 				return nil
-			case shim.OutcomeStarting:
+			case shim.OutcomeStarting, shim.OutcomeMissing:
 			default:
 				return &ShimRoleStateError{Session: session, Role: role, Outcome: response.Outcome}
 			}
