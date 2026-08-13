@@ -432,3 +432,43 @@ func TestInstallReplacesManagedEntryWithoutChangingASecondDirectoryEntry(t *test
 		t.Fatalf("managed file = %q (err %v), want the new content", got, err)
 	}
 }
+
+func TestInstallRefusesSymlinkedSubdirectoryWithoutWritingInsideIt(t *testing.T) {
+	base := t.TempDir()
+	target := Target{Harness: "claude", Dir: filepath.Join(base, "agentctl")}
+
+	installed := fstest.MapFS{
+		"skills/agentctl/SKILL.md":        &fstest.MapFile{Data: []byte("old\n")},
+		"skills/agentctl/references/a.md": &fstest.MapFile{Data: []byte("old ref\n")},
+	}
+	if _, err := Install(installed, "skills/agentctl", "0.2.0", []Target{target}, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+
+	outsideDir := filepath.Join(base, "outsidedir")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outsideDir, "a.md")
+	if err := os.WriteFile(outsideFile, []byte("old ref\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	managedDir := filepath.Join(target.Dir, "references")
+	if err := os.RemoveAll(managedDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, managedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	next := fstest.MapFS{
+		"skills/agentctl/SKILL.md":        &fstest.MapFile{Data: []byte("new\n")},
+		"skills/agentctl/references/a.md": &fstest.MapFile{Data: []byte("new ref\n")},
+	}
+	if _, err := Install(next, "skills/agentctl", "0.3.0", []Target{target}, false); !errors.Is(err, ErrUnowned) {
+		t.Fatalf("Install() error = %v, want ErrUnowned for a symlinked subdirectory", err)
+	}
+	if got, err := os.ReadFile(outsideFile); err != nil || string(got) != "old ref\n" {
+		t.Fatalf("file inside the outside directory = %q (err %v), want it untouched", got, err)
+	}
+}
