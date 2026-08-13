@@ -2455,6 +2455,8 @@ install refuses, when any of the following is observed:
 - the target path exists and is not a directory;
 - no manifest is present — the refusal names the first offending file found;
 - the manifest is unreadable or malformed;
+- any entry under the target is not a regular file — a symlink, for instance,
+  which would otherwise let a later write follow the link outside the target;
 - any file under the target hashes to neither its recorded entry in the
   installed manifest nor its content in the embedded skill;
 - a manifest entry names a path that escapes the target directory, which is

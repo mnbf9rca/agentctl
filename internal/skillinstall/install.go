@@ -222,6 +222,9 @@ func validateOwnedFiles(dir string, existing, next Manifest) error {
 		if entry.IsDir() || filename == filepath.Join(dir, ManifestName) {
 			return nil
 		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("%s: target entry is not a regular file: %w", filename, ErrUnowned)
+		}
 		relative, err := filepath.Rel(dir, filename)
 		if err != nil {
 			return fmt.Errorf("resolve target path %q: %w", filename, err)

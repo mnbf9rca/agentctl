@@ -1,6 +1,7 @@
 package skillinstall
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -366,5 +367,40 @@ func assertPermission(t *testing.T, path string, want fs.FileMode) {
 	}
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode = %o, want %o", path, got, want)
+	}
+}
+
+func TestInstallRefusesManagedFileSymlinkWithoutWritingThrough(t *testing.T) {
+	base := t.TempDir()
+	target := Target{Harness: "claude", Dir: filepath.Join(base, "agentctl")}
+
+	installed := fstest.MapFS{"skills/agentctl/SKILL.md": &fstest.MapFile{Data: []byte("old content\n")}}
+	if _, err := Install(installed, "skills/agentctl", "0.2.0", []Target{target}, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+
+	outside := filepath.Join(base, "outside.md")
+	outsideContent := []byte("old content\n")
+	if err := os.WriteFile(outside, outsideContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(target.Dir, "SKILL.md")
+	if err := os.Remove(managed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, managed); err != nil {
+		t.Fatal(err)
+	}
+
+	next := fstest.MapFS{"skills/agentctl/SKILL.md": &fstest.MapFile{Data: []byte("new content\n")}}
+	outcomes, err := Install(next, "skills/agentctl", "0.3.0", []Target{target}, false)
+	if !errors.Is(err, ErrUnowned) {
+		t.Fatalf("Install() error = %v, want ErrUnowned for a symlinked managed file", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].Action != "refused" {
+		t.Fatalf("outcomes = %#v, want a single refused outcome", outcomes)
+	}
+	if got, readErr := os.ReadFile(outside); readErr != nil || !bytes.Equal(got, outsideContent) {
+		t.Fatalf("file outside the target = %q (err %v), want it untouched", got, readErr)
 	}
 }

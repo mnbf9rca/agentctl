@@ -13,7 +13,7 @@
 - **Clearing the agent you are typing into.** Before a control request the client walks process ancestry from itself toward the connected peer. "Observed ancestor" and "could not determine" are distinct outcomes and both refuse (spec §15.5). No environment variable establishes this guard.
 - **Starting a second agent beside a live one, or reporting a live agent gone.** Only an observed `ESRCH` permits calling a recorded child absent or starting a replacement; every other observation refuses and keeps its evidence (spec §15.4).
 - **Delivering into a terminal that is not ready.** Control delivery waits for an observed readiness condition on the agent's terminal rather than assuming startup finished (spec §15.3).
-- **Destroying sessions, records, or presentation agentctl does not own.** Rollback and shutdown remove only typed identifiers the invocation created or observed; any survivor, missing outcome, or ambiguity retains the record (spec §15).
+- **Destroying sessions, records, or presentation agentctl does not own.** Rollback and shutdown remove only typed identifiers the invocation created or observed, and a fleet record is removed only once every role's cleanup has actually been observed. A survivor, an unobserved cleanup, or an ambiguous result retains the evidence instead (spec §15).
 - **A caller-named file becoming a trusted input.** `launch --from-template` verifies the descriptor, accepts only a regular file, bounds input without truncating it, and subjects template values to exactly the validation flag values receive (spec §7).
 - **Overwriting files in your home directory.** Skill installation writes only its two declared directories and refuses any target it cannot prove it wrote, unless `--force` is explicit (spec §16).
 - **A compromised dependency reaching a release.** The module graph is standard-library-first and small, a pinned vulnerability scanner runs in CI, Dependabot watches modules and Actions, and archive verification refuses a release missing a required upstream license.
@@ -40,7 +40,7 @@
 8. **Template symlinks are followed.** Anyone who can plant a symlink where you point `--from-template` can plant the file itself, so this adds no capability — but the target, not the link, is what is read.
 9. **Presentation cleanup can race tmux.** Only an exact observation that a presentation is gone permits removing the fleet record. "Gone" and "removed" remain different facts.
 10. **Consented credential access is real access.** Approving the verifier's Keychains link lets its probe agents reach your login keychain for that run; approving the file copy places that credential in the temporary home. Both are removed at teardown, and declining either offers an isolated sign-in instead.
-11. **agentctl adopts nothing it did not start.** A fleet left running by a different build has no record here and is not recognized. Stop it with the binary that started it.
+11. **Fleets without a shim record are not adopted.** A fleet started by the older tmux-metadata lifecycle leaves nothing agentctl can read, so it is neither recognized nor migrated; stop it with the binary that started it. Compatibility is decided by the recorded schema and the wire protocol version, never by binary identity — a different build speaking the same versions operates the same fleet normally.
 
 ## File and socket permissions
 
