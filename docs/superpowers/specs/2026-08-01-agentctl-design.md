@@ -2434,6 +2434,13 @@ Directories are created and normalized to mode `0755`; skill files and the
 manifest are written mode `0644`. A failed home resolution is a refusal, not a
 fallback.
 
+Every file is committed by writing a same-directory temporary file and renaming
+it over the target, never by writing in place. Rename replaces the directory
+entry, so another name for the previous file — a hard link, or a symlink reached
+by some other path — keeps its own content. This is what makes the fixed-target
+write boundary hold for alias cases that ownership validation does not
+enumerate.
+
 ### 16.2 Ownership manifest
 
 Each target carries `.agentctl-skill.json`:

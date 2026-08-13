@@ -15,7 +15,7 @@
 - **Delivering into a terminal that is not ready.** Control delivery waits for an observed readiness condition on the agent's terminal rather than assuming startup finished (spec §15.3).
 - **Destroying sessions, records, or presentation agentctl does not own.** Rollback and shutdown remove only typed identifiers the invocation created or observed, and a fleet record is removed only once every role's cleanup has actually been observed. A survivor, an unobserved cleanup, or an ambiguous result retains the evidence instead (spec §15).
 - **A caller-named file becoming a trusted input.** `launch --from-template` verifies the descriptor, accepts only a regular file, bounds input without truncating it, and subjects template values to exactly the validation flag values receive (spec §7).
-- **Overwriting files in your home directory.** Skill installation writes only its two declared directories and refuses any target it cannot prove it wrote, unless `--force` is explicit (spec §16).
+- **Overwriting files in your home directory.** Skill installation writes only its two declared directories, replacing each entry rather than writing through it, and refuses any target it cannot prove it wrote unless `--force` is explicit (spec §16).
 - **A compromised dependency reaching a release.** The module graph is standard-library-first and small, a pinned vulnerability scanner runs in CI, Dependabot watches modules and Actions, and archive verification refuses a release missing a required upstream license.
 - **Release verification handling your real credentials.** The verifier runs against an isolated temporary home and its own tmux server, copies or links a credential only after you approve that exact item, and never prints credential contents.
 

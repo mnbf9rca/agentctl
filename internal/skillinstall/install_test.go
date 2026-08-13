@@ -404,3 +404,31 @@ func TestInstallRefusesManagedFileSymlinkWithoutWritingThrough(t *testing.T) {
 		t.Fatalf("file outside the target = %q (err %v), want it untouched", got, readErr)
 	}
 }
+
+func TestInstallReplacesManagedEntryWithoutChangingASecondDirectoryEntry(t *testing.T) {
+	base := t.TempDir()
+	target := Target{Harness: "claude", Dir: filepath.Join(base, "agentctl")}
+
+	installed := fstest.MapFS{"skills/agentctl/SKILL.md": &fstest.MapFile{Data: []byte("old content\n")}}
+	if _, err := Install(installed, "skills/agentctl", "0.2.0", []Target{target}, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+
+	managed := filepath.Join(target.Dir, "SKILL.md")
+	original := filepath.Join(base, "original.md")
+	if err := os.Link(managed, original); err != nil {
+		t.Fatal(err)
+	}
+
+	next := fstest.MapFS{"skills/agentctl/SKILL.md": &fstest.MapFile{Data: []byte("new content\n")}}
+	if _, err := Install(next, "skills/agentctl", "0.3.0", []Target{target}, false); err != nil {
+		t.Fatalf("Install() error = %v, want an ordinary upgrade to succeed", err)
+	}
+
+	if got, err := os.ReadFile(original); err != nil || string(got) != "old content\n" {
+		t.Fatalf("second directory entry = %q (err %v), want it unchanged", got, err)
+	}
+	if got, err := os.ReadFile(managed); err != nil || string(got) != "new content\n" {
+		t.Fatalf("managed file = %q (err %v), want the new content", got, err)
+	}
+}
