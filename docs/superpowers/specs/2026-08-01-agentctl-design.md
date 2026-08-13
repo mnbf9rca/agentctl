@@ -2413,3 +2413,67 @@ request to the current shim; and current client/current shim matching controls e
 foreign or absent leg must fail at the version pre-pass before schema/operation interpretation and record whether the
 observed value came from the `connected shim hello` or `client request`. Each matching control must pass framing and
 proceed to its next typed gate.
+
+## 16. Embedded skill installation
+
+`agentctl skill install` and `agentctl skill status` write and inspect the
+agent-facing skill that ships inside the binary. This section records
+long-shipped behavior; it introduces no new surface.
+
+### 16.1 Targets and modes
+
+Two fixed target directories are derived from the resolved home directory, with
+no caller-supplied path component:
+
+```text
+$HOME/.claude/skills/agentctl
+$HOME/.agents/skills/agentctl
+```
+
+Directories are created and normalized to mode `0755`; skill files and the
+manifest are written mode `0644`. A failed home resolution is a refusal, not a
+fallback.
+
+### 16.2 Ownership manifest
+
+Each target carries `.agentctl-skill.json`:
+
+```json
+{ "version": "<release>", "files": { "<relative path>": "<sha256 hex>" } }
+```
+
+The manifest records every installed file. It is how a later invocation proves
+the target is one agentctl wrote, rather than assuming it from the path.
+
+### 16.3 Refusal semantics
+
+An install proceeds only when the target is absent, or is a real directory
+whose contents agentctl can account for. The target is **unowned**, and the
+install refuses, when any of the following is observed:
+
+- the target path is a symlink;
+- the target path exists and is not a directory;
+- no manifest is present — the refusal names the first offending file found;
+- the manifest is unreadable or malformed;
+- any file under the target hashes to neither its recorded entry in the
+  installed manifest nor its content in the embedded skill;
+- a manifest entry names a path that escapes the target directory, which is
+  refused before any mutation.
+
+The last rule is deliberately broader than "files match the manifest": a file
+the operator added by hand also makes the target unowned, because agentctl
+cannot prove it wrote it. A file already matching the embedded content is
+accepted, so an interrupted upgrade re-runs cleanly.
+
+### 16.4 `--force` and no-op
+
+`--force` overrides only the unowned refusal. It enumerates the target, removes
+the directory, reports every removed path, and reinstalls. It does not bypass
+inspection, hashing, or write failures, which remain refusals with or without
+it.
+
+When the existing manifest already matches the embedded skill, the install is a
+no-op reported as `current` and nothing is written. Files present in the
+previous manifest but absent from the new one are removed and reported.
+
+`agentctl skill status` performs no writes.
