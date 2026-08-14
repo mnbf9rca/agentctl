@@ -15,6 +15,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/shim"
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 func TestRunForegroundUsesValidatedSingleRoleAndObservedWorkingDirectory(t *testing.T) {
@@ -40,6 +41,32 @@ func TestRunForegroundUsesValidatedSingleRoleAndObservedWorkingDirectory(t *test
 	}
 	if stdout.Len() != 0 || stderr.String() != "agentctl: foreground role \"planner\" in session \"fleet\" exited with status 0\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestPublicRunRefusesNonTerminalBeforeRuntimeConstruction(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot := filepath.Join(root, "runtime")
+	stateRoot := filepath.Join(root, "state")
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", runtimeRoot)
+	t.Setenv("AGENTCTL_STATE_ROOT", stateRoot)
+
+	var stdout, stderr bytes.Buffer
+	runner := tmuxx.NewFakeRunner()
+	code := runWithRunner(context.Background(), []string{
+		"run", "--session", "fleet", "--role", "planner", "--harness", "codex",
+	}, &stdout, &stderr, runner, os.LookupEnv)
+	want := "agentctl: refusing to run role \"planner\" in session \"fleet\"; standard input and output must both be terminals (run-not-a-terminal)\n"
+	if code != exitUsage || stdout.Len() != 0 || stderr.String() != want {
+		t.Fatalf("code=%d stdout=%q stderr=%q, want %d empty %q", code, stdout.String(), stderr.String(), exitUsage, want)
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("tmux calls=%#v, want none", runner.Calls)
+	}
+	for _, path := range []string{runtimeRoot, stateRoot, filepath.Join(stateRoot, "sessions")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime path %q exists before terminal refusal: %v", path, err)
+		}
 	}
 }
 
@@ -141,6 +168,25 @@ func TestRunForegroundMapsObservedChildOutcomesExactly(t *testing.T) {
 				t.Fatalf("code=%d stderr=%q, want 1 %q", code, stderr.String(), test.want)
 			}
 		})
+	}
+}
+
+func TestRunForegroundMapsTerminalObservationFailureExactly(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	err := &foregroundTerminalObservationError{Cause: errors.New("observe terminal window size: input/output error")}
+	code := runWithDependencies(context.Background(), []string{
+		"run", "--session", "fleet", "--role", "planner", "--harness", "codex",
+	}, &bytes.Buffer{}, &stderr, dependencies{
+		getwd: func() (string, error) { return "/work", nil },
+		foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error {
+			return err
+		}),
+	})
+	want := "agentctl: could not observe the foreground terminal for role \"planner\" in session \"fleet\": \"observe terminal window size: input/output error\"; no role was started (run-terminal-observation-failed)\n"
+	if code != exitTmux || stderr.String() != want {
+		t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), exitTmux, want)
 	}
 }
 
