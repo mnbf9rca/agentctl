@@ -318,6 +318,24 @@ func currentShimLeg(currentBinary, fixtureBinary, base string) (rows []matrixRow
 			return nil, err
 		}
 	}
+	store, err := fleet.OpenShimFleetRecordStore(stateRoot)
+	if err != nil {
+		return nil, err
+	}
+	record, err := fleet.NewShimFleetRecord(sessionName, mustWorkingDirectory(), fleet.PresentationTmux, config.FleetConfig{
+		Roles: []config.RoleConfig{{Name: roleName, Harness: config.HarnessClaude}},
+	})
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.Create(record); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := store.Close(); err != nil {
+		return nil, err
+	}
 	scriptPath, err := exec.LookPath("script")
 	if err != nil {
 		return nil, err
