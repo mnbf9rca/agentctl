@@ -334,7 +334,11 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 			if errors.As(readyErr, &uncertain) {
 				return ShimRelaunchResult{}, readyErr
 			}
-			return ShimRelaunchResult{}, &ShimDetachedStartRetainedError{Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr, Remaining: "durable fleet record", CleanupErr: errors.New("ownership agreement was not observed")}
+			return ShimRelaunchResult{}, &ShimDetachedStartRetainedError{
+				Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr,
+				Remaining:  detachedUnreconciledArtifacts(process.PID(), []string{"durable fleet record"}),
+				CleanupErr: errors.New("ownership agreement was not observed"),
+			}
 		}
 	} else {
 		presentationSession, found, err := r.launcher.presentation.FindPresentationSession(ctx, session)

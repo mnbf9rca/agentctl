@@ -88,6 +88,34 @@ func TestShimRelaunchRecreatesDetachedFleetWithoutConsultingTmux(t *testing.T) {
 	}
 }
 
+// This catches applying a detached relaunch override by rebuilding the fleet
+// record with the default tmux presentation instead of preserving its durable
+// detached presentation fact.
+func TestShimRelaunchDetachedOverridePreservesPresentation(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	records := &fakeShimFleetRecords{events: events, record: record}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+	model := "gpt-5.6-sol"
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner", Model: &model})
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	if records.replaced == nil || records.replaced.Presentation != PresentationDetached {
+		t.Fatalf("replacement = %#v, want detached presentation preserved", records.replaced)
+	}
+	if got, want := records.replaced.Roles["planner"].Model, model; got != want {
+		t.Fatalf("replacement planner model = %q, want %q", got, want)
+	}
+}
+
 // This catches detached relaunch returning a raw readiness failure after Start
 // instead of retaining the pre-existing fleet record and avoiding peer stop.
 func TestShimRelaunchDetachedReadinessFailureRetainsRecordWithoutStoppingRole(t *testing.T) {
@@ -107,6 +135,9 @@ func TestShimRelaunchDetachedReadinessFailureRetainsRecordWithoutStoppingRole(t 
 	var retained *ShimDetachedStartRetainedError
 	if !errors.As(err, &retained) || retained.CreatedPID != 4321 {
 		t.Fatalf("Relaunch() error = %T %v, want retained detached start for PID 4321", err, err)
+	}
+	if got, want := retained.Remaining, "unreconciled detached shim PID 4321 runtime state and durable fleet record"; got != want {
+		t.Fatalf("retained remaining = %q, want %q", got, want)
 	}
 	for _, event := range events.snapshot() {
 		if event == "stop:planner" || event == "record-remove" || event == "record-replace:fleet" {

@@ -309,6 +309,14 @@ func shimRelaunchError(stderr io.Writer, sessionName, role string, err error) in
 func shimDetachedStartError(stderr io.Writer, err error) (int, bool) {
 	var failed *fleet.ShimDetachedStartFailedError
 	if errors.As(err, &failed) {
+		if failed.CleanupErr != nil {
+			remaining := failed.Remaining
+			if remaining == "" {
+				remaining = "retained artifacts"
+			}
+			fmt.Fprintf(stderr, "agentctl: could not start a detached shim for role %q in session %q: %v; cleanup left %s: %v (detached-start-retained)\n", failed.Role, failed.Session, failed.Cause, remaining, failed.CleanupErr)
+			return exitLaunchUnproven, true
+		}
 		fmt.Fprintf(stderr, "agentctl: could not start a detached shim for role %q in session %q: %v; no child was started and cleanup removed every artifact owned by this invocation (detached-start-failed)\n", failed.Role, failed.Session, failed.Cause)
 		return exitLaunch, true
 	}
