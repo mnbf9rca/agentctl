@@ -12,7 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -187,6 +189,41 @@ func TestShimRelaunchDetachedExitAndCancellationRetainRecordedFleet(t *testing.T
 				}
 			}
 		})
+	}
+}
+
+// This catches detached relaunch post-exit reconciliation depending on a fake
+// OutcomeMissing response that production shim.Client cannot return after the
+// lock/socket cleanup. Complete typed artifact absence is the rollback fact.
+func TestShimRelaunchDetachedImmediateExitUsesProductionArtifactAbsence(t *testing.T) {
+	events := &shimEventLog{}
+	inspector, lifecycle := emptyRuntimeArtifactInspector(t, events)
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	wait := make(chan error, 1)
+	wait <- errors.New("exit status 1")
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: wait}}}
+	dependencies.ArtifactInspector = inspector
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	dependencies.Now = func() time.Time {
+		nowCalls++
+		if nowCalls <= 2 {
+			return start
+		}
+		return start.Add(ptyx.ReadinessTimeout)
+	}
+	relauncher := NewShimRelauncher(nil, lifecycle, &fakeShimFleetRecords{events: events, record: record}, inspector, dependencies)
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	rolledBack, ok := err.(*ShimDetachedStartRolledBackError)
+	if !ok || rolledBack.CreatedPID != 4321 {
+		t.Fatalf("Relaunch() error = %T %v, want rolled back after production artifact absence", err, err)
+	}
+	want := []string{"record-read:fleet", "self", "look:amq", "look:claude", "detached-start:planner", "artifacts:planner"}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("production-equivalent relaunch events = %#v, want artifact proof with fleet retained %#v", got, want)
 	}
 }
 
@@ -651,6 +688,43 @@ func runtimeInspectorFixture(t *testing.T, state shim.RecordState) (*shim.Namesp
 		t.Fatalf("Claim.Close() error = %v", err)
 	}
 	return namespace, path
+}
+
+func emptyRuntimeArtifactInspector(t *testing.T, events *shimEventLog) (*recordingRuntimeArtifactInspector, ShimLifecycle) {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "a5-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(short root): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", filepath.Join(base, "runtime"))
+	t.Setenv("AGENTCTL_STATE_ROOT", filepath.Join(base, "state"))
+	namespace, err := shim.OpenNamespace()
+	if err != nil {
+		t.Fatalf("OpenNamespace() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatalf("RolePath() error = %v", err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatalf("RolePath.Close() error = %v", err)
+	}
+	lifecycle := shim.NewClient(namespace)
+	return &recordingRuntimeArtifactInspector{RuntimeShimRoleInspector: NewRuntimeShimRoleInspector(namespace, lifecycle), events: events}, lifecycle
+}
+
+type recordingRuntimeArtifactInspector struct {
+	*RuntimeShimRoleInspector
+	events *shimEventLog
+}
+
+func (i *recordingRuntimeArtifactInspector) InspectArtifacts(ctx context.Context, session, role string) (shim.RoleArtifacts, error) {
+	if i.events != nil {
+		i.events.add("artifacts:" + role)
+	}
+	return i.RuntimeShimRoleInspector.InspectArtifacts(ctx, session, role)
 }
 
 type inspectorLifecycle struct {

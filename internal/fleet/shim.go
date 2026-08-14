@@ -52,33 +52,41 @@ type ShimLifecycle interface {
 	Stop(context.Context, string, string) (shim.Response, error)
 }
 
+// ShimRoleArtifactInspector observes every volatile and durable role artifact
+// whose complete absence gates detached rollback and fleet-record removal.
+type ShimRoleArtifactInspector interface {
+	InspectArtifacts(context.Context, string, string) (shim.RoleArtifacts, error)
+}
+
 // ShimLaunchDependencies supplies only non-mutating system seams.
 type ShimLaunchDependencies struct {
-	LookPath        preflight.LookPathFunc
-	Executable      preflight.ExecutableFunc
-	Getwd           func() (string, error)
-	Stat            func(string) (fs.FileInfo, error)
-	Now             func() time.Time
-	Sleep           func(time.Duration)
-	Environment     func() []string
-	OpenDevNull     func() (*os.File, error)
-	DetachedStarter DetachedShimStarter
+	LookPath          preflight.LookPathFunc
+	Executable        preflight.ExecutableFunc
+	Getwd             func() (string, error)
+	Stat              func(string) (fs.FileInfo, error)
+	Now               func() time.Time
+	Sleep             func(time.Duration)
+	Environment       func() []string
+	OpenDevNull       func() (*os.File, error)
+	DetachedStarter   DetachedShimStarter
+	ArtifactInspector ShimRoleArtifactInspector
 }
 
 // ShimLauncher is the runtime-backed fleet launcher used by the public CLI.
 type ShimLauncher struct {
-	presentation    ShimPresentation
-	lifecycle       ShimLifecycle
-	records         ShimFleetRecords
-	lookPath        preflight.LookPathFunc
-	executable      preflight.ExecutableFunc
-	getwd           func() (string, error)
-	stat            func(string) (fs.FileInfo, error)
-	now             func() time.Time
-	sleep           func(time.Duration)
-	environment     func() []string
-	openDevNull     func() (*os.File, error)
-	detachedStarter DetachedShimStarter
+	presentation      ShimPresentation
+	lifecycle         ShimLifecycle
+	records           ShimFleetRecords
+	lookPath          preflight.LookPathFunc
+	executable        preflight.ExecutableFunc
+	getwd             func() (string, error)
+	stat              func(string) (fs.FileInfo, error)
+	now               func() time.Time
+	sleep             func(time.Duration)
+	environment       func() []string
+	openDevNull       func() (*os.File, error)
+	detachedStarter   DetachedShimStarter
+	artifactInspector ShimRoleArtifactInspector
 }
 
 // ShimLaunchResult reports optional presentation facts and the roster size.
@@ -245,7 +253,8 @@ func NewShimLauncher(presentation ShimPresentation, lifecycle ShimLifecycle, rec
 		getwd: dependencies.Getwd, stat: dependencies.Stat,
 		now: dependencies.Now, sleep: dependencies.Sleep,
 		environment: dependencies.Environment, openDevNull: dependencies.OpenDevNull,
-		detachedStarter: dependencies.DetachedStarter,
+		detachedStarter:   dependencies.DetachedStarter,
+		artifactInspector: dependencies.ArtifactInspector,
 	}
 }
 
@@ -327,13 +336,26 @@ func (l ShimLauncher) launchDetached(ctx context.Context, executable string, rec
 			return ShimLaunchResult{}, &ShimDetachedStartFailedError{Session: record.Session, Role: role.Name, Cause: err}
 		}
 		if err := l.waitDetachedReady(ctx, record.Session, role.Name, process); err != nil {
+			var uncertain *ShimDetachedStartUncertainError
+			if errors.As(err, &uncertain) {
+				return ShimLaunchResult{}, err
+			}
 			var exited *detachedShimExitedError
-			if errors.As(err, &exited) && l.detachedRoleAbsent(ctx, record.Session, role.Name) {
-				cleanup := l.rollbackDetached(ctx, record, readyRoles, true)
-				if cleanup.Err == nil {
-					return ShimLaunchResult{}, &ShimDetachedStartRolledBackError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err}
+			if errors.As(err, &exited) {
+				failedCleanup := l.waitDetachedRoleCleanup(ctx, record.Session, role.Name)
+				if failedCleanup.Absent() {
+					cleanup := l.rollbackDetached(ctx, record, readyRoles, true)
+					if cleanup.Err == nil {
+						return ShimLaunchResult{}, &ShimDetachedStartRolledBackError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err}
+					}
+					return ShimLaunchResult{}, &ShimDetachedStartRetainedError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err, Remaining: detachedArtifactDescription(cleanup.Remaining), CleanupErr: cleanup.Err}
 				}
-				return ShimLaunchResult{}, &ShimDetachedStartRetainedError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err, Remaining: detachedArtifactDescription(cleanup.Remaining), CleanupErr: cleanup.Err}
+				cleanup := l.rollbackDetached(ctx, record, readyRoles, false)
+				remaining := append(detachedRoleArtifactDescriptions(role.Name, failedCleanup), cleanup.Remaining...)
+				return ShimLaunchResult{}, &ShimDetachedStartRetainedError{
+					Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err,
+					Remaining: detachedArtifactDescription(remaining), CleanupErr: errors.Join(failedCleanup.Err, cleanup.Err),
+				}
 			}
 			// This role never established that the responder is our direct child.
 			// A role-addressed stop could therefore kill a peer. Stop only earlier
@@ -347,9 +369,42 @@ func (l ShimLauncher) launchDetached(ctx context.Context, executable string, rec
 	return ShimLaunchResult{Directory: record.Directory, TotalRoles: len(record.Roster)}, nil
 }
 
-func (l ShimLauncher) detachedRoleAbsent(ctx context.Context, session, role string) bool {
-	response, err := l.lifecycle.Observe(ctx, session, role)
-	return err == nil && response.Outcome == shim.OutcomeMissing
+func (l ShimLauncher) inspectDetachedArtifacts(ctx context.Context, session, role string) (shim.RoleArtifacts, error) {
+	if l.artifactInspector == nil {
+		return shim.RoleArtifacts{}, errors.New("detached role artifact inspector is unavailable")
+	}
+	return l.artifactInspector.InspectArtifacts(ctx, session, role)
+}
+
+type detachedRoleCleanup struct {
+	Artifacts    shim.RoleArtifacts
+	Err          error
+	Unreconciled bool
+}
+
+func (c detachedRoleCleanup) Absent() bool {
+	return c.Err == nil && c.Artifacts.Absent()
+}
+
+func (l ShimLauncher) waitDetachedRoleCleanup(ctx context.Context, session, role string) detachedRoleCleanup {
+	deadline := l.now().Add(ptyx.ReadinessTimeout)
+	for {
+		artifacts, err := l.inspectDetachedArtifacts(ctx, session, role)
+		if err == nil && artifacts.Absent() {
+			return detachedRoleCleanup{Artifacts: artifacts}
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return detachedRoleCleanup{Artifacts: artifacts, Err: errors.Join(err, contextErr), Unreconciled: true}
+		}
+		if !l.now().Before(deadline) {
+			unreconciled := err != nil
+			if err == nil {
+				err = fmt.Errorf("role %s cleanup was not observed complete within %s", role, ptyx.ReadinessTimeout)
+			}
+			return detachedRoleCleanup{Artifacts: artifacts, Err: err, Unreconciled: unreconciled}
+		}
+		l.sleep(ptyx.ReadinessPollInterval)
+	}
 }
 
 func (l ShimLauncher) startDetached(executable, session, directory string, role config.RoleConfig) (DetachedShimProcess, error) {
@@ -458,9 +513,14 @@ func (l ShimLauncher) rollbackDetached(ctx context.Context, record ShimFleetReco
 		if err != nil || !shimStopObservedChildExit(response) {
 			allAbsent = false
 			cleanup = append(cleanup, errors.Join(err, fmt.Errorf("stop role %s did not observe child exit", roles[index].Name)))
-			if response.Outcome == shim.OutcomeStopChildRetained {
-				remaining = append(remaining, "role "+roles[index].Name)
-			}
+			remaining = append(remaining, "unreconciled role "+roles[index].Name+" child/runtime state")
+			continue
+		}
+		roleCleanup := l.waitDetachedRoleCleanup(ctx, record.Session, roles[index].Name)
+		if !roleCleanup.Absent() {
+			allAbsent = false
+			cleanup = append(cleanup, roleCleanup.Err)
+			remaining = append(remaining, detachedRoleArtifactDescriptions(roles[index].Name, roleCleanup)...)
 		}
 	}
 	if allAbsent && removeRecord {
@@ -489,6 +549,17 @@ func detachedArtifactDescription(artifacts []string) string {
 func detachedUnreconciledArtifacts(pid int, artifacts []string) string {
 	unreconciled := fmt.Sprintf("unreconciled detached shim PID %d runtime state", pid)
 	return detachedArtifactDescription(append([]string{unreconciled}, artifacts...))
+}
+
+func detachedRoleArtifactDescriptions(role string, cleanup detachedRoleCleanup) []string {
+	remaining := make([]string, 0, 5)
+	for _, artifact := range cleanup.Artifacts.Remaining() {
+		remaining = append(remaining, "role "+role+" "+artifact)
+	}
+	if cleanup.Unreconciled {
+		remaining = append(remaining, "unreconciled role "+role+" artifact state")
+	}
+	return remaining
 }
 
 func (l ShimLauncher) rollback(

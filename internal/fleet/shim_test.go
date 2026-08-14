@@ -707,7 +707,7 @@ func TestShimLauncherDetachedSecondStartFailureStopsOnlyStartedRole(t *testing.T
 	if !errors.As(err, &failed) {
 		t.Fatalf("Launch() error = %T %v, want no-child detached start failure", err, err)
 	}
-	if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder", "detached-start:planner", "observe:planner", "detached-start:coder", "stop:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
+	if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder", "detached-start:planner", "observe:planner", "detached-start:coder", "stop:planner", "artifacts:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no-child rollback events = %#v, want %#v", got, want)
 	}
 }
@@ -812,8 +812,295 @@ func TestShimLauncherDetachedLaterStartFailureReportsRemainingArtifacts(t *testi
 
 	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
 	var failed *ShimDetachedStartFailedError
-	if !errors.As(err, &failed) || failed.Remaining != "role planner and durable fleet record" || failed.CleanupErr == nil {
-		t.Fatalf("Launch() error = %#v, want typed no-child failure retaining planner and record", err)
+	wantRemaining := "unreconciled role planner child/runtime state and durable fleet record"
+	if !errors.As(err, &failed) || failed.Remaining != wantRemaining || failed.CleanupErr == nil {
+		t.Fatalf("Launch() error = %#v, want typed no-child failure retaining %q", err, wantRemaining)
+	}
+}
+
+// This catches launchDetached treating a cancellation/deadline uncertainty as
+// a rollback trigger, which can stop an earlier ready role and discard the
+// full invocation state even though the newest direct child has unknown
+// disposition.
+func TestShimLauncherDetachedUncertaintyRetainsFullInvocationWithoutRollback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		fleet           config.FleetConfig
+		ctx             func() context.Context
+		responses       []shim.Response
+		processes       []*fakeDetachedShimProcess
+		configure       func(*ShimLaunchDependencies)
+		cancelOnObserve int
+		uncertain       string
+		wantEvents      []string
+	}{
+		{
+			name:  "first role cancellation",
+			fleet: config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}},
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}},
+			uncertain: "planner",
+			wantEvents: []string{
+				"self", "look:amq", "look:claude", "record:fleet:planner", "detached-start:planner",
+			},
+		},
+		{
+			name:      "first role deadline",
+			fleet:     config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}},
+			ctx:       context.Background,
+			responses: []shim.Response{{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStarting}},
+			processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}},
+			configure: func(dependencies *ShimLaunchDependencies) {
+				start := time.Unix(1000, 0)
+				nowCalls := 0
+				dependencies.Now = func() time.Time {
+					nowCalls++
+					if nowCalls == 1 {
+						return start
+					}
+					return start.Add(shimLaunchObservationTimeout)
+				}
+			},
+			uncertain: "planner",
+			wantEvents: []string{
+				"self", "look:amq", "look:claude", "record:fleet:planner", "detached-start:planner", "observe:planner",
+			},
+		},
+		{
+			name:            "later role cancellation",
+			fleet:           shimTestFleet(),
+			ctx:             context.Background,
+			responses:       []shim.Response{runningShimResponse(4321, 7001), {Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStarting}},
+			processes:       []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}, {pid: 5432, wait: make(chan error)}},
+			cancelOnObserve: 2,
+			uncertain:       "coder",
+			wantEvents: []string{
+				"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder",
+				"detached-start:planner", "observe:planner", "detached-start:coder", "observe:coder",
+			},
+		},
+		{
+			name:      "later role deadline",
+			fleet:     shimTestFleet(),
+			ctx:       context.Background,
+			responses: []shim.Response{runningShimResponse(4321, 7001), {Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStarting}},
+			processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}, {pid: 5432, wait: make(chan error)}},
+			configure: func(dependencies *ShimLaunchDependencies) {
+				start := time.Unix(1000, 0)
+				nowCalls := 0
+				dependencies.Now = func() time.Time {
+					nowCalls++
+					if nowCalls <= 2 {
+						return start
+					}
+					return start.Add(shimLaunchObservationTimeout)
+				}
+			},
+			uncertain: "coder",
+			wantEvents: []string{
+				"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder",
+				"detached-start:planner", "observe:planner", "detached-start:coder", "observe:coder",
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := &shimEventLog{}
+			dependencies := shimLaunchTestDependencies(events)
+			dependencies.DetachedStarter = &fakeDetachedShimStarter{events: events, processes: test.processes}
+			if test.configure != nil {
+				test.configure(&dependencies)
+			}
+			ctx := test.ctx()
+			var onObserve func()
+			if test.cancelOnObserve > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				observeCalls := 0
+				onObserve = func() {
+					observeCalls++
+					if observeCalls == test.cancelOnObserve {
+						cancel()
+					}
+				}
+			}
+			lifecycle := &fakeShimLifecycle{
+				events: events, observe: test.responses,
+				stop:      []shim.Response{stoppedShimResponse(7001)},
+				onObserve: onObserve,
+			}
+			launcher := NewShimLauncher(nil, lifecycle, &fakeShimFleetRecords{events: events}, dependencies)
+
+			_, err := launcher.Launch(ctx, "fleet", test.fleet, PresentationDetached, nil)
+			uncertain, ok := err.(*ShimDetachedStartUncertainError)
+			if !ok || uncertain.Role != test.uncertain {
+				t.Fatalf("Launch() error = %T %v, want exact detached-start uncertainty for %s", err, err, test.uncertain)
+			}
+			if got := events.snapshot(); !reflect.DeepEqual(got, test.wantEvents) {
+				t.Fatalf("uncertain launch events = %#v, want no stop or record removal %#v", got, test.wantEvents)
+			}
+		})
+	}
+}
+
+// This catches detached post-exit reconciliation asking the production client
+// for a synthetic missing response. Once the shim has removed its lock and
+// sockets, Client.Observe returns a filesystem error; only the complete typed
+// artifact observation can prove this invocation rolled back.
+func TestShimLauncherDetachedImmediateExitUsesProductionArtifactAbsence(t *testing.T) {
+	events := &shimEventLog{}
+	inspector, lifecycle := emptyRuntimeArtifactInspector(t, events)
+	wait := make(chan error, 1)
+	wait <- errors.New("exit status 1")
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: wait}}}
+	dependencies.ArtifactInspector = inspector
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	dependencies.Now = func() time.Time {
+		nowCalls++
+		if nowCalls <= 2 {
+			return start
+		}
+		return start.Add(ptyx.ReadinessTimeout)
+	}
+	launcher := NewShimLauncher(nil, lifecycle, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+	rolledBack, ok := err.(*ShimDetachedStartRolledBackError)
+	if !ok || rolledBack.CreatedPID != 4321 {
+		t.Fatalf("Launch() error = %T %v, want rolled back after production artifact absence", err, err)
+	}
+	want := []string{"self", "look:amq", "look:claude", "record:fleet:planner", "detached-start:planner", "artifacts:planner", "record-remove"}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("production-equivalent exit events = %#v, want artifact proof before fleet removal %#v", got, want)
+	}
+}
+
+// This catches rollbackDetached treating stop-child-exited as proof that the
+// server has already removed its control socket, attach socket, role record,
+// and lock. Fleet removal must follow the final complete-absence observation.
+func TestShimLauncherDetachedRollbackWaitsForStoppedRoleArtifactsBeforeFleetRemoval(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	artifacts := &fakeShimArtifactInspector{events: events, sequences: map[string][]shim.RoleArtifacts{
+		"planner": {
+			{Socket: true, Attach: true, Record: true, Lock: true},
+			{Attach: true, Lock: true},
+			{},
+		},
+	}}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}, errs: []error{nil, errors.New("second start failed")}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}, stop: []shim.Response{stoppedShimResponse(7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	dependencies.ArtifactInspector = artifacts
+	launcher := NewShimLauncher(nil, lifecycle, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
+	failed, ok := err.(*ShimDetachedStartFailedError)
+	if !ok || failed.CleanupErr != nil {
+		t.Fatalf("Launch() error = %T %#v, want no-child failure after delayed complete cleanup", err, err)
+	}
+	want := []string{
+		"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder",
+		"detached-start:planner", "observe:planner", "detached-start:coder", "stop:planner",
+		"artifacts:planner", "artifacts:planner", "artifacts:planner", "record-remove",
+	}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("delayed cleanup events = %#v, want artifact absence before fleet removal %#v", got, want)
+	}
+}
+
+// This catches rollbackDetached deleting the fleet record when child exit was
+// observed but exact role artifacts remain through the cleanup boundary.
+func TestShimLauncherDetachedCleanupFailureRetainsExactArtifactsAndFleetRecord(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	artifacts := &fakeShimArtifactInspector{events: events, sequences: map[string][]shim.RoleArtifacts{
+		"planner": {{Socket: true, Record: true}},
+	}}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}, errs: []error{nil, errors.New("second start failed")}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}, stop: []shim.Response{stoppedShimResponse(7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	dependencies.ArtifactInspector = artifacts
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	dependencies.Now = func() time.Time {
+		nowCalls++
+		if nowCalls <= 2 {
+			return start
+		}
+		return start.Add(ptyx.ReadinessTimeout)
+	}
+	launcher := NewShimLauncher(nil, lifecycle, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
+	failed, ok := err.(*ShimDetachedStartFailedError)
+	if !ok || failed.CleanupErr == nil {
+		t.Fatalf("Launch() error = %T %#v, want retained cleanup failure", err, err)
+	}
+	wantRemaining := "role planner socket, role planner record and durable fleet record"
+	if failed.Remaining != wantRemaining {
+		t.Fatalf("remaining = %q, want exact artifacts %q", failed.Remaining, wantRemaining)
+	}
+	for _, event := range events.snapshot() {
+		if event == "record-remove" {
+			t.Fatalf("cleanup failure removed fleet record: events=%#v", events.snapshot())
+		}
+	}
+}
+
+// This catches an artifact observation error hiding unreconciled paths merely
+// because the same partial observation also proved one concrete path remains.
+func TestShimLauncherDetachedCleanupObservationErrorReportsRemainingAndUnreconciledArtifacts(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	observationErr := errors.New("attach lstat denied")
+	artifacts := &fakeShimArtifactInspector{
+		events: events, sequences: map[string][]shim.RoleArtifacts{"planner": {{Socket: true}}},
+		errors: map[string]error{"planner": observationErr},
+	}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.ArtifactInspector = artifacts
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	dependencies.Now = func() time.Time {
+		nowCalls++
+		if nowCalls == 1 {
+			return start
+		}
+		return start.Add(ptyx.ReadinessTimeout)
+	}
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: events, stop: []shim.Response{stoppedShimResponse(7001)}}, &fakeShimFleetRecords{events: events}, dependencies)
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+
+	cleanup := launcher.rollbackDetached(context.Background(), record, []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}, true)
+	if cleanup.Err == nil || !errors.Is(cleanup.Err, observationErr) {
+		t.Fatalf("rollbackDetached() error = %v, want artifact observation error", cleanup.Err)
+	}
+	want := []string{"role planner socket", "unreconciled role planner artifact state", "durable fleet record"}
+	if !reflect.DeepEqual(cleanup.Remaining, want) {
+		t.Fatalf("rollbackDetached() remaining = %#v, want concrete and unreconciled facts %#v", cleanup.Remaining, want)
+	}
+	for _, event := range events.snapshot() {
+		if event == "record-remove" {
+			t.Fatalf("unreconciled cleanup removed fleet record: events=%#v", events.snapshot())
+		}
 	}
 }
 
@@ -1357,8 +1644,9 @@ func shimLaunchTestDependencies(events *shimEventLog) ShimLaunchDependencies {
 			events.add("self")
 			return "/current agentctl", nil
 		},
-		Getwd: func() (string, error) { return "/repo path", nil },
-		Stat:  func(string) (os.FileInfo, error) { return testFileInfo{mode: os.ModeDir | 0o755}, nil },
+		Getwd:             func() (string, error) { return "/repo path", nil },
+		Stat:              func(string) (os.FileInfo, error) { return testFileInfo{mode: os.ModeDir | 0o755}, nil },
+		ArtifactInspector: &fakeShimArtifactInspector{events: events},
 	}
 }
 
@@ -1465,6 +1753,25 @@ type fakeShimLifecycle struct {
 	observe   []shim.Response
 	stop      []shim.Response
 	onObserve func()
+}
+
+type fakeShimArtifactInspector struct {
+	events    *shimEventLog
+	sequences map[string][]shim.RoleArtifacts
+	errors    map[string]error
+}
+
+func (f *fakeShimArtifactInspector) InspectArtifacts(_ context.Context, _, role string) (shim.RoleArtifacts, error) {
+	f.events.add("artifacts:" + role)
+	sequence := f.sequences[role]
+	if len(sequence) == 0 {
+		return shim.RoleArtifacts{}, f.errors[role]
+	}
+	artifacts := sequence[0]
+	if len(sequence) > 1 {
+		f.sequences[role] = sequence[1:]
+	}
+	return artifacts, f.errors[role]
 }
 
 type fakeDetachedShimStarter struct {

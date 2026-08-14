@@ -110,6 +110,39 @@ type RolePath struct {
 	mu             sync.Mutex
 }
 
+// RoleArtifacts is one complete observation of the invocation-owned volatile
+// and durable paths whose absence gates fleet-record removal.
+type RoleArtifacts struct {
+	Socket bool
+	Attach bool
+	Record bool
+	Lock   bool
+}
+
+// Absent reports whether every role artifact was observed absent.
+func (a RoleArtifacts) Absent() bool {
+	return !a.Socket && !a.Attach && !a.Record && !a.Lock
+}
+
+// Remaining returns observed artifacts in the cleanup order used throughout
+// the shim lifecycle.
+func (a RoleArtifacts) Remaining() []string {
+	remaining := make([]string, 0, 4)
+	if a.Socket {
+		remaining = append(remaining, "socket")
+	}
+	if a.Attach {
+		remaining = append(remaining, "attach")
+	}
+	if a.Record {
+		remaining = append(remaining, "record")
+	}
+	if a.Lock {
+		remaining = append(remaining, "lock")
+	}
+	return remaining
+}
+
 // OpenNamespace resolves the declared environment surfaces and opens private,
 // descriptor-verified runtime and durable state roots.
 func OpenNamespace() (*Namespace, error) {
@@ -504,6 +537,87 @@ func (n *Namespace) RolePath(session, role string) (*RolePath, error) {
 // directories. Clients use it so observation remains read-only.
 func (n *Namespace) ExistingRolePath(session, role string) (*RolePath, error) {
 	return n.rolePath(session, role, false)
+}
+
+// ObserveRoleArtifacts reads every cleanup-owned pathname independently
+// through the namespace's retained roots. A missing parent proves absence only
+// for artifacts below that parent; the other root is still observed.
+func (n *Namespace) ObserveRoleArtifacts(session, role string) (RoleArtifacts, error) {
+	lockPath, socketPath, attachPath, recordPath, err := n.validatedRolePaths(session, role)
+	if err != nil {
+		return RoleArtifacts{}, err
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.runtime == nil || n.state == nil {
+		return RoleArtifacts{}, errors.New("namespace is closed")
+	}
+	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
+		return RoleArtifacts{}, err
+	}
+	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
+		return RoleArtifacts{}, err
+	}
+
+	var observed RoleArtifacts
+	runtimeSession, present, err := openOptionalPrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+	if err != nil {
+		return RoleArtifacts{}, err
+	}
+	if present {
+		observed.Socket, err = rootEntryPresent(runtimeSession, role+".sock", "socket", socketPath)
+		if err == nil {
+			observed.Attach, err = rootEntryPresent(runtimeSession, role+".attach", "attach socket", attachPath)
+		}
+		if err == nil {
+			observed.Lock, err = rootEntryPresent(runtimeSession, role+".lock", "lockfile", lockPath)
+		}
+		closeErr := runtimeSession.Close()
+		if err != nil || closeErr != nil {
+			return RoleArtifacts{}, errors.Join(err, closeErr)
+		}
+	}
+
+	stateSessions, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
+	if err != nil || !present {
+		return observed, err
+	}
+	stateSession, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
+	closeSessionsErr := stateSessions.Close()
+	if err != nil || closeSessionsErr != nil || !present {
+		return observed, errors.Join(err, closeSessionsErr)
+	}
+	stateRoles, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
+	closeSessionErr := stateSession.Close()
+	if err != nil || closeSessionErr != nil || !present {
+		return observed, errors.Join(err, closeSessionErr)
+	}
+	observed.Record, err = rootEntryPresent(stateRoles, role+".json", "record", recordPath)
+	closeRolesErr := stateRoles.Close()
+	return observed, errors.Join(err, closeRolesErr)
+}
+
+func openOptionalPrivateChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, bool, error) {
+	root, err := openPrivateChild(kind, fullPath, parent, name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return root, true, nil
+}
+
+func rootEntryPresent(root *os.Root, name, kind, path string) (bool, error) {
+	_, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, &FilesystemObservationError{Kind: kind, Path: path, Operation: "lstat declared path", Err: err}
+	}
+	return true, nil
 }
 
 // ExistingRuntimeRolePath opens only the already-created volatile session

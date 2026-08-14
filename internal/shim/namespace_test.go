@@ -3,6 +3,7 @@ package shim
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -12,6 +13,66 @@ import (
 	"syscall"
 	"testing"
 )
+
+// This catches an artifact observer that infers whole-role absence from only
+// the advisory lockfile or durable record while a control socket, attach
+// socket, or the independently rooted counterpart still exists.
+func TestNamespaceObserveRoleArtifactsTracksEveryCleanupArtifact(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Lock, []byte("lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Record, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	control, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attach, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Attach, Net: "unix"})
+	if err != nil {
+		_ = control.Close()
+		t.Fatal(err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := namespace.ObserveRoleArtifacts("fleet", "planner")
+	if err != nil {
+		t.Fatalf("ObserveRoleArtifacts() error = %v", err)
+	}
+	want := RoleArtifacts{Socket: true, Attach: true, Record: true, Lock: true}
+	if got != want {
+		t.Fatalf("ObserveRoleArtifacts() = %#v, want every remaining artifact %#v", got, want)
+	}
+
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := attach.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path.Lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path.Record); err != nil {
+		t.Fatal(err)
+	}
+	got, err = namespace.ObserveRoleArtifacts("fleet", "planner")
+	if err != nil || got != (RoleArtifacts{}) {
+		t.Fatalf("ObserveRoleArtifacts() after cleanup = %#v, %v, want complete absence", got, err)
+	}
+}
 
 func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	production, err := resolveNamespaceRoots(1234567890, "", "", "/Users/test/Library/Application Support")

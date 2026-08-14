@@ -55,6 +55,18 @@ func NewRuntimeShimRoleInspector(namespace *shim.Namespace, lifecycle ShimLifecy
 	return &RuntimeShimRoleInspector{namespace: namespace, lifecycle: lifecycle, observeProcess: shim.ObserveProcess}
 }
 
+// InspectArtifacts observes the complete post-exit cleanup boundary without
+// requiring the advisory lockfile or control socket to remain connectable.
+func (i *RuntimeShimRoleInspector) InspectArtifacts(ctx context.Context, session, role string) (shim.RoleArtifacts, error) {
+	if i == nil || i.namespace == nil {
+		return shim.RoleArtifacts{}, errors.New("runtime shim role artifact inspector requires namespace")
+	}
+	if err := ctx.Err(); err != nil {
+		return shim.RoleArtifacts{}, err
+	}
+	return i.namespace.ObserveRoleArtifacts(session, role)
+}
+
 // Inspect is read-only. A missing runtime-session directory is indeterminate,
 // because it cannot prove the separately durable role record is absent.
 func (i *RuntimeShimRoleInspector) Inspect(ctx context.Context, session, role string) (ShimRoleObservation, error) {
@@ -253,6 +265,11 @@ func NewShimRelauncher(
 	inspector ShimRoleInspector,
 	dependencies ShimLaunchDependencies,
 ) ShimRelauncher {
+	if dependencies.ArtifactInspector == nil {
+		if artifactInspector, ok := inspector.(ShimRoleArtifactInspector); ok {
+			dependencies.ArtifactInspector = artifactInspector
+		}
+	}
 	return ShimRelauncher{
 		launcher:  NewShimLauncher(presentation, lifecycle, records, dependencies),
 		inspector: inspector,
@@ -327,8 +344,16 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 		readyErr = r.launcher.waitDetachedReady(ctx, session, role.Name, process)
 		if readyErr != nil {
 			var exited *detachedShimExitedError
-			if errors.As(readyErr, &exited) && r.launcher.detachedRoleAbsent(ctx, session, role.Name) {
-				return ShimRelaunchResult{}, &ShimDetachedStartRolledBackError{Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr}
+			if errors.As(readyErr, &exited) {
+				cleanup := r.launcher.waitDetachedRoleCleanup(ctx, session, role.Name)
+				if cleanup.Absent() {
+					return ShimRelaunchResult{}, &ShimDetachedStartRolledBackError{Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr}
+				}
+				remaining := append(detachedRoleArtifactDescriptions(role.Name, cleanup), "durable fleet record")
+				return ShimRelaunchResult{}, &ShimDetachedStartRetainedError{
+					Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr,
+					Remaining: detachedArtifactDescription(remaining), CleanupErr: cleanup.Err,
+				}
 			}
 			var uncertain *ShimDetachedStartUncertainError
 			if errors.As(readyErr, &uncertain) {
