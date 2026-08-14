@@ -304,7 +304,7 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 		}
 	}
 	executable, err := preflight.CheckShimExecutables(
-		config.FleetConfig{Roles: []config.RoleConfig{role}}, r.launcher.lookPath, r.launcher.executable,
+		config.FleetConfig{Roles: []config.RoleConfig{role}}, true, r.launcher.lookPath, r.launcher.executable,
 	)
 	if err != nil {
 		return ShimRelaunchResult{}, err

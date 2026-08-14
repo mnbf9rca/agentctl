@@ -159,7 +159,7 @@ func (l ShimLauncher) Launch(ctx context.Context, session string, fleetConfig co
 	if l.presentation == nil || l.lifecycle == nil || l.records == nil {
 		return ShimLaunchResult{}, errors.New("shim launcher requires presentation, lifecycle, and fleet-record dependencies")
 	}
-	executable, err := preflight.CheckShimExecutables(fleetConfig, l.lookPath, l.executable)
+	executable, err := preflight.CheckShimExecutables(fleetConfig, true, l.lookPath, l.executable)
 	if err != nil {
 		return ShimLaunchResult{}, err
 	}

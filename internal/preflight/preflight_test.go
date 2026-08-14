@@ -83,7 +83,7 @@ func TestCheckExecutables(t *testing.T) {
 				return "/fake/bin/" + name, nil
 			}
 
-			err := CheckExecutables(config.FleetConfig{Roles: tt.roles}, lookPath)
+			err := CheckExecutables(config.FleetConfig{Roles: tt.roles}, true, lookPath)
 			if tt.wantMissing == "" {
 				if err != nil {
 					t.Fatalf("CheckExecutables() error = %v", err)
@@ -102,5 +102,27 @@ func TestCheckExecutables(t *testing.T) {
 				t.Fatalf("LookPath calls = %#v, want %#v", calls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+// Production mutation caught: making detached launch resolve tmux would make
+// this exact required-program sequence grow a tmux lookup.
+func TestCheckExecutablesDetachedDoesNotRequireTmux(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	err := CheckExecutables(config.FleetConfig{Roles: []config.RoleConfig{
+		{Name: "planner", Harness: config.HarnessClaude},
+		{Name: "coder", Harness: config.HarnessCodex},
+	}}, false, func(name string) (string, error) {
+		calls = append(calls, name)
+		return "/tools/" + name, nil
+	})
+	if err != nil {
+		t.Fatalf("CheckExecutables() error = %v", err)
+	}
+	want := []string{"amq", "claude", "codex"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("LookPath calls = %#v, want %#v", calls, want)
 	}
 }
