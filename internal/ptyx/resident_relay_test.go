@@ -107,6 +107,34 @@ func TestResidentRelayReleaseFixesQueuedBytesToTheirOriginalSink(t *testing.T) {
 	}
 }
 
+func TestResidentRelayReadEventNeverCrossesIntoLaterViewer(t *testing.T) {
+	relay := NewResidentRelay(newResidentStepReader(), &residentBufferWriter{})
+	firstSink := &residentBufferWriter{}
+	first, err := relay.AdmitViewer(firstSink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readForFirst := residentReadEvent{count: 3, value: []byte("old"), viewer: first.state}
+	first.Release()
+	first.Wait()
+	secondSink := &residentBufferWriter{}
+	second, err := relay.AdmitViewer(secondSink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal, processErr := relay.processRead(readForFirst); terminal || processErr != nil {
+		t.Fatalf("old read event processing = terminal %v, error %v", terminal, processErr)
+	}
+	if terminal, processErr := relay.processRead(residentReadEvent{count: 4, value: []byte("none")}); terminal || processErr != nil {
+		t.Fatalf("viewerless read event processing = terminal %v, error %v", terminal, processErr)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if got := secondSink.bytes(); len(got) != 0 {
+		t.Fatalf("pre-admission output reached replacement viewer: %q", got)
+	}
+	second.Release()
+}
+
 func TestResidentRelayPTYClosureEndsViewerAfterWritingQueuedOutput(t *testing.T) {
 	reader := newResidentStepReader()
 	relay := NewResidentRelay(reader, &residentBufferWriter{})
@@ -167,7 +195,7 @@ func TestResidentRelayExposesOneSerializedWriter(t *testing.T) {
 	}
 }
 
-func TestResidentRelayFlushCompletesCountedTailWithoutWaitingForPTYEOF(t *testing.T) {
+func TestResidentRelayFlushCompletesWithSlaveStillOpenAndNoPTYEOF(t *testing.T) {
 	reader := newResidentStepReader()
 	relay := NewResidentRelay(reader, &residentBufferWriter{})
 	sink := &residentBufferWriter{}
@@ -215,6 +243,33 @@ func TestResidentRelayFlushTimeoutFixesExactUndeliveredTail(t *testing.T) {
 	}
 }
 
+func TestResidentRelayEOFAcknowledgedCutoffRemainsConfirmableAfterRun(t *testing.T) {
+	reader := newResidentStepReader()
+	relay := NewResidentRelay(reader, &residentBufferWriter{})
+	sink := &residentGateWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	viewer, err := relay.AdmitViewer(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { runDone <- relay.Run(context.Background()) }()
+	reader.send([]byte("tail"), io.EOF)
+	select {
+	case <-sink.entered:
+	case <-time.After(time.Second):
+		t.Fatal("EOF tail writer did not block")
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run() EOF error = %v", err)
+	}
+	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	result := viewer.Flush(flushCtx)
+	if !result.Confirmed || result.Written != 0 || result.Undelivered != 4 {
+		t.Fatalf("post-EOF Flush() = %#v, want confirmed four-byte shortfall", result)
+	}
+}
+
 func TestResidentRelayFlushReportsUnconfirmedWhenDrainCannotAcknowledgeCutoff(t *testing.T) {
 	for _, test := range []struct {
 		name             string
@@ -224,23 +279,27 @@ func TestResidentRelayFlushReportsUnconfirmedWhenDrainCannotAcknowledgeCutoff(t 
 		{name: "nonzero known loss", knownUndelivered: 4},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			relay := NewResidentRelay(newResidentStepReader(), &residentBufferWriter{})
+			reader := newResidentStepReader()
+			relay := NewResidentRelay(reader, &residentBufferWriter{})
 			sink := &residentGateWriter{entered: make(chan struct{}), release: make(chan struct{})}
 			viewer, err := relay.AdmitViewer(sink)
 			if err != nil {
 				t.Fatal(err)
 			}
+			runCtx, stopRun := context.WithCancel(context.Background())
+			runDone := make(chan error, 1)
+			go func() { runDone <- relay.Run(runCtx) }()
 			if test.knownUndelivered != 0 {
-				viewer.state.offer([]byte("tail"))
+				reader.send([]byte("tail"), nil)
 				select {
 				case <-sink.entered:
 				case <-time.After(time.Second):
 					t.Fatal("tail writer did not block")
 				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			defer cancel()
-			result := viewer.Flush(ctx)
+			stopRun()
+			<-runDone
+			result := viewer.Flush(context.Background())
 			if result.Confirmed || result.Undelivered != test.knownUndelivered {
 				t.Fatalf("Flush() = %#v, want unconfirmed known-undelivered=%d", result, test.knownUndelivered)
 			}

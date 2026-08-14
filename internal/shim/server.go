@@ -30,6 +30,7 @@ type requestHandler struct {
 	operationMu  sync.Mutex
 	phaseMu      sync.RWMutex
 	phase        shimOperationPhase
+	stopPending  bool
 	session      string
 	role         string
 	shimPID      int
@@ -57,6 +58,9 @@ const (
 func (h *requestHandler) operationPhase() shimOperationPhase {
 	h.phaseMu.RLock()
 	defer h.phaseMu.RUnlock()
+	if h.stopPending && (h.phase == "" || h.phase == shimOperationActive) {
+		return shimOperationStopping
+	}
 	if h.phase == "" {
 		return shimOperationActive
 	}
@@ -64,32 +68,53 @@ func (h *requestHandler) operationPhase() shimOperationPhase {
 }
 
 func (h *requestHandler) beginStop(ctx context.Context) (shimOperationPhase, bool, error) {
+	h.phaseMu.Lock()
+	if h.stopPending || (h.phase != "" && h.phase != shimOperationActive) {
+		phase := h.phase
+		if h.stopPending {
+			phase = shimOperationStopping
+		}
+		h.phaseMu.Unlock()
+		return phase, false, nil
+	}
+	h.stopPending = true
+	h.phaseMu.Unlock()
+
 	var phase shimOperationPhase
-	var admitted bool
 	transition := func() {
 		h.phaseMu.Lock()
 		defer h.phaseMu.Unlock()
-		if h.phase == "" || h.phase == shimOperationActive {
-			h.phase = shimOperationStopping
-			phase, admitted = shimOperationStopping, true
-			return
-		}
-		phase = h.phase
+		h.phase = shimOperationStopping
+		h.stopPending = false
+		phase = shimOperationStopping
 	}
 	if h.inputBarrier != nil {
 		if err := h.inputBarrier.Transition(ctx, transition); err != nil {
+			h.phaseMu.Lock()
+			h.stopPending = false
+			h.phaseMu.Unlock()
 			return h.operationPhase(), false, err
 		}
 	} else {
 		transition()
 	}
-	return phase, admitted, nil
+	return phase, true, nil
 }
 
 func (h *requestHandler) setOperationPhase(phase shimOperationPhase) {
 	h.phaseMu.Lock()
 	h.phase = phase
+	h.stopPending = false
 	h.phaseMu.Unlock()
+}
+
+func (h *requestHandler) withActivePhase(action func() error) error {
+	h.phaseMu.RLock()
+	defer h.phaseMu.RUnlock()
+	if h.stopPending || (h.phase != "" && h.phase != shimOperationActive) {
+		return errAttachAdmissionUnavailable
+	}
+	return action()
 }
 
 func (h *requestHandler) operationPhaseResponse(outcome Outcome, phase shimOperationPhase) Response {
@@ -377,7 +402,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 			Resize: func(size ptyx.WindowSize) error {
 				return runtime.terminal.SetWindowSize(runtime.child.Master(), size)
 			},
-			Phase: handler.operationPhase,
+			Phase: handler.operationPhase, WithActive: handler.withActivePhase,
 		})
 		attachErrors := make(chan error, 1)
 		attachAcceptErr = attachErrors

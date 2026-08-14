@@ -49,10 +49,11 @@ type ResidentRelay struct {
 	reader     ContextReader
 	serialized *SerializedWriter
 
-	mu       sync.Mutex
-	viewer   *residentViewerState
-	closed   bool
-	closeErr error
+	mu              sync.Mutex
+	viewer          *residentViewerState
+	closed          bool
+	closeErr        error
+	terminalCutoffs map[*residentViewerState]uint64
 
 	barriers      chan residentBarrier
 	runDone       chan struct{}
@@ -176,6 +177,7 @@ type residentReadEvent struct {
 	value    []byte
 	count    int
 	err      error
+	viewer   *residentViewerState
 }
 
 type residentBarrier struct {
@@ -193,7 +195,10 @@ func (r *ResidentRelay) readLoop(ctx context.Context, reads chan<- residentReadE
 	buffer := make([]byte, relayBufferSize)
 	for {
 		count, err := r.reader.Read(ctx, buffer)
-		event := residentReadEvent{sequence: r.readCompleted.Add(1), count: count, err: err}
+		event := residentReadEvent{
+			sequence: r.readCompleted.Add(1), count: count, err: err,
+			viewer: r.currentViewer(),
+		}
 		if count > 0 && count <= len(buffer) {
 			event.value = append([]byte(nil), buffer[:count]...)
 		}
@@ -219,14 +224,19 @@ func (r *ResidentRelay) processRead(event residentReadEvent) (bool, error) {
 		return true, r.close(err)
 	}
 	if event.count > 0 {
-		viewer := r.currentViewer()
-		if viewer != nil {
-			viewer.offer(event.value)
+		if event.viewer != nil {
+			event.viewer.offer(event.value)
 		}
 	}
 	if event.err != nil {
 		if errors.Is(event.err, io.EOF) {
-			r.closeAfterDrain(io.EOF)
+			current := r.closeAfterDrain(io.EOF)
+			if event.viewer != nil {
+				r.recordTerminalCutoff(event.viewer, event.viewer.cutoff())
+			}
+			if current != nil && current != event.viewer {
+				r.recordTerminalCutoff(current, current.cutoff())
+			}
 			return true, nil
 		}
 		return true, r.close(event.err)
@@ -245,7 +255,7 @@ func (r *ResidentRelay) flushViewer(ctx context.Context, viewer *residentViewerS
 	select {
 	case r.barriers <- request:
 	case <-r.runDone:
-		return viewer.unconfirmed(ctx)
+		return r.finishAfterRun(ctx, viewer)
 	case <-ctx.Done():
 		return viewer.unconfirmed(ctx)
 	}
@@ -257,7 +267,7 @@ func (r *ResidentRelay) flushViewer(ctx context.Context, viewer *residentViewerS
 		case result := <-request.response:
 			return viewer.finishFlushResult(ctx, result)
 		default:
-			return viewer.unconfirmed(ctx)
+			return r.finishAfterRun(ctx, viewer)
 		}
 	case <-ctx.Done():
 		select {
@@ -267,6 +277,25 @@ func (r *ResidentRelay) flushViewer(ctx context.Context, viewer *residentViewerS
 			return viewer.unconfirmed(ctx)
 		}
 	}
+}
+
+func (r *ResidentRelay) recordTerminalCutoff(viewer *residentViewerState, cutoff uint64) {
+	r.mu.Lock()
+	if r.terminalCutoffs == nil {
+		r.terminalCutoffs = make(map[*residentViewerState]uint64)
+	}
+	r.terminalCutoffs[viewer] = cutoff
+	r.mu.Unlock()
+}
+
+func (r *ResidentRelay) finishAfterRun(ctx context.Context, viewer *residentViewerState) ResidentFlushResult {
+	r.mu.Lock()
+	cutoff, confirmed := r.terminalCutoffs[viewer]
+	r.mu.Unlock()
+	if confirmed {
+		return viewer.flushCutoff(ctx, cutoff)
+	}
+	return viewer.unconfirmed(ctx)
 }
 
 func (r *ResidentRelay) currentViewer() *residentViewerState {
@@ -295,7 +324,7 @@ func (r *ResidentRelay) close(err error) error {
 	return err
 }
 
-func (r *ResidentRelay) closeAfterDrain(err error) {
+func (r *ResidentRelay) closeAfterDrain(err error) *residentViewerState {
 	r.mu.Lock()
 	r.closed = true
 	r.closeErr = err
@@ -304,6 +333,7 @@ func (r *ResidentRelay) closeAfterDrain(err error) {
 	if viewer != nil {
 		viewer.endAfterDrain(err)
 	}
+	return viewer
 }
 
 type residentViewerState struct {

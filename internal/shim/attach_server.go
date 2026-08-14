@@ -20,6 +20,16 @@ const attachPendingActions = 16
 
 var errAttachCounterExhausted = errors.New("attach output counter exhausted")
 
+var (
+	errAttachAdmissionUnavailable = errors.New("attach admission is unavailable while role is not active")
+	errAttachAdmissionEnded       = errors.New("attach admission ended before PTY commit")
+)
+
+type attachInitialResizeError struct{ err error }
+
+func (e *attachInitialResizeError) Error() string { return e.err.Error() }
+func (e *attachInitialResizeError) Unwrap() error { return e.err }
+
 type attachPeerIdentity struct {
 	PID int
 	UID uint32
@@ -34,6 +44,7 @@ type attachServerConfig struct {
 	PeerIdentity func(net.Conn) (attachPeerIdentity, error)
 	Resize       func(ptyx.WindowSize) error
 	Phase        func() shimOperationPhase
+	WithActive   func(func() error) error
 }
 
 type residentViewerRelay interface {
@@ -57,6 +68,14 @@ func newAttachServer(config attachServerConfig) *attachServer {
 	}
 	if config.Phase == nil {
 		config.Phase = func() shimOperationPhase { return shimOperationActive }
+	}
+	if config.WithActive == nil {
+		config.WithActive = func(action func() error) error {
+			if config.Phase() != shimOperationActive {
+				return errAttachAdmissionUnavailable
+			}
+			return action()
+		}
 	}
 	return &attachServer{config: config}
 }
@@ -133,7 +152,7 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 		})
 	}
 	if s.config.Phase() != shimOperationActive {
-		return errors.New("attach admission is unavailable while role is not active")
+		return errAttachAdmissionUnavailable
 	}
 	admission, incumbent, accepting := s.claim(ctx, connection, peer.PID)
 	if !accepting {
@@ -144,19 +163,22 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 	}
 	defer admission.finishUnlessLifecycleOwned(AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing})
 
+	output := &attachOutputWriter{connection: connection}
 	size := ptyx.WindowSize{Rows: uint16(hello.Rows), Cols: uint16(hello.Cols)}
-	if err := s.config.Resize(size); err != nil {
+	var viewer *ptyx.ResidentViewer
+	err = s.config.WithActive(func() error {
+		var commitErr error
+		viewer, commitErr = s.commitAdmission(admission, output, size)
+		return commitErr
+	})
+	var resizeErr *attachInitialResizeError
+	if errors.As(err, &resizeErr) {
 		admission.releaseWithoutFinal()
 		return s.refuse(connection, AttachControl{
 			Version: 1, Kind: AttachControlRefused, Outcome: AttachRefusalInitialSizeFailed,
-			Rows: hello.Rows, Cols: hello.Cols, Cause: err.Error(),
+			Rows: hello.Rows, Cols: hello.Cols, Cause: resizeErr.Error(),
 		})
 	}
-	if admission.ctx.Err() != nil || !s.current(admission) {
-		return errors.New("attach admission ended before commit")
-	}
-	output := &attachOutputWriter{connection: connection}
-	viewer, err := s.commitAdmission(admission, output)
 	if err != nil {
 		admission.releaseWithoutFinal()
 		if errors.Is(err, ptyx.ErrResidentViewerPresent) {
@@ -248,11 +270,12 @@ func (a *attachAdmission) runActions(actions <-chan attachAction, failures chan<
 					failures <- attachActionError{control: AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing, Bytes: a.output.bytesWritten()}, err: errors.Join(errors.New("admitted attach control is invalid"), err)}
 					return
 				}
-				if !a.server.current(a) {
+				size := ptyx.WindowSize{Rows: uint16(control.Rows), Cols: uint16(control.Cols)}
+				err = a.server.resizeAdmission(a, size)
+				if errors.Is(err, errAttachAdmissionEnded) {
 					continue
 				}
-				size := ptyx.WindowSize{Rows: uint16(control.Rows), Cols: uint16(control.Cols)}
-				if err := a.server.config.Resize(size); err != nil {
+				if err != nil {
 					failures <- attachActionError{control: AttachControl{
 						Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionResizeFailed,
 						Bytes: a.output.bytesWritten(), Rows: control.Rows, Cols: control.Cols, Cause: err.Error(),
@@ -291,11 +314,14 @@ func (s *attachServer) current(admission *attachAdmission) bool {
 	return s.viewer == admission
 }
 
-func (s *attachServer) commitAdmission(admission *attachAdmission, output *attachOutputWriter) (*ptyx.ResidentViewer, error) {
+func (s *attachServer) commitAdmission(admission *attachAdmission, output *attachOutputWriter, size ptyx.WindowSize) (*ptyx.ResidentViewer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.terminal || s.viewer != admission || admission.ctx.Err() != nil {
-		return nil, errors.New("attach admission ended before commit")
+		return nil, errAttachAdmissionEnded
+	}
+	if err := s.config.Resize(size); err != nil {
+		return nil, &attachInitialResizeError{err: err}
 	}
 	// Keep both lifecycle decisions and role-output writes behind the complete
 	// admission transaction: fixed relay viewer, then admitted control frame.
@@ -311,6 +337,15 @@ func (s *attachServer) commitAdmission(admission *attachAdmission, output *attac
 		return viewer, err
 	}
 	return viewer, nil
+}
+
+func (s *attachServer) resizeAdmission(admission *attachAdmission, size ptyx.WindowSize) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminal || s.viewer != admission || admission.ctx.Err() != nil {
+		return errAttachAdmissionEnded
+	}
+	return s.config.Resize(size)
 }
 
 func (s *attachServer) release(admission *attachAdmission) {

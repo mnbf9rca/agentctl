@@ -1508,7 +1508,7 @@ func TestShimViewerInputRechecksCancellationAndRolePhaseAtCommit(t *testing.T) {
 	}
 }
 
-func TestShimStopTransitionWaitsForViewerCommitBeforeStoppingPhase(t *testing.T) {
+func TestShimStopReportsPendingWhileWaitingForViewerCommitBarrier(t *testing.T) {
 	writer := &residentGateWriterForShim{entered: make(chan struct{}), release: make(chan struct{})}
 	handler := &requestHandler{}
 	input := newRoleInputWriter(writer, func() bool { return handler.operationPhase() == shimOperationActive })
@@ -1531,6 +1531,9 @@ func TestShimStopTransitionWaitsForViewerCommitBeforeStoppingPhase(t *testing.T)
 	case err := <-stopDone:
 		t.Fatalf("stop crossed an in-flight viewer commit: %v", err)
 	case <-time.After(25 * time.Millisecond):
+	}
+	if handler.operationPhase() != shimOperationStopping {
+		t.Fatalf("pending stop phase = %q, want stopping", handler.operationPhase())
 	}
 	close(writer.release)
 	if err := <-viewerDone; err != nil {
