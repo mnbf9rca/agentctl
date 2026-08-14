@@ -45,6 +45,12 @@ func initFormRepo(t *testing.T, version string, tags []string) string {
 	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "release-verification-notes.md"), []byte("# committed evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	run("git", "add", "-A")
 	run("git", "commit", "-q", "-m", "init")
 	for _, tag := range tags {
@@ -221,6 +227,42 @@ func TestCheckPromotionForm_ChecklistRunRequiresEveryTmuxlessLeg(t *testing.T) {
 				t.Fatalf("missing %s affirmation err=%v output=%q", test.name, err, out)
 			}
 		})
+	}
+}
+
+func TestCheckPromotionForm_ChecklistRunRequiresCommittedCleanRelativeEvidence(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	if err := os.WriteFile(filepath.Join(dir, "docs", "untracked.md"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		evidence string
+		want     string
+	}{
+		{"invented", "docs/invented.md", "not a tracked evidence location"},
+		{"absolute", "/tmp/evidence.md", "repository-relative"},
+		{"traversal", "docs/../outside.md", "repository-relative"},
+		{"untracked", "docs/untracked.md", "not a tracked evidence location"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", test.evidence, "0.1.0"))
+			if err == nil || !strings.Contains(out, test.want) {
+				t.Fatalf("evidence %q err=%v output=%q", test.evidence, err, out)
+			}
+		})
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "staged.md"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", "docs/staged.md")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add staged evidence: %v\n%s", err, out)
+	}
+	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", "docs/staged.md", "0.1.0"))
+	if err == nil || !strings.Contains(out, "not committed at HEAD") {
+		t.Fatalf("staged evidence err=%v output=%q", err, out)
 	}
 }
 

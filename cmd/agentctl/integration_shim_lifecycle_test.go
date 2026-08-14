@@ -772,6 +772,7 @@ func TestIntegrationReleaseCandidateCrashRelaunchAndKillUseObservedAbsence(t *te
 		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
 	}
 	fixture := newIntegrationFixture(t)
+	fixture.createSentinelSession("candidate-relaunch-sentinel")
 	launched := fixture.runAgentctl("launch", "--session", "candidate-relaunch", "--roles", "planner:claude")
 	if launched.exitCode != exitOK {
 		t.Fatalf("candidate launch = %#v", launched)
@@ -832,6 +833,10 @@ func TestIntegrationReleaseCandidateCrashRelaunchAndKillUseObservedAbsence(t *te
 	if fixture.hasSession("candidate-relaunch") {
 		t.Fatal("candidate presentation survived observed kill cleanup")
 	}
+	if !fixture.hasSession("candidate-relaunch-sentinel") {
+		t.Fatal("candidate crash/relaunch/kill changed the private-socket sentinel presentation")
+	}
+	t.Log("candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation")
 	after := fixture.runAgentctl("status", "--session", "candidate-relaunch")
 	if after.exitCode != exitSession || !strings.Contains(after.stderr, "has no durable fleet configuration") {
 		t.Fatalf("candidate status after kill = %#v", after)

@@ -119,6 +119,7 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 		"test -tags integration ./cmd/agentctl -count=1 -v -run TestIntegration(",
 		"DetachedRoleAttachReleasesOnSignalAndReadmits",
 		"ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery",
+		"ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence",
 		"ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild",
 		"ShimKillObservesChildExitBeforePresentationAndFleetCleanup",
 		"test ./internal/attach ./internal/shim -count=1 -v -run Test(",
@@ -141,6 +142,10 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 	}
 	if integrationLine == "" || !strings.Contains(integrationLine, "project=/tmp/a8.") || !strings.Contains(integrationLine, "owned=/tmp/a8.") {
 		t.Fatalf("candidate integration did not receive Task-8-owned project and integration roots:\n%s", log)
+	}
+	integrationTranscript := readTestFile(t, filepath.Join(fixture.root, "evidence", "integration.log"))
+	if !strings.Contains(integrationTranscript, "candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation") {
+		t.Fatalf("candidate integration transcript omits the sentinel-preservation result:\n%s", integrationTranscript)
 	}
 	if got := strings.TrimSpace(readTestFile(t, fixture.matrixLog)); got != "root=/tmp" {
 		t.Fatalf("version matrix root = %q, want short isolated /tmp parent", got)
@@ -181,6 +186,9 @@ esac
 	writeTestFile(t, filepath.Join(root, "stubs/go"), []byte(`#!/usr/bin/env bash
 set -eu
 printf 'cwd=%s|argv=%s|candidate=%s|project=%s|owned=%s\n' "$PWD" "$*" "${AGENTCTL_INTEGRATION_RELEASE_CANDIDATE:-}" "${AGENTCTL_INTEGRATION_PROJECT_DIR:-}" "${AGENTCTL_INTEGRATION_OWNED_ROOT:-}" >>"$AGENTCTL_TASK8_GO_LOG"
+if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence* ]]; then
+  printf '%s\n' 'candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation'
+fi
 if [ "${1:-}" = version ] && [ "${2:-}" = -m ]; then
   printf 'golang.org/x/sys v0.47.0\nvcs.revision=%s\nvcs.modified=false\n' "$(git rev-parse HEAD)"
 elif [ "${1:-}" = build ]; then
