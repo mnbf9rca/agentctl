@@ -17,7 +17,7 @@
 - `docs/superpowers/plans/2026-08-14-attach-darwin-io-probes.md` is the evidence source for Darwin-only mechanisms. Tasks cite the applicable probe numbers explicitly.
 - `SECURITY.md` governs the current threat model. Its change in the final product PR must be a concise current-truth delta, not a design appendix.
 - `docs/release-checklist.md` and `.github/workflows/ci.yml` govern release and CI evidence.
-- The approved replacement README input is **the pinned commit** requested by ruling R46; replace this phrase with its commit SHA and the SHA-256 of `README.md` when the reviewer posts them on `issue-225/plan`. Task 5 reads only those immutable bytes, then deletes the `## Not yet implemented` block because that atomic public PR makes the described UX true. The design-notes file already landed on `main` and is not copied.
+- The approved replacement README input from ruling R46 is branch `design/tmuxless-readme-approved` at signed, pushed commit `a75417f6c2efaec2d7d967694ae9a125d2f8167f`, based on `main` commit `cfb28e8`, with `README.md` SHA-256 `c80cec13ff7d52e409418a424fe1359a3077945d6c5ff22b42278bc3349c1939`; the source, commit, and remote bytes were verified before this pin was issued. Task 5 reads only those immutable bytes and verifies that digest, then deletes the `## Not yet implemented` block because that atomic public PR makes the described UX true. The design-notes file already landed on `main` and is not copied.
 
 ## Non-negotiable implementation rules
 
