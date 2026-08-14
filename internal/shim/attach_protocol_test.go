@@ -281,6 +281,14 @@ func TestAttachSequenceAcceptsHandshakeTrafficAndOneTerminalDecision(t *testing.
 			t.Fatalf("Observe(%d) error = %v", index, err)
 		}
 	}
+	for _, frame := range []AttachFrame{
+		{Kind: AttachFrameViewerInput, Data: []byte("already written")},
+		controlAttachFrame(t, AttachControl{Version: 1, Kind: AttachControlResize, Rows: 62, Cols: 202}),
+	} {
+		if err := sequence.Observe(AttachFromClient, frame); err != nil {
+			t.Fatalf("Observe rejected client frame by treating shim final as a cross-direction terminal: %v", err)
+		}
+	}
 	if err := sequence.Observe(AttachFromShim, AttachFrame{Kind: AttachFrameRoleOutput, Data: []byte("late")}); err == nil {
 		t.Fatal("Observe accepted output after the terminal frame")
 	}

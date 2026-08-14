@@ -46,7 +46,8 @@ const (
 // post-admission streams without owning a connection or lifecycle action. Its
 // zero value is ready to observe a new conversation.
 type AttachSequence struct {
-	state attachSequenceState
+	state        attachSequenceState
+	shimTerminal bool
 }
 
 type attachSequenceState uint8
@@ -56,7 +57,7 @@ const (
 	attachSequenceShimHello
 	attachSequenceClientHello
 	attachSequenceAdmitted
-	attachSequenceClosed
+	attachSequenceRefused
 )
 
 // AttachControlKind is the closed selector for JSON control frames.
@@ -155,7 +156,7 @@ func (sequence *AttachSequence) Observe(direction AttachDirection, frame AttachF
 		case AttachControlAdmitted:
 			sequence.state = attachSequenceAdmitted
 		case AttachControlRefused:
-			sequence.state = attachSequenceClosed
+			sequence.state = attachSequenceRefused
 		default:
 			return errors.New("attach admission decision must be admitted or refused")
 		}
@@ -169,15 +170,18 @@ func (sequence *AttachSequence) Observe(direction AttachDirection, frame AttachF
 			}
 			return nil
 		}
+		if sequence.shimTerminal {
+			return errors.New("attach shim stream is already terminal")
+		}
 		if frame.Kind == AttachFrameRoleOutput {
 			return nil
 		}
 		if frame.Kind != AttachFrameControl || control.Kind != AttachControlFinal {
 			return errors.New("admitted shim stream accepts only output or final frames")
 		}
-		sequence.state = attachSequenceClosed
-	case attachSequenceClosed:
-		return errors.New("attach sequence is already terminal")
+		sequence.shimTerminal = true
+	case attachSequenceRefused:
+		return errors.New("attach sequence ended with refusal")
 	default:
 		return errors.New("attach sequence has invalid internal state")
 	}
