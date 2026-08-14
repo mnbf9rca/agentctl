@@ -154,7 +154,9 @@ func TestResidentRelayCancellationReturnsPromptlyAndEndsViewer(t *testing.T) {
 func TestResidentRelayExposesOneSerializedWriter(t *testing.T) {
 	target := &residentBufferWriter{}
 	relay := NewResidentRelay(newResidentStepReader(), target)
-	if relay.Writer() == nil || relay.Writer() != relay.Writer() {
+	firstWriter := relay.Writer()
+	secondWriter := relay.Writer()
+	if firstWriter == nil || firstWriter != secondWriter {
 		t.Fatal("Writer() did not return one stable SerializedWriter")
 	}
 	if _, err := relay.Writer().Write(context.Background(), []byte("input")); err != nil {
