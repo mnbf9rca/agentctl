@@ -193,6 +193,7 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 	actions := make(chan attachAction, attachPendingActions)
 	actionErrors := make(chan attachActionError, 1)
 	go admission.runActions(actions, actionErrors)
+	viewerDone := viewer.Done()
 
 	for {
 		select {
@@ -217,15 +218,19 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 		case failure := <-actionErrors:
 			admission.finish(failure.control)
 			return failure.err
-		case result := <-viewer.Done():
+		case result := <-viewerDone:
+			if errors.Is(result.Err, io.EOF) {
+				// PTY EOF is not child-exit evidence. Keep this admission pinned
+				// until the lifecycle's child watcher or cleanup observation wins.
+				viewerDone = nil
+				continue
+			}
 			control := AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing, Bytes: output.bytesWritten()}
 			switch {
 			case errors.Is(result.Err, ptyx.ErrAttachLagOverflow):
 				control.Disposition = AttachDispositionViewerEvicted
 			case errors.Is(result.Err, errAttachCounterExhausted):
 				control.Disposition = AttachDispositionCounterExhausted
-			case errors.Is(result.Err, io.EOF):
-				control.Disposition = AttachDispositionChildExited
 			}
 			admission.finish(control)
 			return nil

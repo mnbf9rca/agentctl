@@ -751,6 +751,49 @@ func TestAttachServerChildExitFlushesCountedOutputBeforeOneFinal(t *testing.T) {
 	waitAttachServer(t, done)
 }
 
+func TestAttachServerPTYEOFWaitsForAuthoritativeLifecycleDisposition(t *testing.T) {
+	reader := &attachTestReader{steps: make(chan attachTestReadStep, 1)}
+	relay := ptyx.NewResidentRelay(reader, attachDiscardWriter{})
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relay.Run(context.Background()) }()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	client, done := startAttachConnection(t, server)
+	admitAttachClient(t, client)
+	reader.steps <- attachTestReadStep{err: io.EOF}
+	if err := <-relayDone; err != nil {
+		t.Fatalf("relay EOF error = %v", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := ReadAttachFrame(client); err == nil {
+		t.Fatalf("PTY EOF inferred a lifecycle frame %#v", frame)
+	} else {
+		var timeout net.Error
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("PTY EOF read = %T %v, want pending lifecycle timeout", err, err)
+		}
+	}
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	cleanupDone := make(chan struct{})
+	go func() { server.cleanupRetained(); close(cleanupDone) }()
+	final := readAttachControlKind(t, client, AttachControlFinal)
+	if final.Disposition != AttachDispositionCleanupRetained {
+		t.Fatalf("post-EOF lifecycle final = %#v, want cleanup-retained", final)
+	}
+	<-cleanupDone
+	waitAttachServer(t, done)
+}
+
 func TestAttachRuntimeSourceGuardsKeepSurfacesClosedAndBuffersBounded(t *testing.T) {
 	attachSource, err := os.ReadFile("attach_server.go")
 	if err != nil {
