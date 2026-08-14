@@ -97,7 +97,13 @@ func (d *attachDescriptor) operationContext(ctx context.Context) (context.Contex
 }
 
 func (d *attachDescriptor) available() error {
-	if d.closed.Load() || d.file.Fd() != uintptr(d.fd) {
+	if d.closed.Load() {
+		return ErrAttachDescriptorUnavailable
+	}
+	available := false
+	if err := d.raw.Control(func(fd uintptr) {
+		available = !d.closed.Load() && fd == uintptr(d.fd)
+	}); err != nil || !available {
 		return ErrAttachDescriptorUnavailable
 	}
 	return nil

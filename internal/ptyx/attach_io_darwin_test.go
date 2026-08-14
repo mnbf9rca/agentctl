@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 type fcntlCall struct {
@@ -298,6 +299,73 @@ func TestPTYReaderCancellationIsNotStarvedByContinuouslyReadablePTY(t *testing.T
 		t.Fatal("continuous readability starved cancellation")
 	}
 	<-producerDone
+}
+
+func TestPTYReaderCancelsParkedReadOnRealBlockingOpenedPTY(t *testing.T) {
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatalf("open /dev/ptmx: %v", err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	masterFD := int(master.Fd())
+	if err := rawIOCTL(uintptr(masterFD), syscall.TIOCPTYGRANT, nil); err != nil {
+		t.Fatalf("grant PTY slave: %v", err)
+	}
+	if err := rawIOCTL(uintptr(masterFD), syscall.TIOCPTYUNLK, nil); err != nil {
+		t.Fatalf("unlock PTY slave: %v", err)
+	}
+	var slaveName [128]byte
+	if err := rawIOCTL(uintptr(masterFD), syscall.TIOCPTYGNAME, unsafe.Pointer(&slaveName[0])); err != nil {
+		t.Fatalf("resolve PTY slave name: %v", err)
+	}
+	slave, err := os.OpenFile(nulTerminatedString(slaveName[:]), os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatalf("open PTY slave: %v", err)
+	}
+	t.Cleanup(func() { _ = slave.Close() })
+	slaveFD := int(slave.Fd())
+
+	reader, err := NewPTYReader(master)
+	if err != nil {
+		t.Fatalf("NewPTYReader() error = %v", err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	type readResult struct {
+		count int
+		err   error
+	}
+	done := make(chan readResult, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		count, readErr := reader.Read(ctx, make([]byte, 1))
+		done <- readResult{count: count, err: readErr}
+	}()
+	<-started
+	select {
+	case result := <-done:
+		t.Fatalf("Read() returned before cancellation: (%d, %v)", result.count, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case result := <-done:
+		if result.count != 0 || !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("Read() = (%d, %v), want (0, context.Canceled)", result.count, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = reader.Close()
+		_, _ = syscall.Write(slaveFD, []byte("release"))
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timed-out Read could not be released through its isolated PTY slave")
+		}
+		t.Fatal("Read() did not return after caller context cancellation")
+	}
 }
 
 func TestTerminalWriterCompletesPartialWritesWithEINTRAndKqueueRetry(t *testing.T) {
