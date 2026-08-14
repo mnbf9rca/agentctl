@@ -422,6 +422,9 @@ func (l ShimLauncher) waitDetachedReady(ctx context.Context, session, role strin
 			return &ShimDetachedStartUncertainError{Session: session, Role: role, CreatedPID: process.PID(), Cause: err}
 		}
 		if !l.now().Before(deadline) {
+			if exit, exited := detachedWaiterExit(waiter); exited {
+				return detachedExitError(process.PID(), exit)
+			}
 			return &ShimDetachedStartUncertainError{Session: session, Role: role, CreatedPID: process.PID(), Cause: err}
 		}
 		l.sleep(ptyx.ReadinessPollInterval)

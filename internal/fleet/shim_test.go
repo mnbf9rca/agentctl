@@ -658,6 +658,37 @@ func TestShimLauncherStartsDetachedRolesDirectlyInRosterOrder(t *testing.T) {
 	}
 }
 
+// This catches detached launch routing through a shell or tmux presentation
+// instead of the sole typed direct-starter boundary with element-separated
+// argv and no tmux executable lookup.
+func TestShimLauncherDetachedUsesOnlyTypedDirectStarterBoundary(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	dependencies.LookPath = func(name string) (string, error) {
+		events.add("look:" + name)
+		if name == "tmux" || name == "sh" {
+			return "", fmt.Errorf("unexpected detached launcher dependency %q", name)
+		}
+		return "/tools/" + name, nil
+	}
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude, Model: "gpt-5.6-sol", Effort: "high"}}}, PresentationDetached, nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "record:fleet:planner", "detached-start:planner", "observe:planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached boundary events = %#v, want %#v", got, want)
+	}
+	if got, want := starter.requests[0].Argv, []string{"/current agentctl", "__shim", "--session", "fleet", "--role", "planner", "--harness", "claude", "--model", "gpt-5.6-sol", "--effort", "high"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("typed direct argv = %#v, want %#v", got, want)
+	}
+}
+
 // This catches detached rollback treating a failed Start as creation
 // provenance and issuing a stop against a role for which it owns no process.
 func TestShimLauncherDetachedSecondStartFailureStopsOnlyStartedRole(t *testing.T) {
@@ -713,6 +744,55 @@ func TestShimLauncherDetachedPreStartDescriptorFailuresStartNoChild(t *testing.T
 			}
 			if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "record:fleet:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("pre-start failure events = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+// This catches startDetached leaking a parent-owned descriptor that was opened
+// before a later standard-descriptor open fails.
+func TestShimLauncherDetachedPartialDescriptorFailureClosesEveryOpenedHandle(t *testing.T) {
+	t.Parallel()
+
+	for _, failure := range []int{1, 2, 3} {
+		failure := failure
+		t.Run(fmt.Sprintf("descriptor %d", failure), func(t *testing.T) {
+			events := &shimEventLog{}
+			starter := &fakeDetachedShimStarter{events: events}
+			dependencies := shimLaunchTestDependencies(events)
+			dependencies.DetachedStarter = starter
+			openErr := errors.New("open /dev/null denied")
+			opened := make([]*os.File, 0, failure-1)
+			calls := 0
+			path := filepath.Join(t.TempDir(), "descriptor")
+			dependencies.OpenDevNull = func() (*os.File, error) {
+				calls++
+				if calls == failure {
+					return nil, openErr
+				}
+				file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+				if err == nil {
+					opened = append(opened, file)
+				}
+				return file, err
+			}
+			launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: events}, &fakeShimFleetRecords{events: events}, dependencies)
+
+			_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+			var failed *ShimDetachedStartFailedError
+			if !errors.As(err, &failed) || !errors.Is(err, openErr) {
+				t.Fatalf("Launch() error = %T %v, want typed partial-open failure", err, err)
+			}
+			if len(starter.requests) != 0 {
+				t.Fatalf("detached starter requests = %#v, want no child start", starter.requests)
+			}
+			if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "record:fleet:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("partial-open failure events = %#v, want %#v", got, want)
+			}
+			for _, file := range opened {
+				if _, statErr := file.Stat(); statErr == nil {
+					t.Fatalf("opened descriptor FD %d remains open after partial failure", file.Fd())
+				}
 			}
 		})
 	}
@@ -915,6 +995,35 @@ func TestShimLauncherDetachedFinalWaiterCheckBeatsDeadline(t *testing.T) {
 	var exited *detachedShimExitedError
 	if !errors.As(err, &exited) {
 		t.Fatalf("waitDetachedReady() error = %T %v, want final waiter exit", err, err)
+	}
+}
+
+// This catches returning uncertainty after the deadline clock reports arrival
+// without reconciling a direct-child waiter completion delivered at that exact
+// deadline decision.
+func TestShimLauncherDetachedWaiterExitAtDeadlineDecisionBeatsUncertainty(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	wait := make(chan error, 1)
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{
+		events: &shimEventLog{}, observe: []shim.Response{{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeStarting}},
+	}, nil, ShimLaunchDependencies{
+		Now: func() time.Time {
+			nowCalls++
+			if nowCalls == 1 {
+				return start
+			}
+			wait <- errors.New("exit status 1")
+			return start.Add(shimLaunchObservationTimeout)
+		},
+	})
+
+	err := launcher.waitDetachedReady(context.Background(), "fleet", "planner", &fakeDetachedShimProcess{pid: 4321, wait: wait})
+	var exited *detachedShimExitedError
+	if !errors.As(err, &exited) {
+		t.Fatalf("waitDetachedReady() error = %T %v, want deadline waiter exit", err, err)
 	}
 }
 
@@ -1368,7 +1477,13 @@ type fakeDetachedShimStarter struct {
 
 func (f *fakeDetachedShimStarter) Start(request DetachedShimRequest) (DetachedShimProcess, error) {
 	f.requests = append(f.requests, request)
-	role := request.Argv[5]
+	role := "invalid"
+	for index, argument := range request.Argv {
+		if argument == "--role" && index+1 < len(request.Argv) {
+			role = request.Argv[index+1]
+			break
+		}
+	}
 	f.events.add("detached-start:" + role)
 	if len(f.errs) > 0 {
 		err := f.errs[0]
