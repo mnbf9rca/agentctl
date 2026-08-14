@@ -6,8 +6,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -215,6 +222,108 @@ func TestResidentRelayFlushCompletesWithSlaveStillOpenAndNoPTYEOF(t *testing.T) 
 	viewer.Release()
 }
 
+func TestResidentRelayChildExitFlushDoesNotWaitForGrandchildHeldPTYSlave(t *testing.T) {
+	pair, err := NewOpener().Open(WindowSize{Rows: 24, Cols: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestResidentRelayGrandchildHelper$")
+	command.Env = append(os.Environ(), "GO_WANT_RESIDENT_GRANDCHILD_PARENT=1")
+	command.Stdin = pair.slave
+	command.Stdout = pair.slave
+	command.Stderr = pair.slave
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pair.closeSlaveDescriptor(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewPTYReader(pair.Master())
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := NewResidentRelay(reader, &residentBufferWriter{})
+	sink := &residentBufferWriter{}
+	viewer, err := relay.AdmitViewer(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, stopRun := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- relay.Run(runCtx) }()
+	grandchildPID := 0
+	t.Cleanup(func() {
+		if grandchildPID != 0 {
+			_ = syscall.Kill(grandchildPID, syscall.SIGKILL)
+		}
+		stopRun()
+		select {
+		case <-runDone:
+		case <-time.After(time.Second):
+		}
+		_ = pair.Close()
+	})
+	marker := waitResidentField(t, sink, "PARENT_EXITED_GRANDCHILD_PID=")
+	grandchildPID, err = strconv.Atoi(marker)
+	if err != nil || grandchildPID <= 0 {
+		t.Fatalf("grandchild marker PID = %q, %v", marker, err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("parent child wait = %v", err)
+	}
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), time.Second)
+	result := viewer.Flush(flushCtx)
+	cancelFlush()
+	if !result.Confirmed || result.Undelivered != 0 {
+		t.Fatalf("grandchild-held-slave Flush() = %#v, want confirmed", result)
+	}
+	select {
+	case err := <-runDone:
+		t.Fatalf("resident relay waited for PTY EOF incorrectly ended early: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
+func TestResidentRelayGrandchildHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_RESIDENT_GRANDCHILD_HOLD") == "1" {
+		signal.Ignore(syscall.SIGHUP)
+		ready := os.NewFile(3, "grandchild-ready")
+		if ready != nil {
+			_, _ = ready.Write([]byte{1})
+			_ = ready.Close()
+		}
+		time.Sleep(30 * time.Second)
+		return
+	}
+	if os.Getenv("GO_WANT_RESIDENT_GRANDCHILD_PARENT") != "1" {
+		return
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestResidentRelayGrandchildHelper$")
+	command.Env = append(os.Environ(), "GO_WANT_RESIDENT_GRANDCHILD_HOLD=1")
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "GRANDCHILD_PIPE_ERROR=%q\n", err)
+		os.Exit(2)
+	}
+	command.ExtraFiles = []*os.File{readyWriter}
+	if err := command.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "GRANDCHILD_START_ERROR=%q\n", err)
+		os.Exit(2)
+	}
+	_ = readyWriter.Close()
+	var ready [1]byte
+	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+		fmt.Fprintf(os.Stderr, "GRANDCHILD_READY_ERROR=%q\n", err)
+		os.Exit(2)
+	}
+	_ = readyReader.Close()
+	fmt.Fprintf(os.Stdout, "PARENT_EXITED_GRANDCHILD_PID=%d\n", command.Process.Pid)
+}
+
 func TestResidentRelayFlushTimeoutFixesExactUndeliveredTail(t *testing.T) {
 	reader := newResidentStepReader()
 	relay := NewResidentRelay(reader, &residentBufferWriter{})
@@ -398,4 +507,19 @@ func waitResidentBytes(t *testing.T, writer *residentBufferWriter, want []byte) 
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("resident sink bytes = %q, want %q", writer.bytes(), want)
+}
+
+func waitResidentField(t *testing.T, writer *residentBufferWriter, prefix string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, field := range strings.Fields(string(writer.bytes())) {
+			if strings.HasPrefix(field, prefix) {
+				return strings.TrimPrefix(field, prefix)
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("resident bytes %q do not contain field %q", writer.bytes(), prefix)
+	return ""
 }

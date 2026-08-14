@@ -3,8 +3,10 @@
 package shim
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -203,6 +205,41 @@ func TestAttachServerOutputWriteErrorRevokesSeatAndAdmitsReplacement(t *testing.
 	_ = first.Close()
 
 	second, secondDone := startUnixAttachConnection(t, server)
+	admitAttachClient(t, second)
+	_ = second.Close()
+	waitAttachServer(t, secondDone)
+}
+
+func TestAttachServerNonClosureReadErrorRevokesSeatAndAdmitsReplacement(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	first, rawShim := net.Pipe()
+	failingShim := &attachFailReadConn{Conn: rawShim, fail: make(chan struct{})}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- server.handleConnection(context.Background(), failingShim)
+		_ = failingShim.Close()
+	}()
+	admitAttachClient(t, first)
+	close(failingShim.fail)
+	final := readAttachControlKind(t, first, AttachControlFinal)
+	if final.Disposition != AttachDispositionServerClosing {
+		t.Fatalf("read-error final = %#v, want server-closing", final)
+	}
+	if err := <-firstDone; err == nil || err.Error() != "injected attach read failure" {
+		t.Fatalf("read-error handler result = %v", err)
+	}
+	_ = first.Close()
+
+	second, secondDone := startAttachConnection(t, server)
 	admitAttachClient(t, second)
 	_ = second.Close()
 	waitAttachServer(t, secondDone)
@@ -486,8 +523,12 @@ func TestAttachServerTerminalDecisionWaitsForAdmittedResizeCommit(t *testing.T) 
 }
 
 func TestAttachServerSimultaneousHealthyTerminalCausesEmitOneFinal(t *testing.T) {
-	relay, stopRelay := newAttachTestRelay(t)
-	defer stopRelay()
+	reader := &attachTestReader{steps: make(chan attachTestReadStep, 8)}
+	relay := ptyx.NewResidentRelay(reader, attachDiscardWriter{})
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relay.Run(relayCtx) }()
+	defer func() { stopRelay(); <-relayDone }()
 	resizeEntered := make(chan struct{})
 	releaseResize := make(chan struct{})
 	server := newAttachServer(attachServerConfig{
@@ -505,8 +546,29 @@ func TestAttachServerSimultaneousHealthyTerminalCausesEmitOneFinal(t *testing.T)
 			return nil
 		},
 	})
-	client, done := startUnixAttachConnection(t, server)
+	client, rawShim := net.Pipe()
+	stalled := newAttachStalledRoleOutputConn(rawShim)
+	stalled.holdCancellation()
+	done := make(chan error, 1)
+	go func() { done <- server.handleConnection(context.Background(), stalled); _ = stalled.Close() }()
 	admitAttachClient(t, client)
+	stalled.enable()
+	chunk := bytes.Repeat([]byte{'x'}, 32768)
+	reader.steps <- attachTestReadStep{value: chunk}
+	<-stalled.blocked
+	for range 4 {
+		reader.steps <- attachTestReadStep{value: chunk}
+	}
+	overflowProcessed := make(chan struct{})
+	releaseReader := make(chan struct{})
+	reader.steps <- attachTestReadStep{entered: overflowProcessed, release: releaseReader}
+	<-overflowProcessed
+	server.mu.Lock()
+	admission := server.viewer
+	server.mu.Unlock()
+	if admission == nil {
+		t.Fatal("simultaneous terminal test has no admitted viewer")
+	}
 	resizePayload, err := EncodeAttachControl(AttachControl{
 		Version: 1, Kind: AttachControlResize, Rows: 40, Cols: 100,
 	})
@@ -533,10 +595,12 @@ func TestAttachServerSimultaneousHealthyTerminalCausesEmitOneFinal(t *testing.T)
 	go func() {
 		defer causes.Done()
 		<-start
-		_ = client.CloseWrite()
+		admission.finish(AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing})
 	}()
 	close(start)
 	close(releaseResize)
+	stalled.release()
+	close(releaseReader)
 	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +626,7 @@ func TestAttachServerSimultaneousHealthyTerminalCausesEmitOneFinal(t *testing.T)
 	}
 	causes.Wait()
 	if finals != 1 {
-		t.Fatalf("simultaneous terminal final frames = %d, want 1", finals)
+		t.Fatalf("simultaneous terminal final frames = %d, want 1; writes=%v", finals, stalled.writeObservations())
 	}
 	select {
 	case handleErr := <-done:
@@ -751,6 +815,88 @@ func TestAttachServerChildExitFlushesCountedOutputBeforeOneFinal(t *testing.T) {
 	waitAttachServer(t, done)
 }
 
+func TestAttachServerChildExitMapsExactTailUndeliveredFinal(t *testing.T) {
+	reader := &attachTestReader{steps: make(chan attachTestReadStep, 1)}
+	relay := ptyx.NewResidentRelay(reader, attachDiscardWriter{})
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- relay.Run(relayCtx) }()
+	defer func() { stopRelay(); <-relayDone }()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	client, rawShim := net.Pipe()
+	stalled := newAttachStalledRoleOutputConn(rawShim)
+	done := make(chan error, 1)
+	go func() { done <- server.handleConnection(context.Background(), stalled); _ = stalled.Close() }()
+	admitAttachClient(t, client)
+	stalled.enable()
+	reader.steps <- attachTestReadStep{value: []byte("tail")}
+	<-stalled.blocked
+	flushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	finished := make(chan struct{})
+	go func() { server.childExited(flushCtx); close(finished) }()
+	final := readAttachControlKind(t, client, AttachControlFinal)
+	if final.Disposition != AttachDispositionTailUndelivered || final.Bytes != 0 || final.Undelivered != 4 {
+		t.Fatalf("tail-undelivered final = %#v, want bytes=0 undelivered=4", final)
+	}
+	<-finished
+	waitAttachServer(t, done)
+}
+
+func TestAttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		known uint64
+	}{
+		{name: "zero known loss"},
+		{name: "nonzero known loss", known: 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reader := &attachTestReader{steps: make(chan attachTestReadStep, 1)}
+			relay := ptyx.NewResidentRelay(reader, attachDiscardWriter{})
+			relayCtx, stopRelay := context.WithCancel(context.Background())
+			relayDone := make(chan error, 1)
+			go func() { relayDone <- relay.Run(relayCtx) }()
+			server := newAttachServer(attachServerConfig{
+				Session: "fleet", Role: "planner", ShimUID: 501,
+				Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+				PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+					return attachPeerIdentity{PID: 101, UID: 501}, nil
+				},
+				Resize: func(ptyx.WindowSize) error { return nil },
+			})
+			client, rawShim := net.Pipe()
+			stalled := newAttachStalledRoleOutputConn(rawShim)
+			done := make(chan error, 1)
+			go func() { done <- server.handleConnection(context.Background(), stalled); _ = stalled.Close() }()
+			admitAttachClient(t, client)
+			if test.known != 0 {
+				stalled.enable()
+				reader.steps <- attachTestReadStep{value: []byte("tail")}
+				<-stalled.blocked
+			}
+			server.beginTerminal()
+			stopRelay()
+			<-relayDone
+			finished := make(chan struct{})
+			go func() { server.childExited(context.Background()); close(finished) }()
+			final := readAttachControlKind(t, client, AttachControlFinal)
+			if final.Disposition != AttachDispositionTailUnconfirmed || final.Bytes != 0 || final.KnownUndelivered != test.known {
+				t.Fatalf("tail-unconfirmed final = %#v, want bytes=0 known=%d", final, test.known)
+			}
+			<-finished
+			waitAttachServer(t, done)
+		})
+	}
+}
+
 func TestAttachServerPTYEOFWaitsForAuthoritativeLifecycleDisposition(t *testing.T) {
 	reader := &attachTestReader{steps: make(chan attachTestReadStep, 1)}
 	relay := ptyx.NewResidentRelay(reader, attachDiscardWriter{})
@@ -825,8 +971,10 @@ func TestAttachRuntimeSourceGuardsKeepSurfacesClosedAndBuffersBounded(t *testing
 }
 
 type attachTestReadStep struct {
-	value []byte
-	err   error
+	value   []byte
+	err     error
+	entered chan struct{}
+	release chan struct{}
 }
 
 type attachTestReader struct{ steps chan attachTestReadStep }
@@ -836,6 +984,16 @@ func (r *attachTestReader) Read(ctx context.Context, buffer []byte) (int, error)
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case step := <-r.steps:
+		if step.entered != nil {
+			close(step.entered)
+		}
+		if step.release != nil {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-step.release:
+			}
+		}
 		return copy(buffer, step.value), step.err
 	}
 }
@@ -862,6 +1020,117 @@ type attachFailWriteConn struct {
 	net.Conn
 	mu      sync.Mutex
 	enabled bool
+}
+
+type attachFailReadConn struct {
+	net.Conn
+	fail chan struct{}
+}
+
+func (c *attachFailReadConn) Read(value []byte) (int, error) {
+	result := make(chan struct {
+		count int
+		err   error
+	}, 1)
+	go func() {
+		count, err := c.Conn.Read(value)
+		result <- struct {
+			count int
+			err   error
+		}{count: count, err: err}
+	}()
+	select {
+	case <-c.fail:
+		return 0, errors.New("injected attach read failure")
+	case observed := <-result:
+		return observed.count, observed.err
+	}
+}
+
+type attachStalledRoleOutputConn struct {
+	net.Conn
+	mu                    sync.Mutex
+	stall                 bool
+	autoStop              bool
+	ignoreNonzeroDeadline bool
+	blocked               chan struct{}
+	unblock               chan struct{}
+	blockOne              sync.Once
+	stopOne               sync.Once
+	writes                []string
+}
+
+func newAttachStalledRoleOutputConn(connection net.Conn) *attachStalledRoleOutputConn {
+	return &attachStalledRoleOutputConn{
+		Conn: connection, blocked: make(chan struct{}), unblock: make(chan struct{}), autoStop: true,
+	}
+}
+
+func (c *attachStalledRoleOutputConn) holdCancellation() {
+	c.mu.Lock()
+	c.autoStop = false
+	c.ignoreNonzeroDeadline = true
+	c.mu.Unlock()
+}
+
+func (c *attachStalledRoleOutputConn) release() {
+	c.stopOne.Do(func() { close(c.unblock) })
+}
+
+func (c *attachStalledRoleOutputConn) enable() {
+	c.mu.Lock()
+	c.stall = true
+	c.mu.Unlock()
+}
+
+func (c *attachStalledRoleOutputConn) Write(value []byte) (int, error) {
+	c.mu.Lock()
+	stall := c.stall
+	c.mu.Unlock()
+	if stall && len(value) == attachFrameHeaderBytes && AttachFrameKind(value[4]) == AttachFrameRoleOutput {
+		c.blockOne.Do(func() { close(c.blocked) })
+		<-c.unblock
+		c.mu.Lock()
+		c.stall = false
+		c.mu.Unlock()
+		err := errors.New("injected stalled role-output write")
+		c.recordWrite(value, 0, err)
+		return 0, err
+	}
+	written, err := c.Conn.Write(value)
+	c.recordWrite(value, written, err)
+	return written, err
+}
+
+func (c *attachStalledRoleOutputConn) recordWrite(value []byte, written int, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kind := "payload"
+	if len(value) == attachFrameHeaderBytes {
+		kind = fmt.Sprintf("header-%d", value[4])
+	}
+	c.writes = append(c.writes, fmt.Sprintf("%s len=%d written=%d err=%v", kind, len(value), written, err))
+}
+
+func (c *attachStalledRoleOutputConn) writeObservations() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.writes...)
+}
+
+func (c *attachStalledRoleOutputConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	stall := c.stall
+	autoStop := c.autoStop
+	ignoreNonzero := c.ignoreNonzeroDeadline
+	c.mu.Unlock()
+	if ignoreNonzero && !deadline.IsZero() {
+		return nil
+	}
+	if stall && autoStop && !deadline.IsZero() {
+		c.release()
+	}
+	return c.Conn.SetWriteDeadline(deadline)
 }
 
 func (c *attachFailWriteConn) Write(value []byte) (int, error) {
@@ -925,6 +1194,17 @@ func startAttachConnection(t *testing.T, server *attachServer) (net.Conn, <-chan
 
 func startUnixAttachConnection(t *testing.T, server *attachServer) (*net.UnixConn, <-chan error) {
 	t.Helper()
+	client, shim := newUnixAttachPair(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- server.handleConnection(context.Background(), shim)
+		_ = shim.Close()
+	}()
+	return client, done
+}
+
+func newUnixAttachPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
+	t.Helper()
 	descriptors, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -950,12 +1230,7 @@ func startUnixAttachConnection(t *testing.T, server *attachServer) (*net.UnixCon
 		_ = shimConnection.Close()
 		t.Fatal("socketpair did not produce Unix connections")
 	}
-	done := make(chan error, 1)
-	go func() {
-		done <- server.handleConnection(context.Background(), shim)
-		_ = shim.Close()
-	}()
-	return client, done
+	return client, shim
 }
 
 func admitAttachClient(t *testing.T, client net.Conn) {

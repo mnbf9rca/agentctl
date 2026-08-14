@@ -225,6 +225,10 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 				viewerDone = nil
 				continue
 			}
+			if admission.lifecycleOwned() {
+				<-admission.terminalDone
+				return nil
+			}
 			control := AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing, Bytes: output.bytesWritten()}
 			switch {
 			case errors.Is(result.Err, ptyx.ErrAttachLagOverflow):
@@ -456,6 +460,7 @@ func (a *attachAdmission) lifecycleOwned() bool {
 
 func (a *attachAdmission) finishUnlessLifecycleOwned(control AttachControl) {
 	if a.lifecycleOwned() {
+		<-a.terminalDone
 		return
 	}
 	a.finish(control)
