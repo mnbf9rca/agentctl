@@ -395,6 +395,18 @@ func TestTerminalWriterEmptyWriteHonorsCancellationAndClose(t *testing.T) {
 			t.Fatalf("Write(nil) = (%d, %v), want (0, unavailable descriptor)", n, err)
 		}
 	})
+
+	t.Run("canceled caller on closed writer", func(t *testing.T) {
+		writer := newWriter(t)
+		if err := writer.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if n, err := writer.Write(ctx, nil); n != 0 || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Write(nil) = (%d, %v), want (0, context.Canceled)", n, err)
+		}
+	})
 }
 
 func TestTerminalWriterReturnsExactPrefixOnCancellationAtPermanentSink(t *testing.T) {
