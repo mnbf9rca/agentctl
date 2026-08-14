@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/ptyx"
+	"golang.org/x/sys/unix"
 )
 
 func TestAttachServerAdmitsSameUIDAfterApplyingSizeAndRoutesFramesInOrder(t *testing.T) {
@@ -139,6 +140,38 @@ func TestAttachServerReleasesQuietViewerOnEOFAndAdmitsReplacement(t *testing.T) 
 	waitAttachServer(t, thirdDone)
 }
 
+func TestAttachServerHalfCloseRevokesSeatClosesOutputAndAdmitsReplacement(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	first, firstDone := startUnixAttachConnection(t, server)
+	admitAttachClient(t, first)
+	if err := first.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	final := readAttachControlKind(t, first, AttachControlFinal)
+	if final.Disposition != AttachDispositionServerClosing {
+		t.Fatalf("half-close final = %#v, want server-closing", final)
+	}
+	if _, err := ReadAttachFrame(first); !connectionClosedError(err) {
+		t.Fatalf("half-closed viewer remained readable: %v", err)
+	}
+	_ = first.Close()
+	waitAttachServer(t, firstDone)
+
+	second, secondDone := startUnixAttachConnection(t, server)
+	admitAttachClient(t, second)
+	_ = second.Close()
+	waitAttachServer(t, secondDone)
+}
+
 func TestAttachServerInitialResizeFailureCostsNoSeat(t *testing.T) {
 	relay, stopRelay := newAttachTestRelay(t)
 	defer stopRelay()
@@ -204,6 +237,206 @@ func TestAttachServerProtocolViolationBeforeAndAfterAdmissionHasExactTerminalSha
 	}
 }
 
+func TestAttachServerKeepsSeatUntilRelayAndInputReleaseComplete(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	input := newRoleInputWriter(&recordingOperationWriter{})
+	_, releaseDelivery, err := input.BeginDelivery(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501, Relay: relay, Input: input,
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	first, firstDone := startAttachConnection(t, server)
+	admitAttachClient(t, first)
+	_ = first.Close()
+	waitAttachCondition(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.viewer != nil && server.viewer.ctx.Err() != nil
+	})
+	second, secondDone := startAttachConnection(t, server)
+	readAttachControlKind(t, second, AttachControlShimHello)
+	writeAttachControl(t, second, AttachControl{Version: 1, Kind: AttachControlHello, Session: "fleet", Role: "planner", Rows: 24, Cols: 80})
+	refused := readAttachControlKind(t, second, AttachControlRefused)
+	if refused.Outcome != AttachRefusalViewerPresent || refused.ViewerPID != 101 {
+		t.Fatalf("replacement during release = %#v, want incumbent PID 101", refused)
+	}
+	waitAttachServer(t, secondDone)
+	releaseDelivery()
+	waitAttachServer(t, firstDone)
+}
+
+func TestAttachServerCleanupRetainedPinsViewerAndEmitsExactFinal(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	client, done := startAttachConnection(t, server)
+	admitAttachClient(t, client)
+	finished := make(chan struct{})
+	go func() { server.cleanupRetained(); close(finished) }()
+	final := readAttachControlKind(t, client, AttachControlFinal)
+	if final.Disposition != AttachDispositionCleanupRetained || final.Bytes != 0 {
+		t.Fatalf("cleanup final = %#v, want cleanup-retained bytes=0", final)
+	}
+	<-finished
+	waitAttachServer(t, done)
+
+	replacement, replacementDone := startAttachConnection(t, server)
+	readAttachControlKind(t, replacement, AttachControlShimHello)
+	writeAttachControl(t, replacement, AttachControl{Version: 1, Kind: AttachControlHello, Session: "fleet", Role: "planner", Rows: 24, Cols: 80})
+	if _, err := ReadAttachFrame(replacement); !connectionClosedError(err) {
+		t.Fatalf("terminal attach server replacement read = %v, want close", err)
+	}
+	if err := <-replacementDone; err == nil {
+		t.Fatal("terminal attach server accepted replacement")
+	}
+}
+
+func TestAttachServerTerminalDecisionWaitsForAdmissionCommit(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	blocking := &blockingAttachAdmissionRelay{
+		ResidentRelay: relay,
+		entered:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: blocking, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	client, done := startAttachConnection(t, server)
+	readAttachControlKind(t, client, AttachControlShimHello)
+	writeAttachControl(t, client, AttachControl{
+		Version: 1, Kind: AttachControlHello, Session: "fleet", Role: "planner", Rows: 24, Cols: 80,
+	})
+	<-blocking.entered
+	cleanupDone := make(chan struct{})
+	go func() {
+		server.cleanupRetained()
+		close(cleanupDone)
+	}()
+	select {
+	case <-cleanupDone:
+		t.Fatal("terminal decision bypassed in-flight admission commit")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(blocking.release)
+	readAttachControlKind(t, client, AttachControlAdmitted)
+	final := readAttachControlKind(t, client, AttachControlFinal)
+	if final.Disposition != AttachDispositionCleanupRetained {
+		t.Fatalf("terminal admission final = %#v, want cleanup-retained", final)
+	}
+	<-cleanupDone
+	waitAttachServer(t, done)
+}
+
+func TestAttachServerSimultaneousHealthyTerminalCausesEmitOneFinal(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	resizeEntered := make(chan struct{})
+	releaseResize := make(chan struct{})
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(size ptyx.WindowSize) error {
+			if size.Rows == 40 {
+				close(resizeEntered)
+				<-releaseResize
+				return errors.New("injected resize failure")
+			}
+			return nil
+		},
+	})
+	client, done := startUnixAttachConnection(t, server)
+	admitAttachClient(t, client)
+	resizePayload, err := EncodeAttachControl(AttachControl{
+		Version: 1, Kind: AttachControlResize, Rows: 40, Cols: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAttachFrame(client, AttachFrame{Kind: AttachFrameControl, Data: resizePayload}); err != nil {
+		t.Fatal(err)
+	}
+	<-resizeEntered
+	start := make(chan struct{})
+	var causes sync.WaitGroup
+	causes.Add(3)
+	go func() {
+		defer causes.Done()
+		<-start
+		server.childExited(context.Background())
+	}()
+	go func() {
+		defer causes.Done()
+		<-start
+		server.cleanupRetained()
+	}()
+	go func() {
+		defer causes.Done()
+		<-start
+		_ = client.CloseWrite()
+	}()
+	close(start)
+	close(releaseResize)
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	finals := 0
+	for {
+		frame, readErr := ReadAttachFrame(client)
+		if connectionClosedError(readErr) {
+			break
+		}
+		if readErr != nil {
+			t.Fatalf("terminal stream read = %v", readErr)
+		}
+		if frame.Kind != AttachFrameControl {
+			continue
+		}
+		control, decodeErr := DecodeAttachControl(frame.Data)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if control.Kind == AttachControlFinal {
+			finals++
+		}
+	}
+	causes.Wait()
+	if finals != 1 {
+		t.Fatalf("simultaneous terminal final frames = %d, want 1", finals)
+	}
+	select {
+	case handleErr := <-done:
+		if handleErr != nil && handleErr.Error() != "injected resize failure" {
+			t.Fatalf("attach server error = %v", handleErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("attach server did not release connection")
+	}
+	_ = client.Close()
+}
+
 func TestAttachServerDiscardsDecodedInputAfterAdmissionIsReleased(t *testing.T) {
 	relay, stopRelay := newAttachTestRelay(t)
 	defer stopRelay()
@@ -226,14 +459,83 @@ func TestAttachServerDiscardsDecodedInputAfterAdmissionIsReleased(t *testing.T) 
 	admitAttachClient(t, client)
 	writeAttachFrame(t, client, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("stale")})
 	_ = client.Close()
-	waitAttachServer(t, done)
+	waitAttachCondition(t, func() bool {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.viewer != nil && server.viewer.ctx.Err() != nil
+	})
 	releaseDelivery()
+	waitAttachServer(t, done)
 	time.Sleep(25 * time.Millisecond)
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
 	if len(writer.calls) != 0 {
 		t.Fatalf("released viewer input reached PTY: %#v", writer.calls)
 	}
+}
+
+func TestAttachServerStopSurvivorDiscardsStoppedInputWithoutEvictingViewer(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	writer := &recordingOperationWriter{}
+	var phaseMu sync.Mutex
+	phase := shimOperationActive
+	resizeSeen := make(chan struct{})
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(writer),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(size ptyx.WindowSize) error {
+			if size.Rows == 30 {
+				close(resizeSeen)
+			}
+			return nil
+		},
+		Phase: func() shimOperationPhase {
+			phaseMu.Lock()
+			defer phaseMu.Unlock()
+			return phase
+		},
+	})
+	client, done := startAttachConnection(t, server)
+	admitAttachClient(t, client)
+	phaseMu.Lock()
+	phase = shimOperationStopping
+	phaseMu.Unlock()
+	writeAttachFrame(t, client, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("discarded")})
+	writeAttachControl(t, client, AttachControl{Version: 1, Kind: AttachControlResize, Rows: 30, Cols: 100})
+	<-resizeSeen
+	writer.mu.Lock()
+	stoppedWrites := len(writer.calls)
+	writer.mu.Unlock()
+	if stoppedWrites != 0 {
+		t.Fatalf("stopping viewer input writes = %d, want 0", stoppedWrites)
+	}
+	phaseMu.Lock()
+	phase = shimOperationActive
+	phaseMu.Unlock()
+	writeAttachFrame(t, client, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("survivor")})
+	waitAttachCondition(t, func() bool {
+		writer.mu.Lock()
+		defer writer.mu.Unlock()
+		return len(writer.calls) == 1
+	})
+	writer.mu.Lock()
+	got := string(writer.calls[0])
+	writer.mu.Unlock()
+	if got != "survivor" {
+		t.Fatalf("survivor viewer write = %q, want survivor", got)
+	}
+	server.mu.Lock()
+	stillAdmitted := server.viewer != nil && server.viewer.pid == 101
+	server.mu.Unlock()
+	if !stillAdmitted {
+		t.Fatal("stop survivor evicted admitted viewer")
+	}
+	_ = client.Close()
+	waitAttachServer(t, done)
 }
 
 func TestAttachServerChildExitFlushesCountedOutputBeforeOneFinal(t *testing.T) {
@@ -326,6 +628,18 @@ func (attachDiscardWriter) Write(_ context.Context, value []byte) (int, error) {
 	return len(value), nil
 }
 
+type blockingAttachAdmissionRelay struct {
+	*ptyx.ResidentRelay
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingAttachAdmissionRelay) AdmitViewer(writer ptyx.ContextWriter) (*ptyx.ResidentViewer, error) {
+	close(r.entered)
+	<-r.release
+	return r.ResidentRelay.AdmitViewer(writer)
+}
+
 func newAttachTestRelay(t *testing.T) (*ptyx.ResidentRelay, func()) {
 	t.Helper()
 	reader := &attachTestReader{steps: make(chan attachTestReadStep)}
@@ -346,6 +660,41 @@ func newAttachTestRelay(t *testing.T) (*ptyx.ResidentRelay, func()) {
 func startAttachConnection(t *testing.T, server *attachServer) (net.Conn, <-chan error) {
 	t.Helper()
 	client, shim := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- server.handleConnection(context.Background(), shim)
+		_ = shim.Close()
+	}()
+	return client, done
+}
+
+func startUnixAttachConnection(t *testing.T, server *attachServer) (*net.UnixConn, <-chan error) {
+	t.Helper()
+	descriptors, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientFile := os.NewFile(uintptr(descriptors[0]), "attach-client")
+	shimFile := os.NewFile(uintptr(descriptors[1]), "attach-shim")
+	clientConnection, err := net.FileConn(clientFile)
+	_ = clientFile.Close()
+	if err != nil {
+		_ = shimFile.Close()
+		t.Fatal(err)
+	}
+	shimConnection, err := net.FileConn(shimFile)
+	_ = shimFile.Close()
+	if err != nil {
+		_ = clientConnection.Close()
+		t.Fatal(err)
+	}
+	client, clientOK := clientConnection.(*net.UnixConn)
+	shim, shimOK := shimConnection.(*net.UnixConn)
+	if !clientOK || !shimOK {
+		_ = clientConnection.Close()
+		_ = shimConnection.Close()
+		t.Fatal("socketpair did not produce Unix connections")
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- server.handleConnection(context.Background(), shim)

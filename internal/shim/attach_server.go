@@ -44,9 +44,11 @@ type residentViewerRelay interface {
 const AttachTailFlushTimeout = 10 * time.Second
 
 type attachServer struct {
-	config attachServerConfig
-	mu     sync.Mutex
-	viewer *attachAdmission
+	config       attachServerConfig
+	mu           sync.Mutex
+	viewer       *attachAdmission
+	terminal     bool
+	terminalOnce sync.Once
 }
 
 func newAttachServer(config attachServerConfig) *attachServer {
@@ -79,14 +81,15 @@ func observeAttachPeerIdentity(connection net.Conn) (attachPeerIdentity, error) 
 }
 
 type attachAdmission struct {
-	server     *attachServer
-	pid        int
-	connection net.Conn
-	ctx        context.Context
-	cancel     context.CancelFunc
-	viewer     *ptyx.ResidentViewer
-	output     *attachOutputWriter
-	finishOnce sync.Once
+	server       *attachServer
+	pid          int
+	connection   net.Conn
+	ctx          context.Context
+	cancel       context.CancelFunc
+	viewer       *ptyx.ResidentViewer
+	output       *attachOutputWriter
+	finishOnce   sync.Once
+	terminalDone chan struct{}
 }
 
 type attachAction struct {
@@ -132,11 +135,14 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 	if s.config.Phase() != shimOperationActive {
 		return errors.New("attach admission is unavailable while role is not active")
 	}
-	admission, incumbent := s.claim(ctx, connection, peer.PID)
+	admission, incumbent, accepting := s.claim(ctx, connection, peer.PID)
+	if !accepting {
+		return errors.New("attach server is terminal")
+	}
 	if admission == nil {
 		return s.refuse(connection, AttachControl{Version: 1, Kind: AttachControlRefused, Outcome: AttachRefusalViewerPresent, ViewerPID: incumbent})
 	}
-	defer admission.finish(AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing})
+	defer admission.finishUnlessLifecycleOwned(AttachControl{Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionServerClosing})
 
 	size := ptyx.WindowSize{Rows: uint16(hello.Rows), Cols: uint16(hello.Cols)}
 	if err := s.config.Resize(size); err != nil {
@@ -146,18 +152,16 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 			Rows: hello.Rows, Cols: hello.Cols, Cause: err.Error(),
 		})
 	}
+	if admission.ctx.Err() != nil || !s.current(admission) {
+		return errors.New("attach admission ended before commit")
+	}
 	output := &attachOutputWriter{connection: connection}
-	viewer, err := s.config.Relay.AdmitViewer(output)
+	viewer, err := s.commitAdmission(admission, output)
 	if err != nil {
 		admission.releaseWithoutFinal()
 		if errors.Is(err, ptyx.ErrResidentViewerPresent) {
 			return s.refuse(connection, AttachControl{Version: 1, Kind: AttachControlRefused, Outcome: AttachRefusalViewerPresent, ViewerPID: incumbent})
 		}
-		return err
-	}
-	admission.viewer = viewer
-	admission.output = output
-	if err := output.writeControl(AttachControl{Version: 1, Kind: AttachControlAdmitted}); err != nil {
 		return err
 	}
 
@@ -172,6 +176,11 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-admission.ctx.Done():
+			if admission.lifecycleOwned() {
+				<-admission.terminalDone
+			}
+			return nil
 		case err := <-reads:
 			if connectionClosedError(err) {
 				return nil
@@ -180,8 +189,8 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 		case frame := <-frames:
 			select {
 			case actions <- attachAction{frame: frame}:
-			default:
-				return errors.New("attach input action queue overflow")
+			case <-admission.ctx.Done():
+				return nil
 			}
 		case failure := <-actionErrors:
 			admission.finish(failure.control)
@@ -258,22 +267,50 @@ func (a *attachAdmission) runActions(actions <-chan attachAction, failures chan<
 	}
 }
 
-func (s *attachServer) claim(parent context.Context, connection net.Conn, pid int) (*attachAdmission, int) {
+func (s *attachServer) claim(parent context.Context, connection net.Conn, pid int) (*attachAdmission, int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.terminal {
+		return nil, 0, false
+	}
 	if s.viewer != nil {
-		return nil, s.viewer.pid
+		return nil, s.viewer.pid, true
 	}
 	ctx, cancel := context.WithCancel(parent)
-	admission := &attachAdmission{server: s, pid: pid, connection: connection, ctx: ctx, cancel: cancel}
+	admission := &attachAdmission{
+		server: s, pid: pid, connection: connection, ctx: ctx, cancel: cancel,
+		terminalDone: make(chan struct{}),
+	}
 	s.viewer = admission
-	return admission, 0
+	return admission, 0, true
 }
 
 func (s *attachServer) current(admission *attachAdmission) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.viewer == admission
+}
+
+func (s *attachServer) commitAdmission(admission *attachAdmission, output *attachOutputWriter) (*ptyx.ResidentViewer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminal || s.viewer != admission || admission.ctx.Err() != nil {
+		return nil, errors.New("attach admission ended before commit")
+	}
+	// Keep both lifecycle decisions and role-output writes behind the complete
+	// admission transaction: fixed relay viewer, then admitted control frame.
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	viewer, err := s.config.Relay.AdmitViewer(output)
+	if err != nil {
+		return nil, err
+	}
+	admission.viewer = viewer
+	admission.output = output
+	if err := output.writeControlLocked(AttachControl{Version: 1, Kind: AttachControlAdmitted}); err != nil {
+		return viewer, err
+	}
+	return viewer, nil
 }
 
 func (s *attachServer) release(admission *attachAdmission) {
@@ -285,26 +322,55 @@ func (s *attachServer) release(admission *attachAdmission) {
 }
 
 func (s *attachServer) childExited(ctx context.Context) {
-	result := s.config.Relay.Flush(ctx)
+	admission := s.beginTerminal()
+	s.terminalOnce.Do(func() {
+		if admission == nil {
+			return
+		}
+		if admission.viewer == nil {
+			admission.releaseWithoutFinal()
+			_ = admission.connection.Close()
+			return
+		}
+		result := admission.viewer.Flush(ctx)
+		control := AttachControl{
+			Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionChildExited,
+			Bytes: result.Written,
+		}
+		switch {
+		case !result.Confirmed:
+			control.Disposition = AttachDispositionTailUnconfirmed
+			control.KnownUndelivered = result.Undelivered
+		case result.Undelivered != 0:
+			control.Disposition = AttachDispositionTailUndelivered
+			control.Undelivered = result.Undelivered
+		}
+		admission.finish(control)
+	})
+}
+
+func (s *attachServer) cleanupRetained() {
+	admission := s.beginTerminal()
+	s.terminalOnce.Do(func() {
+		if admission == nil {
+			return
+		}
+		admission.finish(AttachControl{
+			Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionCleanupRetained,
+		})
+	})
+}
+
+func (s *attachServer) beginTerminal() *attachAdmission {
 	s.mu.Lock()
+	s.terminal = true
 	admission := s.viewer
 	s.mu.Unlock()
-	if admission == nil {
-		return
+	if admission != nil {
+		admission.cancel()
+		admission.waitInputBarrier()
 	}
-	control := AttachControl{
-		Version: 1, Kind: AttachControlFinal, Disposition: AttachDispositionChildExited,
-		Bytes: result.Written,
-	}
-	switch {
-	case !result.Confirmed:
-		control.Disposition = AttachDispositionTailUnconfirmed
-		control.KnownUndelivered = result.Undelivered
-	case result.Undelivered != 0:
-		control.Disposition = AttachDispositionTailUndelivered
-		control.Undelivered = result.Undelivered
-	}
-	admission.finish(control)
+	return admission
 }
 
 func (s *attachServer) refuse(connection net.Conn, control AttachControl) error {
@@ -313,27 +379,53 @@ func (s *attachServer) refuse(connection net.Conn, control AttachControl) error 
 
 func (a *attachAdmission) releaseWithoutFinal() {
 	a.finishOnce.Do(func() {
-		a.server.release(a)
 		a.cancel()
+		a.waitInputBarrier()
 		if a.viewer != nil {
 			a.viewer.Release()
+			a.viewer.Wait()
 		}
+		a.server.release(a)
+		close(a.terminalDone)
 	})
 }
 
 func (a *attachAdmission) finish(control AttachControl) {
 	a.finishOnce.Do(func() {
-		a.server.release(a)
 		a.cancel()
+		a.waitInputBarrier()
 		if a.viewer != nil {
 			a.viewer.Release()
+			a.viewer.Wait()
 		}
+		a.server.release(a)
 		if a.output != nil {
 			control.Bytes = a.output.bytesWritten()
 			_ = a.output.writeControl(control)
 		}
 		_ = a.connection.Close()
+		close(a.terminalDone)
 	})
+}
+
+func (a *attachAdmission) lifecycleOwned() bool {
+	a.server.mu.Lock()
+	defer a.server.mu.Unlock()
+	return a.server.terminal && a.server.viewer == a
+}
+
+func (a *attachAdmission) finishUnlessLifecycleOwned(control AttachControl) {
+	if a.lifecycleOwned() {
+		return
+	}
+	a.finish(control)
+}
+
+func (a *attachAdmission) waitInputBarrier() {
+	barrier, ok := a.server.config.Input.(interface{ Barrier(context.Context) error })
+	if ok {
+		_ = barrier.Barrier(context.Background())
+	}
 }
 
 type attachOutputWriter struct {
@@ -361,12 +453,16 @@ func (w *attachOutputWriter) Write(ctx context.Context, value []byte) (int, erro
 }
 
 func (w *attachOutputWriter) writeControl(control AttachControl) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writeControlLocked(control)
+}
+
+func (w *attachOutputWriter) writeControlLocked(control AttachControl) error {
 	payload, err := EncodeAttachControl(control)
 	if err != nil {
 		return err
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if err := w.connection.SetWriteDeadline(time.Now().Add(ShimProtocolIOTimeout)); err != nil {
 		return err
 	}

@@ -1185,6 +1185,54 @@ func TestShimRuntimeCleanupPersistsCleanupFailedFactsBeforeReleasingClaim(t *tes
 	}
 }
 
+func TestShimRuntimeCleanupReportsRetainedObservationToPinnedAttachment(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "attach-cleanup", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := StartToken{Sec: 1, Usec: 2}
+	record, err := NewChildStartingRecord(path.Session, path.Role, os.Getpid(), "attach-cleanup").WithChild(456, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	attachment := newAttachServer(attachServerConfig{
+		Session: path.Session, Role: path.Role, ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	viewer, viewerDone := startAttachConnection(t, attachment)
+	readAttachControlKind(t, viewer, AttachControlShimHello)
+	writeAttachControl(t, viewer, AttachControl{Version: 1, Kind: AttachControlHello, Session: path.Session, Role: path.Role, Rows: 24, Cols: 80})
+	readAttachControlKind(t, viewer, AttachControlAdmitted)
+	runtime := &roleRuntime{path: path, claim: claim, record: record, child: &stopRaceChild{pid: 456}}
+	server := &Server{
+		cleanupTimeout: -time.Nanosecond,
+		observeProcess: func(int, StartToken) ProcessResult {
+			return ProcessResult{Observation: ProcessPresentMatch}
+		},
+	}
+	cleanupDone := make(chan runtimeCleanupResult, 1)
+	go func() { cleanupDone <- server.cleanupRuntimeWithAttachment(runtime, false, attachment, nil) }()
+	final := readAttachControlKind(t, viewer, AttachControlFinal)
+	if final.Disposition != AttachDispositionCleanupRetained {
+		t.Fatalf("cleanup final = %#v, want cleanup-retained", final)
+	}
+	result := <-cleanupDone
+	if result.Observation != ProcessPresentMatch {
+		t.Fatalf("cleanup observation = %q, want present-match", result.Observation)
+	}
+	waitAttachServer(t, viewerDone)
+}
+
 func exchangeWithHandler(t *testing.T, handler *requestHandler, request []byte) Response {
 	t.Helper()
 	client, server := net.Pipe()
@@ -1460,9 +1508,61 @@ func TestShimViewerInputRechecksCancellationAndRolePhaseAtCommit(t *testing.T) {
 	}
 }
 
+func TestShimStopTransitionWaitsForViewerCommitBeforeStoppingPhase(t *testing.T) {
+	writer := &residentGateWriterForShim{entered: make(chan struct{}), release: make(chan struct{})}
+	handler := &requestHandler{}
+	input := newRoleInputWriter(writer, func() bool { return handler.operationPhase() == shimOperationActive })
+	handler.inputBarrier = input.(roleInputBarrier)
+	viewerDone := make(chan error, 1)
+	go func() {
+		_, err := input.WriteViewer(context.Background(), []byte("viewer"))
+		viewerDone <- err
+	}()
+	<-writer.entered
+	stopDone := make(chan error, 1)
+	go func() {
+		_, admitted, err := handler.beginStop(context.Background())
+		if !admitted && err == nil {
+			err = errors.New("stop transition was not admitted")
+		}
+		stopDone <- err
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("stop crossed an in-flight viewer commit: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(writer.release)
+	if err := <-viewerDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if handler.operationPhase() != shimOperationStopping {
+		t.Fatalf("phase = %q, want stopping", handler.operationPhase())
+	}
+}
+
 type recordingOperationWriter struct {
 	mu    sync.Mutex
 	calls [][]byte
+}
+
+type residentGateWriterForShim struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *residentGateWriterForShim) Write(ctx context.Context, value []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-w.release:
+		return len(value), nil
+	}
 }
 
 type stopRaceChild struct{ pid int }

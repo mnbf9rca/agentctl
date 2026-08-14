@@ -215,6 +215,39 @@ func TestResidentRelayFlushTimeoutFixesExactUndeliveredTail(t *testing.T) {
 	}
 }
 
+func TestResidentRelayFlushReportsUnconfirmedWhenDrainCannotAcknowledgeCutoff(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		knownUndelivered uint64
+	}{
+		{name: "zero known loss"},
+		{name: "nonzero known loss", knownUndelivered: 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			relay := NewResidentRelay(newResidentStepReader(), &residentBufferWriter{})
+			sink := &residentGateWriter{entered: make(chan struct{}), release: make(chan struct{})}
+			viewer, err := relay.AdmitViewer(sink)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.knownUndelivered != 0 {
+				viewer.state.offer([]byte("tail"))
+				select {
+				case <-sink.entered:
+				case <-time.After(time.Second):
+					t.Fatal("tail writer did not block")
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			result := viewer.Flush(ctx)
+			if result.Confirmed || result.Undelivered != test.knownUndelivered {
+				t.Fatalf("Flush() = %#v, want unconfirmed known-undelivered=%d", result, test.knownUndelivered)
+			}
+		})
+	}
+}
+
 type residentReadStep struct {
 	value []byte
 	err   error

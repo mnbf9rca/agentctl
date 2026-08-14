@@ -221,7 +221,7 @@ func TestShimLifecycleCleansClaimAfterDefiniteReservationWriteFailure(t *testing
 	if err == nil || !strings.Contains(err.Error(), "write failed before rename") {
 		t.Fatalf("start() error = %v, want definite record failure", err)
 	}
-	wantCalls := []string{"claim", "record:child-starting", "record-remove", "claim-clean"}
+	wantCalls := []string{"claim", "record:child-starting", "claim-runtime-clean", "record-remove", "claim-clean"}
 	if got := calls.snapshot(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("lifecycle calls = %#v, want %#v", got, wantCalls)
 	}
@@ -339,7 +339,7 @@ func TestShimLifecycleRemovesReservationWhenChildStartProvesNoChild(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "fork failed") {
 		t.Fatalf("start() error = %v, want fork failure", err)
 	}
-	wantCalls := []string{"claim", "record:child-starting", "child-start", "record-remove", "claim-clean"}
+	wantCalls := []string{"claim", "record:child-starting", "child-start", "claim-runtime-clean", "record-remove", "claim-clean"}
 	if got := calls.snapshot(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("lifecycle calls = %#v, want %#v", got, wantCalls)
 	}
@@ -434,6 +434,11 @@ type lifecycleFakeClaim struct{ calls *lifecycleCallLog }
 
 func (c *lifecycleFakeClaim) Close() error          { c.calls.add("claim-close"); return nil }
 func (c *lifecycleFakeClaim) CloseAndRemove() error { c.calls.add("claim-clean"); return nil }
+func (c *lifecycleFakeClaim) RemoveRuntimeArtifacts() error {
+	c.calls.add("claim-runtime-clean")
+	return nil
+}
+func (c *lifecycleFakeClaim) CloseAndRemoveLock() error { c.calls.add("claim-clean"); return nil }
 
 type lifecycleStarterFunc func(context.Context, ptyx.StartRequest) (ptyx.Child, error)
 

@@ -106,6 +106,28 @@ type claimHandle interface {
 	Close() error
 }
 
+type orderedCleanupClaim interface {
+	RemoveRuntimeArtifacts() error
+	CloseAndRemoveLock() error
+}
+
+func removeClaimRuntimeArtifacts(claim claimHandle) error {
+	if ordered, ok := claim.(orderedCleanupClaim); ok {
+		return ordered.RemoveRuntimeArtifacts()
+	}
+	return nil
+}
+
+func releaseClaimAfterRecord(claim claimHandle) error {
+	if ordered, ok := claim.(orderedCleanupClaim); ok {
+		return ordered.CloseAndRemoveLock()
+	}
+	if combined, ok := claim.(interface{ CloseAndRemove() error }); ok {
+		return combined.CloseAndRemove()
+	}
+	return claim.Close()
+}
+
 type roleListener interface {
 	Accept() (net.Conn, error)
 	Close() error
@@ -293,12 +315,9 @@ func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harne
 	}
 	cleanupNoChild := func(cause error) (*roleRuntime, error) {
 		var cleanupErrors []error
+		cleanupErrors = append(cleanupErrors, removeClaimRuntimeArtifacts(claim))
 		cleanupErrors = append(cleanupErrors, l.deps.removeRecord(path))
-		if cleanClaim, ok := claim.(interface{ CloseAndRemove() error }); ok {
-			cleanupErrors = append(cleanupErrors, cleanClaim.CloseAndRemove())
-		} else {
-			cleanupErrors = append(cleanupErrors, claim.Close())
-		}
+		cleanupErrors = append(cleanupErrors, releaseClaimAfterRecord(claim))
 		cleanupErrors = append(cleanupErrors, path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}
@@ -400,12 +419,9 @@ func (l roleLifecycle) cleanupStartedChild(
 	var uncertain *LifecycleCommitUncertainError
 	commitUncertain := errors.As(cause, &uncertain)
 	if result.MayReportAbsent() && !commitUncertain {
+		cleanupErrors = append(cleanupErrors, removeClaimRuntimeArtifacts(claim))
 		cleanupErrors = append(cleanupErrors, l.deps.removeRecord(path))
-		if cleanClaim, ok := claim.(interface{ CloseAndRemove() error }); ok {
-			cleanupErrors = append(cleanupErrors, cleanClaim.CloseAndRemove())
-		} else {
-			cleanupErrors = append(cleanupErrors, claim.Close())
-		}
+		cleanupErrors = append(cleanupErrors, releaseClaimAfterRecord(claim))
 		cleanupErrors = append(cleanupErrors, path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}

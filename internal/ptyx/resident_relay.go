@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // AttachLagBufferBytes is the measured per-viewer burst bound from spec
@@ -52,12 +53,19 @@ type ResidentRelay struct {
 	viewer   *residentViewerState
 	closed   bool
 	closeErr error
+
+	barriers      chan residentBarrier
+	runDone       chan struct{}
+	readCompleted atomic.Uint64
 }
 
 // NewResidentRelay constructs the detached drain and its sole serialized PTY
 // input writer.
 func NewResidentRelay(reader ContextReader, writer ContextWriter) *ResidentRelay {
-	return &ResidentRelay{reader: reader, serialized: NewSerializedWriter(writer)}
+	return &ResidentRelay{
+		reader: reader, serialized: NewSerializedWriter(writer),
+		barriers: make(chan residentBarrier), runDone: make(chan struct{}),
+	}
 }
 
 // Writer returns the exact serialization point shared by viewer input and
@@ -72,7 +80,7 @@ func (r *ResidentRelay) Flush(ctx context.Context) ResidentFlushResult {
 	if viewer == nil {
 		return ResidentFlushResult{Confirmed: true}
 	}
-	return viewer.flush(ctx)
+	return r.flushViewer(ctx, viewer)
 }
 
 // ResidentViewer is one admission-bound handle. Release revokes only this
@@ -83,6 +91,20 @@ type ResidentViewer struct {
 
 // Done reports exactly one viewer result.
 func (v *ResidentViewer) Done() <-chan ResidentViewerResult { return v.state.done }
+
+// Wait observes the fixed result without consuming Done, so release ownership
+// can be synchronized independently from the terminal-decision watcher.
+func (v *ResidentViewer) Wait() ResidentViewerResult {
+	<-v.state.finishedCh
+	v.state.mu.Lock()
+	defer v.state.mu.Unlock()
+	return v.state.finalResult
+}
+
+// Flush establishes and drains a cutoff for this exact admission.
+func (v *ResidentViewer) Flush(ctx context.Context) ResidentFlushResult {
+	return v.state.owner.flushViewer(ctx, v.state)
+}
 
 // Release promptly revokes the viewer and fixes queued bytes to its old sink.
 func (v *ResidentViewer) Release() { v.state.endNow(context.Canceled) }
@@ -109,27 +131,140 @@ func (r *ResidentRelay) AdmitViewer(writer ContextWriter) (*ResidentViewer, erro
 // Run drains until cancellation, PTY EOF, or a PTY read failure. Viewer-local
 // write failures and lag overflow never stop the drain.
 func (r *ResidentRelay) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer close(r.runDone)
+	reads := make(chan residentReadEvent)
+	acknowledge := make(chan struct{}, 1)
+	go r.readLoop(runCtx, reads, acknowledge)
+	var processed uint64
+	for {
+		select {
+		case <-ctx.Done():
+			return r.close(ctx.Err())
+		case event := <-reads:
+			terminal, result := r.processRead(event)
+			processed = event.sequence
+			acknowledge <- struct{}{}
+			if terminal {
+				return result
+			}
+		case barrier := <-r.barriers:
+			var terminal bool
+			var result error
+			for processed < barrier.target {
+				select {
+				case <-ctx.Done():
+					barrier.response <- residentBarrierResult{}
+					return r.close(ctx.Err())
+				case event := <-reads:
+					terminal, result = r.processRead(event)
+					processed = event.sequence
+					acknowledge <- struct{}{}
+				}
+			}
+			barrier.response <- residentBarrierResult{confirmed: true, cutoff: barrier.viewer.cutoff()}
+			if terminal {
+				return result
+			}
+		}
+	}
+}
+
+type residentReadEvent struct {
+	sequence uint64
+	value    []byte
+	count    int
+	err      error
+}
+
+type residentBarrier struct {
+	target   uint64
+	viewer   *residentViewerState
+	response chan residentBarrierResult
+}
+
+type residentBarrierResult struct {
+	confirmed bool
+	cutoff    uint64
+}
+
+func (r *ResidentRelay) readLoop(ctx context.Context, reads chan<- residentReadEvent, acknowledge <-chan struct{}) {
 	buffer := make([]byte, relayBufferSize)
 	for {
 		count, err := r.reader.Read(ctx, buffer)
-		if count < 0 || count > len(buffer) {
-			return r.close(fmt.Errorf("resident PTY reader returned invalid byte count %d", count))
+		event := residentReadEvent{sequence: r.readCompleted.Add(1), count: count, err: err}
+		if count > 0 && count <= len(buffer) {
+			event.value = append([]byte(nil), buffer[:count]...)
 		}
-		if count > 0 {
-			viewer := r.currentViewer()
-			if viewer != nil {
-				viewer.offer(buffer[:count])
-			}
+		select {
+		case reads <- event:
+		case <-ctx.Done():
+			return
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				r.closeAfterDrain(io.EOF)
-				return nil
-			}
-			return r.close(err)
+		select {
+		case <-acknowledge:
+		case <-ctx.Done():
+			return
 		}
-		if count == 0 {
-			return r.close(io.ErrNoProgress)
+		if err != nil || count <= 0 || count > len(buffer) {
+			return
+		}
+	}
+}
+
+func (r *ResidentRelay) processRead(event residentReadEvent) (bool, error) {
+	if event.count < 0 || event.count > relayBufferSize {
+		err := fmt.Errorf("resident PTY reader returned invalid byte count %d", event.count)
+		return true, r.close(err)
+	}
+	if event.count > 0 {
+		viewer := r.currentViewer()
+		if viewer != nil {
+			viewer.offer(event.value)
+		}
+	}
+	if event.err != nil {
+		if errors.Is(event.err, io.EOF) {
+			r.closeAfterDrain(io.EOF)
+			return true, nil
+		}
+		return true, r.close(event.err)
+	}
+	if event.count == 0 {
+		return true, r.close(io.ErrNoProgress)
+	}
+	return false, nil
+}
+
+func (r *ResidentRelay) flushViewer(ctx context.Context, viewer *residentViewerState) ResidentFlushResult {
+	request := residentBarrier{
+		target: r.readCompleted.Load(), viewer: viewer,
+		response: make(chan residentBarrierResult, 1),
+	}
+	select {
+	case r.barriers <- request:
+	case <-r.runDone:
+		return viewer.unconfirmed(ctx)
+	case <-ctx.Done():
+		return viewer.unconfirmed(ctx)
+	}
+	select {
+	case result := <-request.response:
+		return viewer.finishFlushResult(ctx, result)
+	case <-r.runDone:
+		select {
+		case result := <-request.response:
+			return viewer.finishFlushResult(ctx, result)
+		default:
+			return viewer.unconfirmed(ctx)
+		}
+	case <-ctx.Done():
+		select {
+		case result := <-request.response:
+			return viewer.finishFlushResult(ctx, result)
+		default:
+			return viewer.unconfirmed(ctx)
 		}
 	}
 }
@@ -367,10 +502,23 @@ func (v *residentViewerState) finishRequested() bool {
 	return true
 }
 
-func (v *residentViewerState) flush(ctx context.Context) ResidentFlushResult {
+func (v *residentViewerState) cutoff() uint64 {
 	v.mu.Lock()
-	target := v.written + uint64(v.buffered)
-	v.mu.Unlock()
+	defer v.mu.Unlock()
+	if v.ended {
+		return v.finalResult.Written + v.finalResult.Undelivered
+	}
+	return v.written + uint64(v.buffered)
+}
+
+func (v *residentViewerState) finishFlushResult(ctx context.Context, result residentBarrierResult) ResidentFlushResult {
+	if result.confirmed {
+		return v.flushCutoff(ctx, result.cutoff)
+	}
+	return v.unconfirmed(ctx)
+}
+
+func (v *residentViewerState) flushCutoff(ctx context.Context, target uint64) ResidentFlushResult {
 	for {
 		v.mu.Lock()
 		written := v.written
@@ -389,6 +537,19 @@ func (v *residentViewerState) flush(ctx context.Context) ResidentFlushResult {
 		case <-v.progress:
 		}
 	}
+}
+
+func (v *residentViewerState) unconfirmed(ctx context.Context) ResidentFlushResult {
+	cause := ctx.Err()
+	if cause == nil {
+		cause = ErrResidentRelayClosed
+	}
+	v.endNow(cause)
+	<-v.finishedCh
+	v.mu.Lock()
+	result := v.finalResult
+	v.mu.Unlock()
+	return ResidentFlushResult{Confirmed: false, Written: result.Written, Undelivered: result.Undelivered}
 }
 
 func (v *residentViewerState) signalProgress() {

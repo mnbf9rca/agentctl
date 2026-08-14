@@ -101,6 +101,47 @@ func TestClaimCloseAndRemoveDeletesOnlyItsVerifiedLockAndSocket(t *testing.T) {
 	}
 }
 
+func TestClaimOrderedCleanupRemovesRuntimeSocketsBeforeHeldLock(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, testAdvisory(path, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, socket := range []string{path.Socket, path.Attach} {
+		listener, listenErr := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if listenErr != nil {
+			t.Fatal(listenErr)
+		}
+		listener.SetUnlinkOnClose(false)
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	if err := claim.RemoveRuntimeArtifacts(); err != nil {
+		t.Fatal(err)
+	}
+	for _, socket := range []string{path.Socket, path.Attach} {
+		if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime artifact %q remains: %v", socket, err)
+		}
+	}
+	if _, err := os.Lstat(path.Lock); err != nil {
+		t.Fatalf("lock was removed before durable record phase: %v", err)
+	}
+	if claim.file == nil {
+		t.Fatal("flock was released before durable record phase")
+	}
+	if err := claim.CloseAndRemoveLock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path.Lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock remains after final claim release: %v", err)
+	}
+	if claim.file != nil {
+		t.Fatal("flock remains held after final claim release")
+	}
+}
+
 func TestClaimRefusesUnsafeSocketAndLockArtifactsWithoutRepair(t *testing.T) {
 	t.Run("regular socket path", func(t *testing.T) {
 		rolePath := newTestRolePath(t)

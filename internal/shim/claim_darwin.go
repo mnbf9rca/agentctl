@@ -378,11 +378,35 @@ func (c *Claim) Close() error {
 	return err
 }
 
-// CloseAndRemove is the clean-absence release path. It removes the socket and
-// the verified lock pathname while the flock is still held, then closes the
-// held open file description. Callers may use it only after ESRCH proved the
-// owned child absent.
+type claimArtifact struct {
+	name string
+	path string
+	kind os.FileMode
+}
+
+// RemoveRuntimeArtifacts removes both verified runtime sockets while the role
+// flock remains held. Callers use it before deleting the durable record.
+func (c *Claim) RemoveRuntimeArtifacts() error {
+	path := c.path
+	return c.removeHeldArtifacts([]claimArtifact{
+		{name: path.Role + ".sock", path: path.Socket, kind: os.ModeSocket},
+		{name: path.Role + ".attach", path: path.Attach, kind: os.ModeSocket},
+	}, false)
+}
+
+// CloseAndRemoveLock removes the verified lock pathname and releases its held
+// open file description after runtime artifacts and the durable record.
+func (c *Claim) CloseAndRemoveLock() error {
+	return c.removeHeldArtifacts([]claimArtifact{{name: c.path.Role + ".lock", path: c.path.Lock}}, true)
+}
+
+// CloseAndRemove preserves the combined legacy cleanup operation for callers
+// that have no separate durable record to order between its two phases.
 func (c *Claim) CloseAndRemove() error {
+	return errors.Join(c.RemoveRuntimeArtifacts(), c.CloseAndRemoveLock())
+}
+
+func (c *Claim) removeHeldArtifacts(artifacts []claimArtifact, closeFile bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.file == nil {
@@ -397,15 +421,7 @@ func (c *Claim) CloseAndRemove() error {
 	} else if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Lock), path.runtimeSession); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	} else {
-		for _, artifact := range []struct {
-			name string
-			path string
-			kind os.FileMode
-		}{
-			{name: path.Role + ".sock", path: path.Socket, kind: os.ModeSocket},
-			{name: path.Role + ".attach", path: path.Attach, kind: os.ModeSocket},
-			{name: path.Role + ".lock", path: path.Lock},
-		} {
+		for _, artifact := range artifacts {
 			info, err := path.runtimeSession.Lstat(artifact.name)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -426,8 +442,10 @@ func (c *Claim) CloseAndRemove() error {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
-	cleanupErrors = append(cleanupErrors, c.file.Close())
-	c.file = nil
+	if closeFile {
+		cleanupErrors = append(cleanupErrors, c.file.Close())
+		c.file = nil
+	}
 	return errors.Join(cleanupErrors...)
 }
 
