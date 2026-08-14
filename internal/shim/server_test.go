@@ -129,6 +129,92 @@ func TestServerRunServesClosedOperationsAndCleansOnlyAfterObservedAbsence(t *tes
 	}
 }
 
+func TestServerRunDetachedServesAttachAndControlBeforeCleanExit(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	child := newServerRunChild(t, 457)
+	writer := &recordingOperationWriter{}
+	terminal := &serverRunTerminal{}
+	deps := lifecycleDependencies{
+		rolePath: namespace.RolePath, pid: os.Getpid,
+		nonce: func() (string, error) { return "server-run-detached", nil },
+		acquireClaim: func(path *RolePath, advisory Advisory) (claimHandle, error) {
+			return AcquireClaim(path, advisory)
+		},
+		writeRecord: WriteRecord,
+		startToken:  func(int) (StartToken, error) { return StartToken{Sec: 1, Usec: 3}, nil },
+		starter: lifecycleStarterFunc(func(context.Context, ptyx.StartRequest) (ptyx.Child, error) {
+			return child, nil
+		}),
+		listen:       listenRoleSocket,
+		listenAttach: listenRoleSocket,
+		newMasterEndpoint: func(*os.File) (ptyx.ContextReadWriter, func() error, error) {
+			return &lifecycleFakeEndpoint{}, func() error { return nil }, nil
+		},
+		newResidentRelay: func(*os.File, ptyx.ContextWriter) (lifecycleResidentRelay, func() error, error) {
+			reader := &serverResidentReader{}
+			return &serverTestResidentRelay{ResidentRelay: ptyx.NewResidentRelay(reader, writer)}, func() error { return nil }, nil
+		},
+		terminal: terminal,
+	}
+	server := &Server{
+		lifecycle: roleLifecycle{deps: deps},
+		observeProcess: func(_ int, token StartToken) ProcessResult {
+			select {
+			case <-child.done:
+				return ProcessResult{Observation: ProcessAbsent}
+			default:
+				observed := token
+				return ProcessResult{Observation: ProcessPresentMatch, ObservedToken: &observed}
+			}
+		},
+		resizeEvents: func() (<-chan os.Signal, func()) { return make(chan os.Signal), func() {} },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- server.Run(ctx, RunRequest{
+			Session: "fleet", Role: "planner", Harness: "codex", OperatorMode: OperatorDetached,
+			Environment: []string{"PATH=/usr/bin"}, InitialSize: ptyx.WindowSize{Rows: 24, Cols: 80},
+		})
+	}()
+
+	client := NewClient(namespace)
+	waitServerRunning(t, client, "fleet", "planner")
+	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: base + "/runtime/fleet/planner.attach", Net: "unix"})
+	if err != nil {
+		t.Fatalf("DialUnix(attach) error = %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	admitAttachClient(t, connection)
+	writeAttachFrame(t, connection, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("typed")})
+	waitAttachCondition(t, func() bool {
+		writer.mu.Lock()
+		defer writer.mu.Unlock()
+		return reflect.DeepEqual(writer.calls, [][]byte{[]byte("typed")})
+	})
+	if response, err := client.Stop(context.Background(), "fleet", "planner"); err != nil || response.Outcome != OutcomeStopChildExited {
+		t.Fatalf("Stop() = %#v, %v", response, err)
+	}
+	final := readAttachControlKind(t, connection, AttachControlFinal)
+	if final.Disposition != AttachDispositionChildExited {
+		t.Fatalf("attach final = %#v, want child-exited", final)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Server.Run() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("detached Server.Run() did not cleanly stop")
+	}
+}
+
 func TestServerRunReturnsTypedProtocolFailureAfterStoppedChildResponseWriteFault(t *testing.T) {
 	base := shortTempDir(t)
 	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
@@ -1435,6 +1521,33 @@ func (c *serverRunChild) CloseMaster() error { return nil }
 
 type serverRunRelay struct {
 	writer operationWriter
+}
+
+type serverResidentReader struct{}
+
+func (*serverResidentReader) Read(ctx context.Context, _ []byte) (int, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+type serverTestResidentRelay struct{ *ptyx.ResidentRelay }
+
+func (*serverTestResidentRelay) MarkReady(ptyx.TerminalState) error { return nil }
+func (r *serverTestResidentRelay) Writer() operationWriter          { return r.ResidentRelay.Writer() }
+
+func waitServerRunning(t *testing.T, client *Client, session, role string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, err := client.Observe(context.Background(), session, role)
+		if err == nil && response.Outcome == OutcomeRunning {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not become ready: response=%#v error=%v", response, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (*serverRunRelay) Run(ctx context.Context) error      { <-ctx.Done(); return ctx.Err() }

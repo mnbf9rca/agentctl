@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +139,71 @@ func TestAttachServerReleasesQuietViewerOnEOFAndAdmitsReplacement(t *testing.T) 
 	waitAttachServer(t, thirdDone)
 }
 
+func TestAttachServerInitialResizeFailureCostsNoSeat(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	fail := true
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error {
+			if fail {
+				fail = false
+				return errors.New("injected resize failure")
+			}
+			return nil
+		},
+	})
+	first, firstDone := startAttachConnection(t, server)
+	readAttachControlKind(t, first, AttachControlShimHello)
+	writeAttachControl(t, first, AttachControl{Version: 1, Kind: AttachControlHello, Session: "fleet", Role: "planner", Rows: 24, Cols: 80})
+	refused := readAttachControlKind(t, first, AttachControlRefused)
+	if refused.Outcome != AttachRefusalInitialSizeFailed || refused.Rows != 24 || refused.Cols != 80 {
+		t.Fatalf("resize refusal = %#v", refused)
+	}
+	waitAttachServer(t, firstDone)
+	second, secondDone := startAttachConnection(t, server)
+	admitAttachClient(t, second)
+	_ = second.Close()
+	waitAttachServer(t, secondDone)
+}
+
+func TestAttachServerProtocolViolationBeforeAndAfterAdmissionHasExactTerminalShape(t *testing.T) {
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	server := newAttachServer(attachServerConfig{
+		Session: "fleet", Role: "planner", ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	before, beforeDone := startAttachConnection(t, server)
+	readAttachControlKind(t, before, AttachControlShimHello)
+	writeAttachFrame(t, before, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("early")})
+	if _, err := ReadAttachFrame(before); !errors.Is(err, io.EOF) {
+		t.Fatalf("pre-admission violation read = %v, want bare EOF", err)
+	}
+	if err := <-beforeDone; err == nil {
+		t.Fatal("pre-admission violation returned no server error")
+	}
+
+	after, afterDone := startAttachConnection(t, server)
+	admitAttachClient(t, after)
+	writeAttachControl(t, after, AttachControl{Version: 1, Kind: AttachControlShimHello})
+	final := readAttachControlKind(t, after, AttachControlFinal)
+	if final.Disposition != AttachDispositionServerClosing {
+		t.Fatalf("post-admission final = %#v, want server-closing", final)
+	}
+	if err := <-afterDone; err == nil {
+		t.Fatal("post-admission violation returned no server error")
+	}
+}
+
 func TestAttachServerDiscardsDecodedInputAfterAdmissionIsReleased(t *testing.T) {
 	relay, stopRelay := newAttachTestRelay(t)
 	defer stopRelay()
@@ -205,6 +272,36 @@ func TestAttachServerChildExitFlushesCountedOutputBeforeOneFinal(t *testing.T) {
 	}
 	<-childFinished
 	waitAttachServer(t, done)
+}
+
+func TestAttachRuntimeSourceGuardsKeepSurfacesClosedAndBuffersBounded(t *testing.T) {
+	attachSource, err := os.ReadFile("attach_server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSource, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaySource, err := os.ReadFile("../ptyx/resident_relay.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachText := string(attachSource)
+	for _, forbidden := range []string{"DecodeRequest(", "control.Lookup(", "DetachKey", "detach-key"} {
+		if strings.Contains(attachText, forbidden) {
+			t.Fatalf("attach server reopened forbidden surface %q", forbidden)
+		}
+	}
+	if strings.Count(attachText, "make(chan attachAction, attachPendingActions)") != 1 || !strings.Contains(attachText, "const attachPendingActions = 16") {
+		t.Fatal("attach input actions are not held by one explicit bounded queue")
+	}
+	if strings.Count(string(serverSource), "newRoleInputWriter(runtime.relay.Writer()") != 1 {
+		t.Fatal("server does not construct exactly one role gate above the relay writer")
+	}
+	if strings.Count(string(relaySource), "AttachLagBufferBytes") != 3 || !strings.Contains(string(relaySource), "const AttachLagBufferBytes = 131072") {
+		t.Fatal("resident relay does not declare and consume the approved lag bound exactly once")
+	}
 }
 
 type attachTestReadStep struct {

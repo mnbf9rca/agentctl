@@ -3,6 +3,7 @@
 package shim
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 )
 
 const attachPendingActions = 16
+
+var errAttachCounterExhausted = errors.New("attach output counter exhausted")
 
 type attachPeerIdentity struct {
 	PID int
@@ -99,10 +102,10 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 	if s == nil || s.config.Relay == nil || s.config.Input == nil || s.config.Resize == nil {
 		return errors.New("attach server is incomplete")
 	}
-	if err := writeAttachControlFrame(connection, AttachControl{Version: ShimProtocolVersion, Kind: AttachControlShimHello}); err != nil {
+	if err := writeAttachControlConnection(connection, AttachControl{Version: ShimProtocolVersion, Kind: AttachControlShimHello}); err != nil {
 		return err
 	}
-	frame, err := ReadAttachFrame(connection)
+	frame, err := readAttachConnectionFrame(connection)
 	if err != nil {
 		return err
 	}
@@ -170,7 +173,7 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-reads:
-			if errors.Is(err, io.EOF) {
+			if connectionClosedError(err) {
 				return nil
 			}
 			return err
@@ -188,6 +191,8 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 			switch {
 			case errors.Is(result.Err, ptyx.ErrAttachLagOverflow):
 				control.Disposition = AttachDispositionViewerEvicted
+			case errors.Is(result.Err, errAttachCounterExhausted):
+				control.Disposition = AttachDispositionCounterExhausted
 			case errors.Is(result.Err, io.EOF):
 				control.Disposition = AttachDispositionChildExited
 			}
@@ -199,7 +204,7 @@ func (s *attachServer) handleConnection(ctx context.Context, connection net.Conn
 
 func readAttachFrames(ctx context.Context, connection net.Conn, frames chan<- AttachFrame, result chan<- error) {
 	for {
-		frame, err := ReadAttachFrame(connection)
+		frame, err := readAttachConnectionFrame(connection)
 		if err != nil {
 			result <- err
 			return
@@ -303,7 +308,7 @@ func (s *attachServer) childExited(ctx context.Context) {
 }
 
 func (s *attachServer) refuse(connection net.Conn, control AttachControl) error {
-	return writeAttachControlFrame(connection, control)
+	return writeAttachControlConnection(connection, control)
 }
 
 func (a *attachAdmission) releaseWithoutFinal() {
@@ -341,7 +346,7 @@ func (w *attachOutputWriter) Write(ctx context.Context, value []byte) (int, erro
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if uint64(len(value)) > attachCounterMax-w.bytes {
-		return 0, errors.New("attach output counter exhausted")
+		return 0, errAttachCounterExhausted
 	}
 	stop := context.AfterFunc(ctx, func() { _ = w.connection.SetWriteDeadline(time.Now()) })
 	defer func() {
@@ -381,4 +386,31 @@ func writeAttachControlFrame(writer io.Writer, control AttachControl) error {
 		return err
 	}
 	return WriteAttachFrame(writer, AttachFrame{Kind: AttachFrameControl, Data: payload})
+}
+
+func writeAttachControlConnection(connection net.Conn, control AttachControl) error {
+	if err := connection.SetWriteDeadline(time.Now().Add(ShimProtocolIOTimeout)); err != nil {
+		return err
+	}
+	defer func() { _ = connection.SetWriteDeadline(time.Time{}) }()
+	return writeAttachControlFrame(connection, control)
+}
+
+func readAttachConnectionFrame(connection net.Conn) (AttachFrame, error) {
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		return AttachFrame{}, err
+	}
+	var first [1]byte
+	count, err := connection.Read(first[:])
+	if count == 0 {
+		if err == nil {
+			err = io.ErrNoProgress
+		}
+		return AttachFrame{}, err
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(ShimProtocolIOTimeout)); err != nil {
+		return AttachFrame{}, err
+	}
+	defer func() { _ = connection.SetReadDeadline(time.Time{}) }()
+	return ReadAttachFrame(io.MultiReader(bytes.NewReader(first[:]), connection))
 }
