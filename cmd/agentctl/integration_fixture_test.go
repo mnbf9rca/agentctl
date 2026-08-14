@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ const (
 	integrationTMUXSocketEnv = "AGENTCTL_INTEGRATION_TMUX_SOCKET"
 	integrationTMUXTmpEnv    = "AGENTCTL_INTEGRATION_TMUX_TMPDIR"
 	integrationProjectEnv    = "AGENTCTL_INTEGRATION_PROJECT_DIR"
+	integrationRepaintEnv    = "AGENTCTL_INTEGRATION_REPAINT"
 )
 
 type integrationResult struct {
@@ -444,6 +446,18 @@ func integrationMarkerMain() {
 		os.Exit(91)
 	}
 	defer file.Close()
+	if os.Getenv(integrationRepaintEnv) == "1" {
+		repaintSignals := make(chan os.Signal, 1)
+		signal.Notify(repaintSignals, syscall.SIGWINCH)
+		defer signal.Stop(repaintSignals)
+		go func() {
+			<-repaintSignals
+			// A detached candidate can receive SIGWINCH before the attach
+			// terminal is usable. Only a successfully observed size is a
+			// repaint observation; an early signal must not crash the stub.
+			_ = integrationMarkerRepaint("resize")
+		}()
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -460,6 +474,23 @@ func integrationMarkerMain() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(94)
 	}
+}
+
+func integrationMarkerRepaint(input string) error {
+	size := exec.Command("/bin/stty", "size")
+	size.Stdin = os.Stdin
+	observed, err := size.Output()
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(string(observed))
+	if len(fields) != 2 {
+		return fmt.Errorf("integration repaint stub: malformed stty size %q", observed)
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "candidate repaint rows=%s cols=%s input=%s\n", fields[0], fields[1], input); err != nil {
+		return err
+	}
+	return nil
 }
 
 func newIntegrationFixture(t *testing.T) *integrationFixture {

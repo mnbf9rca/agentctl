@@ -1077,10 +1077,12 @@ task8_release_walkthrough() {
   task8_run "$artifact_dir/integration.log" env AGENTCTL_INTEGRATION_RELEASE_CANDIDATE="$current_binary" \
     AGENTCTL_INTEGRATION_PROJECT_DIR="$task8_project" AGENTCTL_INTEGRATION_OWNED_ROOT="$task8_root/integration" \
     go test -tags integration ./cmd/agentctl -count=1 -v \
-    -run 'TestIntegration(ReleaseCandidateSelection|ReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory|ReleaseCandidateStatusReportsUnanchoredDurableRecord|ReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery|ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence|PublicForegroundRunUsesRuntimeWithoutTmux|PublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing|PublicAttachRefusesAbsentPresentationForDurableFleet|DetachedRoleAttachReleasesOnSignalAndReadmits|ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery|ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild|ShimKillObservesChildExitBeforePresentationAndFleetCleanup)' \
+    -run 'TestIntegration(ReleaseCandidateSelection|ReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory|ReleaseCandidateStatusReportsUnanchoredDurableRecord|ReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery|ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence|ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF|PublicForegroundRunUsesRuntimeWithoutTmux|PublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing|PublicAttachRefusesAbsentPresentationForDurableFleet|DetachedRoleAttachReleasesOnSignalAndReadmits|ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery|ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild|ShimKillObservesChildExitBeforePresentationAndFleetCleanup)' \
     || die 'Task 8 live integration evidence failed'
   grep -Fq 'candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation' "$artifact_dir/integration.log" \
     || die 'Task 8 candidate integration did not record private-socket sentinel preservation'
+  grep -Fq 'candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer' "$artifact_dir/integration.log" \
+    || die 'Task 8 candidate integration did not record repaint, VEOF release, and replacement admission'
   task8_run "$artifact_dir/attach-transcript.log" go test ./internal/attach ./internal/shim -count=1 -v \
     -run 'Test(ViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame|AttachServerChildExitMapsExactTailUndeliveredFinal|AttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals|ServerRunDetachedServesAttachAndControlBeforeCleanExit)' \
     || die 'Task 8 detached attach transcript evidence failed'

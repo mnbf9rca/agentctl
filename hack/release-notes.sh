@@ -2,6 +2,7 @@
 # release-notes.sh injects and verifies the versioned release obligations
 # before a draft GitHub release may be made public.
 set -euo pipefail
+LC_ALL=C
 
 usage() {
   printf '%s\n' 'usage: release-notes.sh inject|verify VERSION RELEASE_JSON' >&2
@@ -53,7 +54,6 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 body_file="$temporary_root/body.md"
-block_file="$temporary_root/block.md"
 jq -j '.body' "$release_json" >"$body_file" || die 'could not extract GitHub release body'
 
 start_marker="<!-- agentctl-release-obligations:$version -->"
@@ -66,12 +66,13 @@ start_count=$(count_line "$start_marker")
 end_count=$(count_line "$end_marker")
 
 if [[ "$start_count" == 1 && "$end_count" == 1 ]]; then
-  awk -v start="$start_marker" -v end="$end_marker" '
-    $0 == start { inside = 1 }
-    inside { print }
-    $0 == end { exit }
-  ' "$body_file" >"$block_file"
-  if ! cmp -s "$source_file" "$block_file"; then
+	# read -d '' preserves a final newline, unlike command substitution and
+	# line-oriented extractors. LC_ALL=C makes lengths and slices byte counts.
+	IFS= read -r -d '' source_bytes <"$source_file" || true
+	IFS= read -r -d '' body_bytes <"$body_file" || true
+	prefix_bytes="${body_bytes%%"$start_marker"*}"
+	block_bytes="${body_bytes:${#prefix_bytes}:${#source_bytes}}"
+	if [[ "$block_bytes" != "$source_bytes" ]]; then
     die "release obligation block for v$version was altered"
   fi
 elif [[ "$start_count" == 0 && "$end_count" == 0 ]]; then

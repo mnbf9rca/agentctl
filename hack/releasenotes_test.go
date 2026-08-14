@@ -34,6 +34,20 @@ func TestReleaseNotesVerifyAcceptsExactlyOneUnalteredDraftBlock(t *testing.T) {
 	}
 }
 
+// This catches line-oriented extraction silently restoring a final newline
+// that was absent from the uploaded release body.
+func TestReleaseNotesVerifyRejectsBlockMissingOnlyItsFinalNewline(t *testing.T) {
+	source := releaseNoteSource(t)
+	withoutFinalNewline := strings.TrimSuffix(source, "\n")
+	if withoutFinalNewline == source {
+		t.Fatal("release-note source unexpectedly lacks its final newline")
+	}
+	output, err := runReleaseNotesResult(t, "verify", "0.5.0", releaseJSON(t, withoutFinalNewline, true, "v0.5.0"))
+	if err == nil || !strings.Contains(output, "was altered") {
+		t.Fatalf("missing-final-newline verify err=%v output=%q", err, output)
+	}
+}
+
 func TestReleaseNotesRefusesPublicationUnsafeReleaseFacts(t *testing.T) {
 	source := releaseNoteSource(t)
 	cases := []struct {

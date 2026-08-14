@@ -46,12 +46,18 @@ func TestReleaseWorkflowVerifiesDraftNotesBeforeEveryReachableUndraft(t *testing
 	}
 
 	undrafts := allLineIndexes(lines, releaseUndraft)
-	if len(undrafts) == 0 {
-		t.Fatal("release workflow has no undraft command to protect")
+	if len(undrafts) != 1 {
+		t.Fatalf("release workflow undraft commands = %d, want exactly one allowed undraft:\n%s", len(undrafts), strings.Join(lines, "\n"))
 	}
-	for _, undraft := range undrafts {
-		if verify > undraft {
-			t.Fatalf("undraft at relevant line %d is reachable before draft-note verification at line %d", undraft, verify)
+	if verify > undrafts[0] {
+		t.Fatalf("undraft at relevant line %d is reachable before draft-note verification at line %d", undrafts[0], verify)
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "gh release ") && line != releaseViewBefore && line != releaseInject && line != releaseEdit && line != releaseViewAfter && line != releaseVerify && line != releaseUndraft {
+			t.Fatalf("release workflow has an unknown release publication command %q", line)
+		}
+		if strings.HasPrefix(line, "gh api ") {
+			t.Fatalf("release workflow has an unknown API publication command %q", line)
 		}
 	}
 	for _, later := range []string{"- name: Smoke-test built artifacts", "- name: Attest release artifacts", "- name: Attest checksums file"} {
@@ -66,7 +72,7 @@ func workflowRelevantLines(workflow string) []string {
 	for _, raw := range strings.Split(workflow, "\n") {
 		line := strings.TrimSpace(raw)
 		line = strings.TrimPrefix(line, "run: ")
-		if strings.HasPrefix(line, "gh release ") || strings.HasPrefix(line, "hack/release-notes.sh ") || strings.HasPrefix(line, "- name: Smoke-test") || strings.HasPrefix(line, "- name: Attest") {
+		if strings.HasPrefix(line, "gh release ") || strings.HasPrefix(line, "gh api ") || strings.HasPrefix(line, "hack/release-notes.sh ") || strings.HasPrefix(line, "- name: Smoke-test") || strings.HasPrefix(line, "- name: Attest") {
 			relevant = append(relevant, line)
 		}
 	}

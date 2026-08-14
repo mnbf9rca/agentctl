@@ -105,6 +105,54 @@ func TestIntegrationDetachedRoleAttachReleasesOnSignalAndReadmits(t *testing.T) 
 	}
 }
 
+func TestIntegrationReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF(t *testing.T) {
+	if os.Getenv(integrationCandidateEnv) == "" {
+		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
+	}
+	t.Setenv(integrationRepaintEnv, "1")
+	fixture := newIntegrationFixtureWithoutServer(t)
+	if launched := fixture.runAgentctl("launch", "--session", "candidate-repaint", "--roles", "planner:claude"); launched.exitCode != exitOK {
+		t.Fatalf("candidate launch = %#v", launched)
+	}
+	fixture.waitRoleMarkers("planner")
+	viewer := startIntegrationRoleAttachSize(t, fixture, "candidate-repaint", "planner", ptyx.WindowSize{Rows: 31, Cols: 97})
+	waitIntegrationAttachOutput(t, viewer, "candidate repaint rows=31 cols=97 input=resize")
+	if got := fixture.roleInput("planner"); got != "" {
+		t.Fatalf("candidate repaint was caused by viewer input %q, want resize-only output", got)
+	}
+	writeIntegrationAttachEOF(t, viewer)
+	viewerWait := make(chan error, 1)
+	go func() { viewerWait <- viewer.command.Wait() }()
+	select {
+	case err := <-viewerWait:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != exitTmux || exit.ProcessState.Sys().(syscall.WaitStatus).Signaled() {
+			t.Fatalf("candidate viewer VEOF wait: %T %v; output=%q", err, err, viewer.close(t))
+		}
+	case <-time.After(5 * time.Second):
+		_ = viewer.command.Process.Kill()
+		t.Fatal("candidate viewer did not exit after normal terminal EOF")
+	}
+	output := viewer.close(t)
+	if !strings.Contains(output, "candidate repaint") || !strings.Contains(output, "failed during relay") || !strings.Contains(output, "(attach-transport-failed)") {
+		t.Fatalf("candidate viewer EOF output = %q, want repaint and factual transport EOF result", output)
+	}
+
+	replacement := startIntegrationRoleAttach(t, fixture, "candidate-repaint", "planner")
+	if _, err := replacement.master.Write([]byte("replacement-viewer\n")); err != nil {
+		t.Fatalf("write replacement candidate viewer input: %v", err)
+	}
+	fixture.waitRoleInput("planner", "replacement-viewer\n")
+	if killed := fixture.runAgentctl("kill", "--session", "candidate-repaint"); killed.exitCode != exitOK {
+		t.Fatalf("candidate kill after replacement viewer = %#v", killed)
+	}
+	if err := replacement.command.Wait(); err != nil {
+		t.Fatalf("replacement viewer wait after candidate kill: %v; output=%q", err, replacement.close(t))
+	}
+	replacement.close(t)
+	t.Log("candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer")
+}
+
 func TestIntegrationRoleAttachNeverMutatesParentDescriptorFlagsAcrossStopAndKill(t *testing.T) {
 	fixture := newIntegrationFixtureWithoutServer(t)
 	if launched := fixture.runAgentctl("launch", "--session", "attach-flags", "--roles", "planner:claude"); launched.exitCode != exitOK {
@@ -157,22 +205,51 @@ func TestIntegrationRoleAttachNeverMutatesParentDescriptorFlagsAcrossStopAndKill
 }
 
 type integrationRoleAttach struct {
-	command   *exec.Cmd
-	master    *os.File
-	observer  *os.File
-	slaveName string
-	output    *bytes.Buffer
-	done      chan error
-	closed    bool
+	command      *exec.Cmd
+	master       *os.File
+	observer     *os.File
+	slaveName    string
+	original     ptyx.TerminalState
+	output       *integrationAttachOutput
+	ptyReader    *ptyx.PTYReader
+	readerCancel context.CancelFunc
+	readerDone   bool
+	done         chan error
+	closed       bool
+}
+
+type integrationAttachOutput struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (output *integrationAttachOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.Buffer.String()
+}
+
+func (output *integrationAttachOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return output.Buffer.Write(data)
 }
 
 func startIntegrationRoleAttach(t *testing.T, fixture *integrationFixture, sessionName, role string) *integrationRoleAttach {
 	return startIntegrationRoleAttachWithFlags(t, fixture, sessionName, role, false)
 }
 
+func startIntegrationRoleAttachSize(t *testing.T, fixture *integrationFixture, sessionName, role string, size ptyx.WindowSize) *integrationRoleAttach {
+	return startIntegrationRoleAttachWithFlagsAndSize(t, fixture, sessionName, role, false, size, true)
+}
+
 func startIntegrationRoleAttachWithFlags(t *testing.T, fixture *integrationFixture, sessionName, role string, nonblocking bool) *integrationRoleAttach {
+	return startIntegrationRoleAttachWithFlagsAndSize(t, fixture, sessionName, role, nonblocking, ptyx.WindowSize{Rows: 24, Cols: 80}, false)
+}
+
+func startIntegrationRoleAttachWithFlagsAndSize(t *testing.T, fixture *integrationFixture, sessionName, role string, nonblocking bool, size ptyx.WindowSize, cancellableOutput bool) *integrationRoleAttach {
 	t.Helper()
-	pair, err := ptyx.NewOpener().Open(ptyx.WindowSize{Rows: 24, Cols: 80})
+	pair, err := ptyx.NewOpener().Open(size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +272,13 @@ func startIntegrationRoleAttachWithFlags(t *testing.T, fixture *integrationFixtu
 		t.Fatal(err)
 	}
 	if err := withIntegrationFileDescriptor(slave, func(fd uintptr) error { return unix.SetNonblock(int(fd), nonblocking) }); err != nil {
+		_ = slave.Close()
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	original, err := ptyx.NewTerminal().Observe(slave)
+	if err != nil {
 		_ = slave.Close()
 		_ = master.Close()
 		_ = pair.Close()
@@ -236,13 +320,45 @@ func startIntegrationRoleAttachWithFlags(t *testing.T, fixture *integrationFixtu
 		_ = command.Process.Kill()
 		t.Fatal(err)
 	}
-	output := &bytes.Buffer{}
+	output := &integrationAttachOutput{}
 	done := make(chan error, 1)
+	attachment := &integrationRoleAttach{command: command, master: master, observer: slave, slaveName: slaveName, original: original, output: output, done: done}
+	if cancellableOutput {
+		reader, readerErr := ptyx.NewPTYReader(master)
+		if readerErr != nil {
+			_ = command.Process.Kill()
+			_ = slave.Close()
+			_ = master.Close()
+			t.Fatal(readerErr)
+		}
+		readerCtx, cancelReader := context.WithCancel(context.Background())
+		attachment.ptyReader, attachment.readerCancel = reader, cancelReader
+		go func() { done <- readIntegrationAttachOutput(readerCtx, reader, output) }()
+		return attachment
+	}
 	go func() {
 		_, err := io.Copy(output, master)
 		done <- err
 	}()
-	return &integrationRoleAttach{command: command, master: master, observer: slave, slaveName: slaveName, output: output, done: done}
+	return attachment
+}
+
+func readIntegrationAttachOutput(ctx context.Context, reader *ptyx.PTYReader, output *integrationAttachOutput) error {
+	buffer := make([]byte, 4096)
+	for {
+		count, err := reader.Read(ctx, buffer)
+		if count > 0 {
+			if _, writeErr := output.Write(buffer[:count]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return io.ErrNoProgress
+		}
+	}
 }
 
 func integrationFileFlags(t *testing.T, file *os.File) int {
@@ -276,17 +392,90 @@ func (a *integrationRoleAttach) close(t *testing.T) string {
 		return a.output.String()
 	}
 	a.closed = true
-	_ = a.observer.Close()
-	_ = a.master.Close()
+	if a.ptyReader != nil {
+		stopIntegrationAttachOutputReader(t, a)
+	}
+	if a.observer != nil {
+		_ = a.observer.Close()
+	}
+	if a.master != nil {
+		_ = a.master.Close()
+	}
+	if a.ptyReader == nil {
+		select {
+		case err := <-a.done:
+			if err != nil && !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("read direct attach terminal: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("direct attach terminal reader did not stop")
+		}
+	}
+	return a.output.String()
+}
+
+func stopIntegrationAttachOutputReader(t *testing.T, viewer *integrationRoleAttach) {
+	t.Helper()
+	if viewer.readerDone {
+		return
+	}
+	if viewer.readerCancel == nil || viewer.ptyReader == nil {
+		t.Fatal("direct attach output reader is not cancellable")
+	}
+	viewer.readerCancel()
+	if err := viewer.ptyReader.Close(); err != nil {
+		t.Fatalf("close direct attach output reader: %v", err)
+	}
+	viewer.readerDone = true
 	select {
-	case err := <-a.done:
-		if err != nil && !errors.Is(err, os.ErrClosed) {
+	case err := <-viewer.done:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 			t.Fatalf("read direct attach terminal: %v", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("direct attach terminal reader did not stop")
 	}
-	return a.output.String()
+}
+
+// writeIntegrationAttachEOF restores the observer's canonical terminal mode
+// and writes its configured VEOF byte through the still-open PTY master. That
+// makes the candidate's input reader observe normal EOF, not a terminal HUP.
+func writeIntegrationAttachEOF(t *testing.T, viewer *integrationRoleAttach) {
+	t.Helper()
+	if viewer.master == nil || viewer.observer == nil {
+		t.Fatal("candidate viewer terminal is already closed")
+	}
+	terminal := ptyx.NewTerminal()
+	if err := terminal.SetTermios(viewer.observer, viewer.original); err != nil {
+		t.Fatalf("restore candidate viewer canonical terminal: %v", err)
+	}
+	var termios *unix.Termios
+	if err := withIntegrationFileDescriptor(viewer.observer, func(fd uintptr) error {
+		var ioctlErr error
+		termios, ioctlErr = unix.IoctlGetTermios(int(fd), unix.TIOCGETA)
+		return ioctlErr
+	}); err != nil {
+		t.Fatalf("observe configured candidate viewer VEOF: %v", err)
+	}
+	eof := termios.Cc[syscall.VEOF]
+	if eof == 0 {
+		t.Fatal("candidate viewer VEOF is disabled")
+	}
+	if _, err := viewer.master.Write([]byte{eof}); err != nil {
+		t.Fatalf("write candidate viewer VEOF: %v", err)
+	}
+}
+
+func waitIntegrationAttachOutput(t *testing.T, viewer *integrationRoleAttach, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if output := viewer.output.String(); strings.Contains(output, want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("attach output = %q, want repaint containing %q", viewer.output.String(), want)
 }
 
 func assertIntegrationTerminalCooked(t *testing.T, slaveName string) {

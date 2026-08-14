@@ -120,6 +120,7 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 		"DetachedRoleAttachReleasesOnSignalAndReadmits",
 		"ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery",
 		"ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence",
+		"ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF",
 		"ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild",
 		"ShimKillObservesChildExitBeforePresentationAndFleetCleanup",
 		"test ./internal/attach ./internal/shim -count=1 -v -run Test(",
@@ -146,6 +147,9 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 	integrationTranscript := readTestFile(t, filepath.Join(fixture.root, "evidence", "integration.log"))
 	if !strings.Contains(integrationTranscript, "candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation") {
 		t.Fatalf("candidate integration transcript omits the sentinel-preservation result:\n%s", integrationTranscript)
+	}
+	if !strings.Contains(integrationTranscript, "candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer") {
+		t.Fatalf("candidate integration transcript omits the repaint/VEOF/replacement result:\n%s", integrationTranscript)
 	}
 	if got := strings.TrimSpace(readTestFile(t, fixture.matrixLog)); got != "root=/tmp" {
 		t.Fatalf("version matrix root = %q, want short isolated /tmp parent", got)
@@ -188,6 +192,9 @@ set -eu
 printf 'cwd=%s|argv=%s|candidate=%s|project=%s|owned=%s\n' "$PWD" "$*" "${AGENTCTL_INTEGRATION_RELEASE_CANDIDATE:-}" "${AGENTCTL_INTEGRATION_PROJECT_DIR:-}" "${AGENTCTL_INTEGRATION_OWNED_ROOT:-}" >>"$AGENTCTL_TASK8_GO_LOG"
 if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence* ]]; then
   printf '%s\n' 'candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation'
+fi
+if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF* ]]; then
+  printf '%s\n' 'candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer'
 fi
 if [ "${1:-}" = version ] && [ "${2:-}" = -m ]; then
   printf 'golang.org/x/sys v0.47.0\nvcs.revision=%s\nvcs.modified=false\n' "$(git rev-parse HEAD)"

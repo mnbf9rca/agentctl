@@ -232,18 +232,14 @@ func TestCheckPromotionForm_ChecklistRunRequiresEveryTmuxlessLeg(t *testing.T) {
 
 func TestCheckPromotionForm_ChecklistRunRequiresCommittedCleanRelativeEvidence(t *testing.T) {
 	dir := initFormRepo(t, "0.1.0", nil)
-	if err := os.WriteFile(filepath.Join(dir, "docs", "untracked.md"), []byte("untracked\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	for _, test := range []struct {
 		name     string
 		evidence string
 		want     string
 	}{
-		{"invented", "docs/invented.md", "not a tracked evidence location"},
-		{"absolute", "/tmp/evidence.md", "repository-relative"},
-		{"traversal", "docs/../outside.md", "repository-relative"},
-		{"untracked", "docs/untracked.md", "not a tracked evidence location"},
+		{"invented", "docs/invented.md", "must be the committed repository-relative path"},
+		{"absolute", "/tmp/evidence.md", "must be the committed repository-relative path"},
+		{"traversal", "docs/../outside.md", "must be the committed repository-relative path"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", test.evidence, "0.1.0"))
@@ -252,17 +248,99 @@ func TestCheckPromotionForm_ChecklistRunRequiresCommittedCleanRelativeEvidence(t
 			}
 		})
 	}
-	if err := os.WriteFile(filepath.Join(dir, "docs", "staged.md"), []byte("staged\n"), 0o644); err != nil {
+	const evidence = "docs/release-verification-notes.md"
+	stagedDir := initFormRepo(t, "0.1.0", nil)
+	remove := exec.Command("git", "rm", "-q", "--", evidence)
+	remove.Dir = stagedDir
+	if out, err := remove.CombinedOutput(); err != nil {
+		t.Fatalf("git rm committed evidence: %v\n%s", err, out)
+	}
+	remove = exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "remove evidence")
+	remove.Dir = stagedDir
+	if out, err := remove.CombinedOutput(); err != nil {
+		t.Fatalf("git commit evidence removal: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(stagedDir, "docs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("git", "add", "docs/staged.md")
-	cmd.Dir = dir
+	if err := os.WriteFile(filepath.Join(stagedDir, evidence), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", evidence)
+	cmd.Dir = stagedDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git add staged evidence: %v\n%s", err, out)
 	}
-	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", "docs/staged.md", "0.1.0"))
+	out, err := runFormCheck(t, stagedDir, body("x", " ", "0.1.0"))
 	if err == nil || !strings.Contains(out, "not committed at HEAD") {
 		t.Fatalf("staged evidence err=%v output=%q", err, out)
+	}
+}
+
+// This catches an evidence path that names a tracked tree or symlink instead
+// of the single committed regular release-verification record.
+func TestCheckPromotionForm_ChecklistEvidenceMustBePinnedRegularFileAtHEAD(t *testing.T) {
+	const evidence = "docs/release-verification-notes.md"
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "directory",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(dir, evidence), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, evidence, "inside.md"), []byte("not evidence\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				commitFormFiles(t, dir, evidence)
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "docs", "other.md"), []byte("not evidence\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("other.md", filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				commitFormFiles(t, dir, evidence, "docs/other.md")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := initFormRepo(t, "0.1.0", nil)
+			test.setup(t, dir)
+			out, err := runFormCheck(t, dir, body("x", " ", "0.1.0"))
+			if err == nil || !strings.Contains(out, "regular file") {
+				t.Fatalf("%s evidence err=%v output=%q", test.name, err, out)
+			}
+		})
+	}
+}
+
+func commitFormFiles(t *testing.T, dir string, paths ...string) {
+	t.Helper()
+	arguments := append([]string{"add", "-A", "--"}, paths...)
+	command := exec.Command("git", arguments...)
+	command.Dir = dir
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git add evidence fixture: %v\n%s", err, out)
+	}
+	command = exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture evidence")
+	command.Dir = dir
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git commit evidence fixture: %v\n%s", err, out)
 	}
 }
 

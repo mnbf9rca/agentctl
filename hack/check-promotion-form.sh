@@ -47,6 +47,7 @@ fi
 
 root="$(git rev-parse --show-toplevel)"
 body="$(cat "$body_file")"
+readonly evidence_path='docs/release-verification-notes.md'
 
 box_state() {
   # box_state LABEL — prints the checkbox mark ('x', 'X', or ' ') for the
@@ -89,14 +90,18 @@ if [[ "$run_state" == "x" || "$run_state" == "X" ]]; then
   if [[ -z "$evidence_value" ]]; then
     die "Evidence location: has no committed evidence path for checklist-required promotion"
   fi
-  if ! [[ "$evidence_value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || [[ "$evidence_value" == ./* || "$evidence_value" == */./* || "$evidence_value" == */../* || "$evidence_value" == ../* || "$evidence_value" == */.. || "$evidence_value" == */ || "$evidence_value" == *//* ]]; then
-    die "Evidence location: must be a clean repository-relative path"
+  if [[ "$evidence_value" != "$evidence_path" ]]; then
+    die "Evidence location: must be the committed repository-relative path $evidence_path"
   fi
   if ! git ls-files --error-unmatch -- "$evidence_value" >/dev/null 2>&1; then
     die "Evidence location: $evidence_value is not a tracked evidence location"
   fi
   if ! git cat-file -e "HEAD:$evidence_value" 2>/dev/null; then
     die "Evidence location: $evidence_value is not committed at HEAD"
+  fi
+  evidence_tree_entry="$(git ls-tree HEAD -- "$evidence_value")"
+  if [[ "$evidence_tree_entry" != 100644\ blob* && "$evidence_tree_entry" != 100755\ blob* ]]; then
+    die "Evidence location: $evidence_value is not a committed regular file at HEAD"
   fi
   for label in 'Detached launch passed\.' 'Per-role attach passed\.' 'Signal and terminal restoration passed\.'; do
     state="$(box_state "$label")"
