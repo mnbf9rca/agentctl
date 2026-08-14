@@ -322,9 +322,20 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 	if record.Presentation == PresentationDetached {
 		process, err := r.launcher.startDetached(executable, session, directory, role)
 		if err != nil {
-			return ShimRelaunchResult{}, err
+			return ShimRelaunchResult{}, &ShimDetachedStartFailedError{Session: session, Role: role.Name, Cause: err}
 		}
 		readyErr = r.launcher.waitDetachedReady(ctx, session, role.Name, process)
+		if readyErr != nil {
+			var exited *detachedShimExitedError
+			if errors.As(readyErr, &exited) && r.launcher.detachedRoleAbsent(ctx, session, role.Name) {
+				return ShimRelaunchResult{}, &ShimDetachedStartRolledBackError{Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr}
+			}
+			var uncertain *ShimDetachedStartUncertainError
+			if errors.As(readyErr, &uncertain) {
+				return ShimRelaunchResult{}, readyErr
+			}
+			return ShimRelaunchResult{}, &ShimDetachedStartRetainedError{Session: session, Role: role.Name, CreatedPID: process.PID(), Cause: readyErr, Remaining: "durable fleet record", CleanupErr: errors.New("ownership agreement was not observed")}
+		}
 	} else {
 		presentationSession, found, err := r.launcher.presentation.FindPresentationSession(ctx, session)
 		if err != nil {

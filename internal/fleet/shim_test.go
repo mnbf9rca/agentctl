@@ -652,7 +652,7 @@ func TestShimLauncherStartsDetachedRolesDirectlyInRosterOrder(t *testing.T) {
 		t.Fatalf("planner waiter registrations = %d, want one", got)
 	}
 	first := starter.requests[0]
-	if !reflect.DeepEqual(first.Argv, []string{"/current agentctl", "__shim", "--session", "fleet", "--role", "planner", "--harness", "claude", "--effort", "max"}) || first.Directory != "/repo path" || !reflect.DeepEqual(first.Environment, []string{"PATH=/usr/bin", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state"}) || first.Stdin == nil || first.Stdout == nil || first.Stderr == nil {
+	if !reflect.DeepEqual(first.Argv, []string{"/current agentctl", "__shim", "--session", "fleet", "--role", "planner", "--harness", "claude", "--effort", "max"}) || first.Directory != "/repo path" || !reflect.DeepEqual(first.Environment, []string{"PATH=/usr/bin", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state", "AGENTCTL_SESSION=fleet", "AGENTCTL_ROLE=planner", "AGENTCTL_MANAGED=1"}) || first.Stdin == nil || first.Stdout == nil || first.Stderr == nil {
 		t.Fatalf("first detached request = %#v, want direct fully-typed planner invocation", first)
 	}
 }
@@ -671,12 +671,106 @@ func TestShimLauncherDetachedSecondStartFailureStopsOnlyStartedRole(t *testing.T
 	launcher := NewShimLauncher(nil, lifecycle, records, dependencies)
 
 	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
-	var rollback *ShimLaunchRollbackError
-	if !errors.As(err, &rollback) || rollback.CleanupErr != nil {
-		t.Fatalf("Launch() error = %T %v, want complete rollback after no-child start failure", err, err)
+	var failed *ShimDetachedStartFailedError
+	if !errors.As(err, &failed) {
+		t.Fatalf("Launch() error = %T %v, want no-child detached start failure", err, err)
 	}
 	if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder", "detached-start:planner", "observe:planner", "detached-start:coder", "stop:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("no-child rollback events = %#v, want %#v", got, want)
+	}
+}
+
+// This catches the production mutation that includes a role whose ready PID
+// disagrees with direct-spawn provenance in role-addressed rollback.
+func TestShimLauncherDetachedOwnerDisagreementDoesNotStopRespondingPeerOrRemoveRecord(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	records := &fakeShimFleetRecords{events: events}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(9001, 7001)}, stop: []shim.Response{stoppedShimResponse(7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	launcher := NewShimLauncher(nil, lifecycle, records, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+	var disagreement *ShimReadyOwnerDisagreementError
+	if !errors.As(err, &disagreement) {
+		t.Fatalf("Launch() error = %T %v, want ready-owner disagreement", err, err)
+	}
+	for _, event := range events.snapshot() {
+		if event == "stop:planner" || event == "record-remove" {
+			t.Fatalf("owner disagreement mutated responding peer or fleet record: events=%#v", events.snapshot())
+		}
+	}
+}
+
+// This catches a detached request that inherits conflicting ambient metadata
+// instead of replacing it with the exact session, role, and managed facts.
+func TestShimLauncherDetachedRequestAddsRoleInformationalEnvironment(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	dependencies.Environment = func() []string {
+		return []string{"PATH=/usr/bin", "AGENTCTL_SESSION=wrong", "AGENTCTL_ROLE=wrong", "AGENTCTL_MANAGED=0", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state"}
+	}
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	want := []string{"PATH=/usr/bin", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state", "AGENTCTL_SESSION=fleet", "AGENTCTL_ROLE=planner", "AGENTCTL_MANAGED=1"}
+	if got := starter.requests[0].Environment; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached environment = %#v, want %#v", got, want)
+	}
+}
+
+// This catches opening every detached standard descriptor read-only, which
+// prevents a hidden shim from writing diagnostics on stdout or stderr.
+func TestShimLauncherDetachedOpensWritableStandardDescriptors(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &writingDetachedShimStarter{fakeDetachedShimStarter: fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	launcher := NewShimLauncher(nil, &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	if starter.writeErr != nil {
+		t.Fatalf("detached stdout/stderr write = %v, want writable descriptors", starter.writeErr)
+	}
+	request := starter.requests[0]
+	for _, descriptor := range []*os.File{request.Stdin, request.Stdout, request.Stderr} {
+		if _, err := descriptor.Stat(); err == nil {
+			t.Fatalf("launcher retained detached descriptor %v after Start", descriptor.Fd())
+		}
+	}
+}
+
+// This catches accepting an observed running response when the spawned shim's
+// asynchronous waiter reports exit during the runtime observation.
+func TestShimLauncherDetachedWaiterExitDuringObserveBeatsRunning(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	exited := make(chan error, 1)
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: exited}}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}, onObserve: func() { exited <- errors.New("shim exited") }}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	launcher := NewShimLauncher(nil, lifecycle, &fakeShimFleetRecords{events: events}, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}, PresentationDetached, nil)
+	if err == nil || strings.Contains(err.Error(), "reported running") {
+		t.Fatalf("Launch() error = %v, want waiter exit to outrank running", err)
 	}
 }
 
@@ -1081,9 +1175,10 @@ func (f *fakeShimPresentation) RemovePresentationSession(_ context.Context, id t
 }
 
 type fakeShimLifecycle struct {
-	events  *shimEventLog
-	observe []shim.Response
-	stop    []shim.Response
+	events    *shimEventLog
+	observe   []shim.Response
+	stop      []shim.Response
+	onObserve func()
 }
 
 type fakeDetachedShimStarter struct {
@@ -1120,8 +1215,29 @@ type fakeDetachedShimProcess struct {
 func (p *fakeDetachedShimProcess) PID() int           { return p.pid }
 func (p *fakeDetachedShimProcess) Wait() <-chan error { p.waitCalls++; return p.wait }
 
+type writingDetachedShimStarter struct {
+	fakeDetachedShimStarter
+	writeErr error
+}
+
+func (f *writingDetachedShimStarter) Start(request DetachedShimRequest) (DetachedShimProcess, error) {
+	if _, err := request.Stdout.WriteString("stdout\n"); err != nil {
+		f.writeErr = err
+	}
+	if _, err := request.Stderr.WriteString("stderr\n"); err != nil && f.writeErr == nil {
+		f.writeErr = err
+	}
+	return f.fakeDetachedShimStarter.Start(request)
+}
+
 func (f *fakeShimLifecycle) Observe(_ context.Context, _, role string) (shim.Response, error) {
 	f.events.add("observe:" + role)
+	if f.onObserve != nil {
+		f.onObserve()
+	}
+	if len(f.observe) == 0 {
+		return shim.Response{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeMissing}, nil
+	}
 	response := f.observe[0]
 	f.observe = f.observe[1:]
 	return response, nil

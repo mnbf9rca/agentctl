@@ -88,6 +88,77 @@ func TestShimRelaunchRecreatesDetachedFleetWithoutConsultingTmux(t *testing.T) {
 	}
 }
 
+// This catches detached relaunch returning a raw readiness failure after Start
+// instead of retaining the pre-existing fleet record and avoiding peer stop.
+func TestShimRelaunchDetachedReadinessFailureRetainsRecordWithoutStoppingRole(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	records := &fakeShimFleetRecords{events: events, record: record}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeOrphan}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, lifecycle, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	var retained *ShimDetachedStartRetainedError
+	if !errors.As(err, &retained) || retained.CreatedPID != 4321 {
+		t.Fatalf("Relaunch() error = %T %v, want retained detached start for PID 4321", err, err)
+	}
+	for _, event := range events.snapshot() {
+		if event == "stop:planner" || event == "record-remove" || event == "record-replace:fleet" {
+			t.Fatalf("detached relaunch failure mutated peer or pre-existing record: events=%#v", events.snapshot())
+		}
+	}
+}
+
+// This catches detached relaunch collapsing observed child exit and caller
+// cancellation into generic errors that imply neither retention nor PID facts.
+func TestShimRelaunchDetachedExitAndCancellationRetainRecordedFleet(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		context       func() context.Context
+		wait          chan error
+		wantUncertain bool
+	}{
+		{name: "waiter exit", context: context.Background, wait: func() chan error { done := make(chan error, 1); done <- errors.New("exited"); return done }()},
+		{name: "cancellation", context: func() context.Context { ctx, cancel := context.WithCancel(context.Background()); cancel(); return ctx }, wait: make(chan error), wantUncertain: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := &shimEventLog{}
+			record := mustShimFleetRecord(t, "fleet", "/repo")
+			record.Presentation = PresentationDetached
+			starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: test.wait}}}
+			dependencies := shimLaunchTestDependencies(events)
+			dependencies.DetachedStarter = starter
+			relauncher := NewShimRelauncher(nil, &fakeShimLifecycle{events: events}, &fakeShimFleetRecords{events: events, record: record}, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+
+			_, err := relauncher.Relaunch(test.context(), "fleet", RelaunchRequest{Role: "planner"})
+			if test.wantUncertain {
+				var uncertain *ShimDetachedStartUncertainError
+				if !errors.As(err, &uncertain) || uncertain.CreatedPID != 4321 {
+					t.Fatalf("Relaunch() error = %T %v, want uncertain PID 4321", err, err)
+				}
+			} else {
+				var rolledBack *ShimDetachedStartRolledBackError
+				if !errors.As(err, &rolledBack) || rolledBack.CreatedPID != 4321 {
+					t.Fatalf("Relaunch() error = %T %v, want rolled-back PID 4321", err, err)
+				}
+			}
+			for _, event := range events.snapshot() {
+				if strings.HasPrefix(event, "stop:") || event == "record-remove" || event == "record-replace:fleet" {
+					t.Fatalf("failure mutated pre-existing fleet: events=%#v", events.snapshot())
+				}
+			}
+		})
+	}
+}
+
 func TestShimRelaunchRemovesStaleRecordOnlyAfterFreshESRCHThenStartsOneShim(t *testing.T) {
 	t.Parallel()
 

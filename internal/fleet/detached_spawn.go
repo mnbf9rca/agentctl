@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"sync"
 	"syscall"
 )
 
@@ -60,12 +59,10 @@ func (ExecDetachedShimStarter) Start(request DetachedShimRequest) (DetachedShimP
 type execDetachedShimProcess struct {
 	pid  int
 	done chan error
-	once sync.Once
 }
 
 func (p *execDetachedShimProcess) PID() int { return p.pid }
 
 func (p *execDetachedShimProcess) Wait() <-chan error {
-	p.once.Do(func() {})
 	return p.done
 }

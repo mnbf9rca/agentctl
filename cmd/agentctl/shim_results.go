@@ -28,6 +28,9 @@ func shimSetupError(stderr io.Writer, operation string, err error) int {
 }
 
 func shimLaunchError(stderr io.Writer, sessionName, role string, err error) int {
+	if code, handled := shimDetachedStartError(stderr, err); handled {
+		return code
+	}
 	var directory *fleet.DirectoryError
 	if errors.As(err, &directory) {
 		fmt.Fprintf(stderr, "agentctl: launch failed for session %q: %q (unclassified)\n", sessionName, err.Error())
@@ -278,6 +281,9 @@ func renderStartToken(token *shim.StartToken) string {
 }
 
 func shimRelaunchError(stderr io.Writer, sessionName, role string, err error) int {
+	if code, handled := shimDetachedStartError(stderr, err); handled {
+		return code
+	}
 	var refusal *fleet.ShimRelaunchRefusalError
 	if errors.As(err, &refusal) {
 		return shimObservationResult(stderr, "relaunch", sessionName, role, refusal.Observation)
@@ -298,6 +304,34 @@ func shimRelaunchError(stderr io.Writer, sessionName, role string, err error) in
 		return exitLaunch
 	}
 	return shimOperationError(stderr, "relaunch", sessionName, role, err)
+}
+
+func shimDetachedStartError(stderr io.Writer, err error) (int, bool) {
+	var failed *fleet.ShimDetachedStartFailedError
+	if errors.As(err, &failed) {
+		fmt.Fprintf(stderr, "agentctl: could not start a detached shim for role %q in session %q: %v; no child was started and cleanup removed every artifact owned by this invocation (detached-start-failed)\n", failed.Role, failed.Session, failed.Cause)
+		return exitLaunch, true
+	}
+	var rolledBack *fleet.ShimDetachedStartRolledBackError
+	if errors.As(err, &rolledBack) {
+		fmt.Fprintf(stderr, "agentctl: detached shim PID %d for role %q in session %q failed before readiness: %v; cleanup observed child absence and removed every artifact owned by this invocation (detached-start-rolled-back)\n", rolledBack.CreatedPID, rolledBack.Role, rolledBack.Session, rolledBack.Cause)
+		return exitLaunch, true
+	}
+	var retained *fleet.ShimDetachedStartRetainedError
+	if errors.As(err, &retained) {
+		remaining := retained.Remaining
+		if remaining == "" {
+			remaining = "retained artifacts"
+		}
+		fmt.Fprintf(stderr, "agentctl: detached shim PID %d for role %q in session %q failed before readiness: %v; cleanup left %s: %v (detached-start-retained)\n", retained.CreatedPID, retained.Role, retained.Session, retained.Cause, remaining, retained.CleanupErr)
+		return exitLaunchUnproven, true
+	}
+	var uncertain *fleet.ShimDetachedStartUncertainError
+	if errors.As(err, &uncertain) {
+		fmt.Fprintf(stderr, "agentctl: detached shim PID %d for role %q in session %q neither became ready nor was observed to exit; nothing was removed and the durable record was retained (detached-start-uncertain)\n", uncertain.CreatedPID, uncertain.Role, uncertain.Session)
+		return exitLaunchUnproven, true
+	}
+	return exitUnclassified, false
 }
 
 func shimKillError(stderr io.Writer, sessionName string, err error) int {

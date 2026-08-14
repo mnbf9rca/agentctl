@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -113,9 +114,10 @@ type ShimReadyOwnerDisagreementError struct {
 // detached shim but observed neither readiness nor its exit before deadline.
 // The durable record remains because absence was not observed.
 type ShimDetachedStartUncertainError struct {
-	Session string
-	Role    string
-	Cause   error
+	Session    string
+	Role       string
+	CreatedPID int
+	Cause      error
 }
 
 func (e *ShimDetachedStartUncertainError) Error() string {
@@ -123,6 +125,63 @@ func (e *ShimDetachedStartUncertainError) Error() string {
 }
 
 func (e *ShimDetachedStartUncertainError) Unwrap() error { return e.Cause }
+
+// ShimDetachedStartRetainedError records a started detached role that never
+// proved responder ownership. Its fleet record is retained rather than risking
+// a role-addressed cleanup of an unowned peer.
+type ShimDetachedStartRetainedError struct {
+	Session    string
+	Role       string
+	CreatedPID int
+	Cause      error
+	Remaining  string
+	CleanupErr error
+}
+
+func (e *ShimDetachedStartRetainedError) Error() string {
+	return fmt.Sprintf("detached shim PID %d for role %q in session %q was retained after readiness failed before ownership agreement", e.CreatedPID, e.Role, e.Session)
+}
+
+func (e *ShimDetachedStartRetainedError) Unwrap() []error { return []error{e.Cause, e.CleanupErr} }
+
+// ShimDetachedStartFailedError means the typed starter returned no process.
+type ShimDetachedStartFailedError struct {
+	Session string
+	Role    string
+	Cause   error
+}
+
+func (e *ShimDetachedStartFailedError) Error() string {
+	return fmt.Sprintf("detached shim for role %q in session %q did not start", e.Role, e.Session)
+}
+
+func (e *ShimDetachedStartFailedError) Unwrap() error { return e.Cause }
+
+// ShimDetachedStartRolledBackError records a started detached process whose
+// owned cleanup completed after a pre-readiness failure.
+type ShimDetachedStartRolledBackError struct {
+	Session    string
+	Role       string
+	CreatedPID int
+	Cause      error
+}
+
+func (e *ShimDetachedStartRolledBackError) Error() string {
+	return fmt.Sprintf("detached shim PID %d for role %q in session %q failed before readiness and owned cleanup completed", e.CreatedPID, e.Role, e.Session)
+}
+
+func (e *ShimDetachedStartRolledBackError) Unwrap() error { return e.Cause }
+
+type detachedShimExitedError struct {
+	pid   int
+	cause error
+}
+
+func (e *detachedShimExitedError) Error() string {
+	return fmt.Sprintf("detached shim PID %d exited before readiness", e.pid)
+}
+
+func (e *detachedShimExitedError) Unwrap() error { return e.cause }
 
 func (e *ShimReadyOwnerDisagreementError) Error() string {
 	return fmt.Sprintf("role %q in session %q was answered by shim PID %d; this invocation created PID %d", e.Role, e.Session, e.ObservedPID, e.CreatedPID)
@@ -170,7 +229,7 @@ func NewShimLauncher(presentation ShimPresentation, lifecycle ShimLifecycle, rec
 		dependencies.Environment = os.Environ
 	}
 	if dependencies.OpenDevNull == nil {
-		dependencies.OpenDevNull = func() (*os.File, error) { return os.Open("/dev/null") }
+		dependencies.OpenDevNull = func() (*os.File, error) { return os.OpenFile("/dev/null", os.O_RDWR, 0) }
 	}
 	if dependencies.DetachedStarter == nil {
 		dependencies.DetachedStarter = ExecDetachedShimStarter{}
@@ -253,21 +312,35 @@ func (l ShimLauncher) launchDetached(ctx context.Context, executable string, rec
 		role := config.RoleConfig{Name: roleName, Harness: config.Harness(record.Roles[roleName].Harness), Model: record.Roles[roleName].Model, Effort: record.Roles[roleName].Effort}
 		process, err := l.startDetached(executable, record.Session, record.Directory, role)
 		if err != nil {
-			if len(readyRoles) == 0 {
-				return ShimLaunchResult{}, &ShimLaunchRollbackError{Session: record.Session, Role: role.Name, Cause: err, CleanupErr: l.records.RemoveOwned(record)}
+			cleanupErr := l.rollbackDetached(ctx, record, readyRoles, true)
+			if cleanupErr != nil {
+				return ShimLaunchResult{}, &ShimLaunchRollbackError{Session: record.Session, Role: role.Name, Cause: err, CleanupErr: cleanupErr}
 			}
-			return ShimLaunchResult{}, l.rollbackDetached(ctx, record, readyRoles, role.Name, err)
+			return ShimLaunchResult{}, &ShimDetachedStartFailedError{Session: record.Session, Role: role.Name, Cause: err}
 		}
 		if err := l.waitDetachedReady(ctx, record.Session, role.Name, process); err != nil {
-			var uncertain *ShimDetachedStartUncertainError
-			if errors.As(err, &uncertain) {
-				return ShimLaunchResult{}, err
+			var exited *detachedShimExitedError
+			if errors.As(err, &exited) && l.detachedRoleAbsent(ctx, record.Session, role.Name) {
+				cleanupErr := l.rollbackDetached(ctx, record, readyRoles, true)
+				if cleanupErr == nil {
+					return ShimLaunchResult{}, &ShimDetachedStartRolledBackError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err}
+				}
+				return ShimLaunchResult{}, &ShimDetachedStartRetainedError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err, Remaining: "durable fleet record", CleanupErr: cleanupErr}
 			}
-			return ShimLaunchResult{}, l.rollbackDetached(ctx, record, append(readyRoles, role), role.Name, err)
+			// This role never established that the responder is our direct child.
+			// A role-addressed stop could therefore kill a peer. Stop only earlier
+			// ready roles and retain the record for the failed role's evidence.
+			cleanupErr := errors.Join(l.rollbackDetached(ctx, record, readyRoles, false), errors.New("ownership agreement was not observed"))
+			return ShimLaunchResult{}, &ShimDetachedStartRetainedError{Session: record.Session, Role: role.Name, CreatedPID: process.PID(), Cause: err, Remaining: "durable fleet record", CleanupErr: cleanupErr}
 		}
 		readyRoles = append(readyRoles, role)
 	}
 	return ShimLaunchResult{Directory: record.Directory, TotalRoles: len(record.Roster)}, nil
+}
+
+func (l ShimLauncher) detachedRoleAbsent(ctx context.Context, session, role string) bool {
+	response, err := l.lifecycle.Observe(ctx, session, role)
+	return err == nil && response.Outcome == shim.OutcomeMissing
 }
 
 func (l ShimLauncher) startDetached(executable, session, directory string, role config.RoleConfig) (DetachedShimProcess, error) {
@@ -288,8 +361,21 @@ func (l ShimLauncher) startDetached(executable, session, directory string, role 
 	defer func() { _ = stderr.Close() }()
 	return l.detachedStarter.Start(DetachedShimRequest{
 		Executable: executable, Argv: shimArgv(executable, session, role), Directory: directory,
-		Environment: append([]string(nil), l.environment()...), Stdin: stdin, Stdout: stdout, Stderr: stderr,
+		Environment: detachedShimEnvironment(l.environment(), session, role.Name), Stdin: stdin, Stdout: stdout, Stderr: stderr,
 	})
+}
+
+func detachedShimEnvironment(inherited []string, session, role string) []string {
+	replaced := map[string]bool{"AGENTCTL_SESSION": true, "AGENTCTL_ROLE": true, "AGENTCTL_MANAGED": true}
+	environment := make([]string, 0, len(inherited)+3)
+	for _, entry := range inherited {
+		name, _, found := strings.Cut(entry, "=")
+		if found && replaced[name] {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, "AGENTCTL_SESSION="+session, "AGENTCTL_ROLE="+role, "AGENTCTL_MANAGED=1")
 }
 
 func (l ShimLauncher) waitDetachedReady(ctx context.Context, session, role string, process DetachedShimProcess) error {
@@ -297,14 +383,25 @@ func (l ShimLauncher) waitDetachedReady(ctx context.Context, session, role strin
 	waiter := process.Wait()
 	for {
 		select {
+		case <-ctx.Done():
+			return &ShimDetachedStartUncertainError{Session: session, Role: role, CreatedPID: process.PID(), Cause: ctx.Err()}
 		case exit := <-waiter:
-			if exit == nil {
-				return fmt.Errorf("detached shim PID %d exited before readiness", process.PID())
-			}
-			return fmt.Errorf("detached shim PID %d exited before readiness: %w", process.PID(), exit)
+			return detachedExitError(process.PID(), exit)
 		default:
 		}
 		response, err := l.lifecycle.Observe(ctx, session, role)
+		// Observe can block while the direct child exits. Its waiter is the
+		// authoritative fact, so sample it again before accepting any response.
+		select {
+		case <-ctx.Done():
+			return &ShimDetachedStartUncertainError{Session: session, Role: role, CreatedPID: process.PID(), Cause: ctx.Err()}
+		case exit := <-waiter:
+			return detachedExitError(process.PID(), exit)
+		default:
+		}
+		if !l.now().Before(deadline) {
+			return &ShimDetachedStartUncertainError{Session: session, Role: role, CreatedPID: process.PID(), Cause: err}
+		}
 		if err == nil {
 			switch response.Outcome {
 			case shim.OutcomeRunning:
@@ -320,17 +417,15 @@ func (l ShimLauncher) waitDetachedReady(ctx context.Context, session, role strin
 				return &ShimRoleStateError{Session: session, Role: role, Outcome: response.Outcome}
 			}
 		}
-		if !l.now().Before(deadline) {
-			if err != nil {
-				return &ShimDetachedStartUncertainError{Session: session, Role: role, Cause: err}
-			}
-			return &ShimDetachedStartUncertainError{Session: session, Role: role, Cause: &ShimRoleStateError{Session: session, Role: role, Outcome: response.Outcome}}
-		}
 		l.sleep(ptyx.ReadinessPollInterval)
 	}
 }
 
-func (l ShimLauncher) rollbackDetached(ctx context.Context, record ShimFleetRecord, roles []config.RoleConfig, failedRole string, cause error) error {
+func detachedExitError(pid int, exit error) error {
+	return &detachedShimExitedError{pid: pid, cause: exit}
+}
+
+func (l ShimLauncher) rollbackDetached(ctx context.Context, record ShimFleetRecord, roles []config.RoleConfig, removeRecord bool) error {
 	var cleanup []error
 	allAbsent := true
 	for index := len(roles) - 1; index >= 0; index-- {
@@ -340,10 +435,10 @@ func (l ShimLauncher) rollbackDetached(ctx context.Context, record ShimFleetReco
 			cleanup = append(cleanup, errors.Join(err, fmt.Errorf("stop role %s did not observe child exit", roles[index].Name)))
 		}
 	}
-	if allAbsent {
+	if allAbsent && removeRecord {
 		cleanup = append(cleanup, l.records.RemoveOwned(record))
 	}
-	return &ShimLaunchRollbackError{Session: record.Session, Role: failedRole, Cause: cause, CleanupErr: errors.Join(cleanup...)}
+	return errors.Join(cleanup...)
 }
 
 func (l ShimLauncher) rollback(
