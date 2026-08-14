@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,10 +21,286 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/kill"
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+	"golang.org/x/sys/unix"
 )
+
+func TestIntegrationDetachedRoleAttachReleasesOnSignalAndReadmits(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+	launched := fixture.runAgentctl("launch", "--session", "direct-attach", "--roles", "planner:claude")
+	wantLaunch := "agentctl: launched session \"direct-attach\" detached; 1 roles are ready\n" +
+		"agentctl: attach a role with: agentctl attach --session direct-attach ROLE\n"
+	if launched.exitCode != exitOK || launched.stdout != "" || launched.stderr != wantLaunch {
+		t.Fatalf("detached launch = %#v, want stderr %q", launched, wantLaunch)
+	}
+	fixture.waitRoleMarkers("planner")
+
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+	if err := os.Unsetenv("TMUX_PANE"); err != nil {
+		t.Fatal(err)
+	}
+	bare := fixture.runAgentctl("attach", "--session", "direct-attach")
+	wantBare := "agentctl: refusing to attach session direct-attach; no tmux presentation was observed; attach a role directly:\n" +
+		"  agentctl attach --session direct-attach planner\n"
+	if bare.exitCode != exitSession || bare.stdout != "" || bare.stderr != wantBare {
+		t.Fatalf("bare detached attach = %#v, want stderr %q", bare, wantBare)
+	}
+
+	allInput := ""
+	for index, signal := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
+		viewer := startIntegrationRoleAttach(t, fixture, "direct-attach", "planner")
+		input := fmt.Sprintf("typed-%d\n", index+1)
+		if _, err := viewer.master.Write([]byte(input)); err != nil {
+			t.Fatalf("write direct attach input before %s: %v", signal, err)
+		}
+		allInput += input
+		fixture.waitRoleInput("planner", allInput)
+		if index == 0 {
+			contender := startIntegrationRoleAttach(t, fixture, "direct-attach", "planner")
+			err := contender.command.Wait()
+			var contenderExit *exec.ExitError
+			output := contender.close(t)
+			if !errors.As(err, &contenderExit) || contenderExit.ExitCode() != exitUnsafe || !strings.Contains(output, "(attach-viewer-present)") {
+				t.Fatalf("second viewer wait=%T %v output=%q, want viewer-present refusal", err, err, output)
+			}
+			if cleared := fixture.runAgentctl("clear", "--session", "direct-attach", "planner"); cleared.exitCode != exitOK {
+				t.Fatalf("clear while viewer attached = %#v", cleared)
+			}
+			allInput += "\x15/clear\n"
+			fixture.waitRoleInput("planner", allInput)
+		}
+		if err := viewer.command.Process.Signal(signal); err != nil {
+			t.Fatalf("signal direct attach with %s: %v", signal, err)
+		}
+		err := viewer.command.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || !exit.ProcessState.Sys().(syscall.WaitStatus).Signaled() || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != signal {
+			t.Fatalf("direct attach wait after %s = %T %v, want signal wait status", signal, err, err)
+		}
+		assertIntegrationTerminalCooked(t, viewer.slaveName)
+		viewer.close(t)
+		status := fixture.runAgentctl("status", "--session", "direct-attach", "--json")
+		if status.exitCode != exitOK || !strings.Contains(status.stdout, `"state":"running"`) {
+			t.Fatalf("role after viewer %s = %#v, want runtime-running", signal, status)
+		}
+	}
+
+	second := startIntegrationRoleAttach(t, fixture, "direct-attach", "planner")
+	if _, err := second.master.Write([]byte("typed-final\n")); err != nil {
+		t.Fatalf("write second direct attach input: %v", err)
+	}
+	fixture.waitRoleInput("planner", allInput+"typed-final\n")
+	if killed := fixture.runAgentctl("kill", "--session", "direct-attach"); killed.exitCode != exitOK {
+		t.Fatalf("kill detached role while attached = %#v", killed)
+	}
+	if err := second.command.Wait(); err != nil {
+		t.Fatalf("second direct attach wait: %v; output=%q", err, second.close(t))
+	}
+	output := second.close(t)
+	if !strings.Contains(output, "agentctl: role planner in session direct-attach ended while attached;") || !strings.Contains(output, "(attach-viewer-ended)") {
+		t.Fatalf("second direct attach output=%q, want observed child-exit row", output)
+	}
+}
+
+func TestIntegrationRoleAttachNeverMutatesParentDescriptorFlagsAcrossStopAndKill(t *testing.T) {
+	fixture := newIntegrationFixtureWithoutServer(t)
+	if launched := fixture.runAgentctl("launch", "--session", "attach-flags", "--roles", "planner:claude"); launched.exitCode != exitOK {
+		t.Fatalf("launch = %#v", launched)
+	}
+	fixture.waitRoleMarkers("planner")
+	allInput := ""
+	for _, nonblocking := range []bool{false, true} {
+		viewer := startIntegrationRoleAttachWithFlags(t, fixture, "attach-flags", "planner", nonblocking)
+		wantFlags := integrationFileFlags(t, viewer.observer)
+		if got := wantFlags&syscall.O_NONBLOCK != 0; got != nonblocking {
+			t.Fatalf("initial O_NONBLOCK=%t, want %t (flags %#x)", got, nonblocking, wantFlags)
+		}
+		input := fmt.Sprintf("flags-%t\n", nonblocking)
+		allInput += input
+		if _, err := viewer.master.Write([]byte(input)); err != nil {
+			t.Fatal(err)
+		}
+		fixture.waitRoleInput("planner", allInput)
+		for _, signal := range []syscall.Signal{syscall.SIGSTOP, syscall.SIGKILL} {
+			if err := viewer.command.Process.Signal(signal); err != nil {
+				t.Fatalf("send %s: %v", signal, err)
+			}
+			if got := integrationFileFlags(t, viewer.observer); got != wantFlags {
+				t.Fatalf("flags after %s=%#x, want %#x", signal, got, wantFlags)
+			}
+		}
+		err := viewer.command.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || !exit.ProcessState.Sys().(syscall.WaitStatus).Signaled() || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+			t.Fatalf("attach wait=%T %v, want SIGKILL", err, err)
+		}
+		if got := integrationFileFlags(t, viewer.observer); got != wantFlags {
+			t.Fatalf("flags after process death=%#x, want %#x", got, wantFlags)
+		}
+		viewer.close(t)
+	}
+	final := startIntegrationRoleAttach(t, fixture, "attach-flags", "planner")
+	if _, err := final.master.Write([]byte("flags-final\n")); err != nil {
+		t.Fatal(err)
+	}
+	fixture.waitRoleInput("planner", allInput+"flags-final\n")
+	if killed := fixture.runAgentctl("kill", "--session", "attach-flags"); killed.exitCode != exitOK {
+		t.Fatalf("kill = %#v", killed)
+	}
+	if err := final.command.Wait(); err != nil {
+		t.Fatalf("final attach wait: %v; output=%q", err, final.close(t))
+	}
+	final.close(t)
+}
+
+type integrationRoleAttach struct {
+	command   *exec.Cmd
+	master    *os.File
+	observer  *os.File
+	slaveName string
+	output    *bytes.Buffer
+	done      chan error
+	closed    bool
+}
+
+func startIntegrationRoleAttach(t *testing.T, fixture *integrationFixture, sessionName, role string) *integrationRoleAttach {
+	return startIntegrationRoleAttachWithFlags(t, fixture, sessionName, role, false)
+}
+
+func startIntegrationRoleAttachWithFlags(t *testing.T, fixture *integrationFixture, sessionName, role string, nonblocking bool) *integrationRoleAttach {
+	t.Helper()
+	pair, err := ptyx.NewOpener().Open(ptyx.WindowSize{Rows: 24, Cols: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterFD, err := unix.FcntlInt(pair.Master().Fd(), unix.F_DUPFD_CLOEXEC, 3)
+	if err != nil {
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	master := os.NewFile(uintptr(masterFD), "integration-attach-master")
+	if err := unix.SetNonblock(masterFD, false); err != nil {
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	slaveName := pair.SlaveName()
+	slave, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	if err := withIntegrationFileDescriptor(slave, func(fd uintptr) error { return unix.SetNonblock(int(fd), nonblocking) }); err != nil {
+		_ = slave.Close()
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	childFD := -1
+	if err := withIntegrationFileDescriptor(slave, func(fd uintptr) error {
+		var err error
+		childFD, err = unix.FcntlInt(fd, unix.F_DUPFD_CLOEXEC, 3)
+		return err
+	}); err != nil {
+		_ = slave.Close()
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	childTerminal := os.NewFile(uintptr(childFD), "integration-attach-child-terminal")
+	command := exec.Command(fixture.agentctlPath, "attach", "--session", sessionName, role)
+	command.Dir = os.Getenv(integrationProjectEnv)
+	command.Env = environmentWith(os.Environ(), integrationAgentctlEnv, "1")
+	command.Stdin, command.Stdout, command.Stderr = childTerminal, childTerminal, childTerminal
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if err := command.Start(); err != nil {
+		_ = childTerminal.Close()
+		_ = slave.Close()
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	if err := childTerminal.Close(); err != nil {
+		_ = command.Process.Kill()
+		_ = slave.Close()
+		_ = master.Close()
+		_ = pair.Close()
+		t.Fatal(err)
+	}
+	if err := pair.Close(); err != nil {
+		_ = slave.Close()
+		_ = command.Process.Kill()
+		t.Fatal(err)
+	}
+	output := &bytes.Buffer{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(output, master)
+		done <- err
+	}()
+	return &integrationRoleAttach{command: command, master: master, observer: slave, slaveName: slaveName, output: output, done: done}
+}
+
+func integrationFileFlags(t *testing.T, file *os.File) int {
+	t.Helper()
+	flags := 0
+	if err := withIntegrationFileDescriptor(file, func(fd uintptr) error {
+		var err error
+		flags, err = unix.FcntlInt(fd, syscall.F_GETFL, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return flags
+}
+
+func withIntegrationFileDescriptor(file *os.File, operation func(uintptr) error) error {
+	connection, err := file.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var operationErr error
+	if err := connection.Control(func(fd uintptr) { operationErr = operation(fd) }); err != nil {
+		return err
+	}
+	return operationErr
+}
+
+func (a *integrationRoleAttach) close(t *testing.T) string {
+	t.Helper()
+	if a.closed {
+		return a.output.String()
+	}
+	a.closed = true
+	_ = a.observer.Close()
+	_ = a.master.Close()
+	select {
+	case err := <-a.done:
+		if err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Fatalf("read direct attach terminal: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct attach terminal reader did not stop")
+	}
+	return a.output.String()
+}
+
+func assertIntegrationTerminalCooked(t *testing.T, slaveName string) {
+	t.Helper()
+	terminal, err := os.OpenFile(slaveName, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("reopen direct attach terminal: %v", err)
+	}
+	defer terminal.Close()
+	state, err := ptyx.NewTerminal().Observe(terminal)
+	if err != nil || !state.Canonical() || !state.Echo() {
+		t.Fatalf("terminal after direct attach signal canonical=%t echo=%t error=%v", state.Canonical(), state.Echo(), err)
+	}
+}
 
 func TestIntegrationPublicForegroundRunUsesRuntimeWithoutTmux(t *testing.T) {
 	fixture := newIntegrationFixtureWithoutServer(t)
@@ -247,8 +524,8 @@ func TestIntegrationReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDi
 
 func TestIntegrationPublicShimCommandsSurvivePresentationLayoutChanges(t *testing.T) {
 	fixture := newIntegrationFixture(t)
-	launched := fixture.runAgentctl("launch", "--session", "public-layout", "--roles", "planner:claude,coder:codex")
-	if launched.exitCode != exitOK || launched.stderr != "agentctl: launched session \"public-layout\"; 2 roles are ready\n" {
+	launched := fixture.runAgentctl("launch", "--session", "public-layout", "--roles", "planner:claude,coder:codex", "--tmux")
+	if launched.exitCode != exitOK || launched.stderr != "agentctl: launched session \"public-layout\"; 2 roles are ready\nagentctl: attach the fleet with: agentctl attach --session public-layout\n" {
 		t.Fatalf("launch = %#v", launched)
 	}
 	fixture.waitStubInvocations(2)
@@ -367,7 +644,8 @@ func TestIntegrationPublicAttachRefusesAbsentPresentationForDurableFleet(t *test
 		t.Fatal(err)
 	}
 	result := fixture.runAgentctl("attach", "--session", "no-ui")
-	want := "agentctl: refusing to attach session \"no-ui\"; no tmux presentation was observed; status and control remain available without tmux\n"
+	want := "agentctl: refusing to attach session no-ui; no tmux presentation was observed; attach a role directly:\n" +
+		"  agentctl attach --session no-ui planner\n"
 	if result.exitCode != exitSession || result.stdout != "" || result.stderr != want {
 		t.Fatalf("attach without presentation = %#v, want exit 3 and %q", result, want)
 	}

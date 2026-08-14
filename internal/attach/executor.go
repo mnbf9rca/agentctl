@@ -52,10 +52,13 @@ type RefusalError struct {
 
 // NoPresentationError is the factual attach-only limitation: runtime control
 // remains available, but no tmux UI was observed for this session.
-type NoPresentationError struct{ Session string }
+type NoPresentationError struct {
+	Session string
+	Roster  []string
+}
 
 func (e *NoPresentationError) Error() string {
-	return fmt.Sprintf("refusing to attach session %q; no tmux presentation was observed; status and control remain available without tmux", e.Session)
+	return fmt.Sprintf("refusing to attach session %q; no tmux presentation was observed", e.Session)
 }
 
 func (e *RefusalError) Error() string {

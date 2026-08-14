@@ -74,6 +74,55 @@ func TestNamespaceObserveRoleArtifactsTracksEveryCleanupArtifact(t *testing.T) {
 	}
 }
 
+func TestAttachPresentDistinguishesAbsenceSocketAndInvalidTopology(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	created, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = created.Close()
+	path, err := namespace.ExistingRuntimeRolePath("fleet", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = path.Close() }()
+	if present, err := AttachPresent(path); err != nil || present {
+		t.Fatalf("absent AttachPresent() = %t, %v", present, err)
+	}
+
+	if err := os.WriteFile(path.Attach, []byte("not a socket"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := AttachPresent(path); present || !errors.As(err, new(*SocketTopologyError)) {
+		t.Fatalf("regular-file AttachPresent() = %t, %T %v", present, err, err)
+	}
+	if err := os.Remove(path.Attach); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", path.Attach); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := AttachPresent(path); present || !errors.As(err, new(*SocketTopologyError)) {
+		t.Fatalf("symlink AttachPresent() = %t, %T %v", present, err, err)
+	}
+	if err := os.Remove(path.Attach); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", path.Attach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	if present, err := AttachPresent(path); err != nil || !present {
+		t.Fatalf("socket AttachPresent() = %t, %v", present, err)
+	}
+}
+
 // This catches an artifact observer that returns a zero-value observation when
 // a later independent root check fails after an earlier artifact is present.
 func TestNamespaceObserveRoleArtifactsRetainsPresenceAcrossIndependentObservationError(t *testing.T) {

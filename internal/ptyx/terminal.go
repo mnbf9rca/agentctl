@@ -94,6 +94,21 @@ func (s TerminalState) RelayInputState() TerminalState {
 	return relay
 }
 
+// AttachRawState returns the observed outer-terminal mode adapted for a
+// byte-transparent direct attach. The original observation remains unchanged
+// and is retained for exact restoration.
+func (s TerminalState) AttachRawState() TerminalState {
+	raw := s
+	raw.termios.Iflag &^= syscall.IGNBRK | syscall.BRKINT | syscall.PARMRK | syscall.ISTRIP | syscall.INLCR | syscall.IGNCR | syscall.ICRNL | syscall.IXON
+	raw.termios.Oflag &^= syscall.OPOST
+	raw.termios.Lflag &^= syscall.ECHO | syscall.ECHONL | syscall.ICANON | syscall.ISIG | syscall.IEXTEN
+	raw.termios.Cflag &^= syscall.CSIZE | syscall.PARENB
+	raw.termios.Cflag |= syscall.CS8
+	raw.termios.Cc[syscall.VMIN] = 1
+	raw.termios.Cc[syscall.VTIME] = 0
+	return raw
+}
+
 // WindowSize returns the size from the same terminal observation.
 func (s TerminalState) WindowSize() (WindowSize, error) {
 	if !s.sizeObserved {

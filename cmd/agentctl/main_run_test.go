@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -38,6 +40,67 @@ func TestRunForegroundUsesValidatedSingleRoleAndObservedWorkingDirectory(t *test
 	}
 	if stdout.Len() != 0 || stderr.String() != "agentctl: foreground role \"planner\" in session \"fleet\" exited with status 0\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunForegroundSelectsNamedTemplateRoleAndKeepsCurrentDirectory(t *testing.T) {
+	t.Parallel()
+
+	templatePath := filepath.Join(t.TempDir(), "fleet.json")
+	if err := os.WriteFile(templatePath, []byte(`{"version":1,"presentation":"tmux","dir":"/ignored","roles":[{"role":"planner","harness":"claude","model":"opus-4-1","effort":"high"},{"role":"coder","harness":"codex"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotRole config.RoleConfig
+	var gotDirectory string
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--from-template", templatePath, "--role", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
+		getwd: func() (string, error) { return "/current", nil },
+		foreground: foregroundExecutorFunc(func(_ context.Context, _ string, role config.RoleConfig, directory string) error {
+			gotRole, gotDirectory = role, directory
+			return nil
+		}),
+	})
+	wantRole := config.RoleConfig{Name: "planner", Harness: config.HarnessClaude, Model: "opus-4-1", Effort: "high"}
+	if code != exitOK || gotRole != wantRole || gotDirectory != "/current" {
+		t.Fatalf("code=%d role=%#v directory=%q stderr=%q", code, gotRole, gotDirectory, stderr.String())
+	}
+}
+
+func TestRunTemplateFormRejectsOverridesAndMissingRoleBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	templatePath := filepath.Join(t.TempDir(), "fleet.json")
+	if err := os.WriteFile(templatePath, []byte(`{"version":1,"roles":[{"role":"planner","harness":"claude"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		arguments []string
+		want      string
+	}{
+		{arguments: []string{"run", "--session", "fleet", "--from-template", templatePath, "--role", "planner", "--model", "override"}, want: "agentctl: --from-template excludes --harness, --model, and --effort"},
+		{arguments: []string{"run", "--session", "fleet", "--from-template", templatePath, "--role", "coder"}, want: "agentctl: role coder is not in template " + templatePath + " (run-template-role-absent)"},
+	} {
+		called := false
+		var stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), test.arguments, &bytes.Buffer{}, &stderr, dependencies{foreground: foregroundExecutorFunc(func(context.Context, string, config.RoleConfig, string) error { called = true; return nil })})
+		if code != exitUsage || called || stderr.String() != test.want+"\n" {
+			t.Fatalf("arguments=%q code=%d called=%t stderr=%q", test.arguments, code, called, stderr.String())
+		}
+	}
+}
+
+func TestRunTemplateFormReportsSelectedRoleDuplicateExactly(t *testing.T) {
+	t.Parallel()
+
+	templatePath := filepath.Join(t.TempDir(), "fleet.json")
+	if err := os.WriteFile(templatePath, []byte(`{"version":1,"roles":[{"role":"planner","harness":"claude"},{"role":"planner","harness":"codex"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"run", "--session", "fleet", "--from-template", templatePath, "--role", "planner"}, &bytes.Buffer{}, &stderr, dependencies{})
+	want := "agentctl: role planner appears more than once in template " + templatePath + " (run-template-role-duplicate)"
+	if code != exitUsage || stderr.String() != want+"\n" {
+		t.Fatalf("code=%d stderr=%q, want %q", code, stderr.String(), want+"\n")
 	}
 }
 

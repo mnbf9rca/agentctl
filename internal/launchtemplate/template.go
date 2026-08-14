@@ -75,9 +75,10 @@ type Role struct {
 
 // Document is one decoded template source.
 type Document struct {
-	Path      string
-	Directory *string
-	Roles     []Role
+	Path         string
+	Directory    *string
+	Presentation *string
+	Roles        []Role
 }
 
 // Error gives every template failure file and optional field context.
@@ -344,9 +345,10 @@ func renderJSONValue(value any) string {
 }
 
 type documentWire struct {
-	Version   int        `json:"version"`
-	Directory *string    `json:"dir"`
-	Roles     []roleWire `json:"roles"`
+	Version      int        `json:"version"`
+	Directory    *string    `json:"dir"`
+	Presentation *string    `json:"presentation"`
+	Roles        []roleWire `json:"roles"`
 }
 
 type roleWire struct {
@@ -372,7 +374,7 @@ func decodeWire(path string, wire documentWire) Document {
 	for _, role := range wire.Roles {
 		roles = append(roles, Role{Name: *role.Name, Harness: role.Harness, Model: role.Model, Effort: role.Effort})
 	}
-	return Document{Path: path, Directory: wire.Directory, Roles: roles}
+	return Document{Path: path, Directory: wire.Directory, Presentation: wire.Presentation, Roles: roles}
 }
 
 func decodeFirstJSONValue(contents []byte) (any, error) {
@@ -410,6 +412,9 @@ func selectSchemaFailure(path string, instance any, tokens tokenState) error {
 	}
 
 	if failure := decoderSchemaFailureAt(failures, []string{"dir"}); failure != nil {
+		return translateSchemaFailure(path, failure, err)
+	}
+	if failure := decoderSchemaFailureAt(failures, []string{"presentation"}); failure != nil {
 		return translateSchemaFailure(path, failure, err)
 	}
 
