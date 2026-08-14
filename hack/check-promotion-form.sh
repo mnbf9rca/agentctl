@@ -80,6 +80,23 @@ elif [[ "$ticked" -eq 2 ]]; then
   die "both attestation checkboxes are ticked; check exactly one of 'Checklist run.' or 'Checklist not required.'"
 fi
 
+if [[ "$run_state" == "x" || "$run_state" == "X" ]]; then
+  evidence_line="$(printf '%s\n' "$body" | grep -m1 -E '^Evidence location:' || true)"
+  if [[ -z "$evidence_line" ]]; then
+    die "no 'Evidence location:' line found for checklist-required promotion"
+  fi
+  evidence_value="$(printf '%s\n' "$evidence_line" | sed -E 's/^Evidence location:[[:space:]]*//; s/<!--.*-->//; s/[[:space:]]+$//')"
+  if [[ -z "$evidence_value" ]]; then
+    die "Evidence location: has no committed evidence path for checklist-required promotion"
+  fi
+  for label in 'Detached launch passed\.' 'Per-role attach passed\.' 'Signal and terminal restoration passed\.'; do
+    state="$(box_state "$label")"
+    if [[ "$state" != "x" && "$state" != "X" ]]; then
+      die "checklist-required promotion must affirm '$label'"
+    fi
+  done
+fi
+
 version_line="$(printf '%s\n' "$body" | grep -m1 -E '^Version:' || true)"
 if [[ -z "$version_line" ]]; then
   die "no 'Version:' line found in the PR body"

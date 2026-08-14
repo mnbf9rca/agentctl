@@ -1068,7 +1068,7 @@ task8_release_walkthrough() {
   task8_phase skill
 
   printf '== Task 8: separately built protocol-skew matrix ==\n'
-  task8_run "$artifact_dir/shim-version-matrix.log" env AGENTCTL_SHIM_VERSION_OWNED_ROOT="$task8_root/matrix" \
+  task8_run "$artifact_dir/shim-version-matrix.log" env AGENTCTL_SHIM_VERSION_OWNED_ROOT=/tmp \
     "$task8_top/hack/release-verify.sh" \
     --shim-version-matrix "$current_binary" "$artifact_dir/shim-version-matrix" || die 'Task 8 shim-version matrix failed'
   task8_phase matrix
@@ -1077,8 +1077,11 @@ task8_release_walkthrough() {
   task8_run "$artifact_dir/integration.log" env AGENTCTL_INTEGRATION_RELEASE_CANDIDATE="$current_binary" \
     AGENTCTL_INTEGRATION_PROJECT_DIR="$task8_project" AGENTCTL_INTEGRATION_OWNED_ROOT="$task8_root/integration" \
     go test -tags integration ./cmd/agentctl -count=1 -v \
-    -run 'TestIntegration(ReleaseCandidateSelection|ReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory|ReleaseCandidateStatusReportsUnanchoredDurableRecord|ReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery|ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence|PublicForegroundRunUsesRuntimeWithoutTmux|PublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing|PublicAttachRefusesAbsentPresentationForDurableFleet)' \
+    -run 'TestIntegration(ReleaseCandidateSelection|ReleaseCandidateForegroundExtendsRosterAndRefusesDifferentDirectory|ReleaseCandidateStatusReportsUnanchoredDurableRecord|ReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelivery|ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence|PublicForegroundRunUsesRuntimeWithoutTmux|PublicCommandsConsultRuntimeAnchorBeforeReportingDivergentStateRootMissing|PublicAttachRefusesAbsentPresentationForDurableFleet|DetachedRoleAttachReleasesOnSignalAndReadmits|ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery|ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild|ShimKillObservesChildExitBeforePresentationAndFleetCleanup)' \
     || die 'Task 8 live integration evidence failed'
+  task8_run "$artifact_dir/attach-transcript.log" go test ./internal/attach ./internal/shim -count=1 -v \
+    -run 'Test(ViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame|AttachServerChildExitMapsExactTailUndeliveredFinal|AttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals|ServerRunDetachedServesAttachAndControlBeforeCleanExit)' \
+    || die 'Task 8 detached attach transcript evidence failed'
   task8_phase integration
 
   printf '== Task 8: kernel absence/refusal and raw-token evidence ==\n'

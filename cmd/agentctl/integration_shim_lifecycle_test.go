@@ -696,7 +696,7 @@ func TestIntegrationReleaseCandidateLayoutOperationsPreserveCLIIdentityAndDelive
 		t.Skip("release-candidate routing is enabled only by the Task 8 walkthrough")
 	}
 	fixture := newIntegrationFixture(t)
-	launched := fixture.runAgentctl("launch", "--session", "candidate-layout", "--roles", "planner:claude,coder:codex")
+	launched := fixture.runAgentctl("launch", "--session", "candidate-layout", "--roles", "planner:claude,coder:codex", "--tmux")
 	if launched.exitCode != exitOK {
 		t.Fatalf("candidate launch = %#v", launched)
 	}

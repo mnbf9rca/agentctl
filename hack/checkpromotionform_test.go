@@ -75,11 +75,27 @@ const templateBody = `## Release promotion: main -> release
 - [%s] **Checklist not required.** No changes in checklist-covered areas since
   the last release.
 
+When **Checklist run.** is checked, complete all four fields below.
+
+- [%s] **Detached launch passed.** The ordinary-terminal detached-launch leg
+  passed and is recorded in the evidence location below.
+- [%s] **Per-role attach passed.** The attach/repaint/verbatim-input and clean
+  disconnect/re-attach legs passed and are recorded below.
+- [%s] **Signal and terminal restoration passed.** Every required
+  handled/ignored/blocked signal and terminal-restoration leg passed and is
+  recorded below.
+
+Evidence location: %s
+
 Version: %s
 `
 
 func body(runBox, skipBox, version string) string {
-	return fmt.Sprintf(templateBody, runBox, skipBox, version)
+	return bodyWithEvidence(runBox, skipBox, "x", "x", "x", "docs/release-verification-notes.md", version)
+}
+
+func bodyWithEvidence(runBox, skipBox, detachedBox, attachBox, signalBox, evidence, version string) string {
+	return fmt.Sprintf(templateBody, runBox, skipBox, detachedBox, attachBox, signalBox, evidence, version)
 }
 
 func TestCheckPromotionForm_NeitherBoxTicked(t *testing.T) {
@@ -162,13 +178,49 @@ func TestCheckPromotionForm_MissingCheckboxLines(t *testing.T) {
 
 func TestCheckPromotionForm_PassesWithOneBoxAndMatchingVersion(t *testing.T) {
 	dir := initFormRepo(t, "0.1.0", nil)
-	out, err := runFormCheck(t, dir, body("x", " ", "0.1.0"))
+	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", "docs/release-verification-notes.md", "0.1.0"))
 	if err != nil {
 		t.Fatalf("expected success, got failure: %v\n%s", err, out)
 	}
 	out2, err2 := runFormCheck(t, dir, body(" ", "x", "0.1.0"))
 	if err2 != nil {
 		t.Fatalf("expected success with the other box ticked, got failure: %v\n%s", err2, out2)
+	}
+}
+
+// This catches a checklist-required promotion that claims the generic
+// ceremony ran but omits the committed evidence location or any required
+// detached/attach/signal affirmation.
+func TestCheckPromotionForm_ChecklistRunRequiresTmuxlessEvidenceAffirmations(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", " ", " ", " ", "", "0.1.0"))
+	if err == nil {
+		t.Fatalf("checklist-required promotion without tmuxless evidence passed:\n%s", out)
+	}
+	if !strings.Contains(out, "Evidence location") {
+		t.Fatalf("missing evidence location failure = %q", out)
+	}
+}
+
+func TestCheckPromotionForm_ChecklistRunRequiresEveryTmuxlessLeg(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	for _, test := range []struct {
+		name     string
+		detached string
+		attach   string
+		signal   string
+		want     string
+	}{
+		{"detached", " ", "x", "x", "Detached launch passed"},
+		{"attach", "x", " ", "x", "Per-role attach passed"},
+		{"signal", "x", "x", " ", "Signal and terminal restoration passed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", test.detached, test.attach, test.signal, "docs/release-verification-notes.md", "0.1.0"))
+			if err == nil || !strings.Contains(out, test.want) {
+				t.Fatalf("missing %s affirmation err=%v output=%q", test.name, err, out)
+			}
+		})
 	}
 }
 
