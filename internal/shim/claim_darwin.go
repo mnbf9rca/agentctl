@@ -263,19 +263,31 @@ func writeAdvisory(file *os.File, payload []byte) error {
 }
 
 func removeStaleSocket(path *RolePath) error {
-	name := path.Role + ".sock"
-	info, err := path.runtimeSession.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	artifacts := []struct {
+		name string
+		path string
+	}{
+		{name: path.Role + ".sock", path: path.Socket},
+		{name: path.Role + ".attach", path: path.Attach},
 	}
-	if err != nil {
-		return fmt.Errorf("inspect stale socket: %w", err)
+	var stale []string
+	for _, artifact := range artifacts {
+		info, err := path.runtimeSession.Lstat(artifact.name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect stale socket: %w", err)
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("refusing non-socket artifact at %q", artifact.path)
+		}
+		stale = append(stale, artifact.name)
 	}
-	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("refusing non-socket artifact at %q", path.Socket)
-	}
-	if err := path.runtimeSession.Remove(name); err != nil {
-		return fmt.Errorf("remove stale socket: %w", err)
+	for _, name := range stale {
+		if err := path.runtimeSession.Remove(name); err != nil {
+			return fmt.Errorf("remove stale socket: %w", err)
+		}
 	}
 	return nil
 }
@@ -387,10 +399,12 @@ func (c *Claim) CloseAndRemove() error {
 	} else {
 		for _, artifact := range []struct {
 			name string
+			path string
 			kind os.FileMode
 		}{
-			{name: path.Role + ".sock", kind: os.ModeSocket},
-			{name: path.Role + ".lock"},
+			{name: path.Role + ".sock", path: path.Socket, kind: os.ModeSocket},
+			{name: path.Role + ".attach", path: path.Attach, kind: os.ModeSocket},
+			{name: path.Role + ".lock", path: path.Lock},
 		} {
 			info, err := path.runtimeSession.Lstat(artifact.name)
 			if errors.Is(err, os.ErrNotExist) {
@@ -401,7 +415,7 @@ func (c *Claim) CloseAndRemove() error {
 				continue
 			}
 			if artifact.kind != 0 && info.Mode()&artifact.kind == 0 {
-				cleanupErrors = append(cleanupErrors, fmt.Errorf("refusing non-socket artifact at %q", path.Socket))
+				cleanupErrors = append(cleanupErrors, fmt.Errorf("refusing non-socket artifact at %q", artifact.path))
 				continue
 			}
 			if err := path.runtimeSession.Remove(artifact.name); err != nil {

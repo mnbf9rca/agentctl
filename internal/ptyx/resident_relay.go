@@ -33,6 +33,15 @@ type ResidentViewerResult struct {
 	Undelivered uint64
 }
 
+// ResidentFlushResult describes the child-exit cutoff established against the
+// currently admitted viewer. Confirmed means the cutoff was established; its
+// Written and Undelivered counts cover exactly that cutoff.
+type ResidentFlushResult struct {
+	Confirmed   bool
+	Written     uint64
+	Undelivered uint64
+}
+
 // ResidentRelay continuously drains a PTY, discarding with no viewer and
 // offering bytes without waiting when one fixed viewer sink is present.
 type ResidentRelay struct {
@@ -54,6 +63,17 @@ func NewResidentRelay(reader ContextReader, writer ContextWriter) *ResidentRelay
 // Writer returns the exact serialization point shared by viewer input and
 // registered control delivery.
 func (r *ResidentRelay) Writer() *SerializedWriter { return r.serialized }
+
+// Flush establishes a cutoff over bytes already offered to the current viewer
+// and waits for that prefix to drain. It never waits for PTY EOF. Cancellation
+// ends the viewer, fixes its accepted prefix, and returns an exact shortfall.
+func (r *ResidentRelay) Flush(ctx context.Context) ResidentFlushResult {
+	viewer := r.currentViewer()
+	if viewer == nil {
+		return ResidentFlushResult{Confirmed: true}
+	}
+	return viewer.flush(ctx)
+}
 
 // ResidentViewer is one admission-bound handle. Release revokes only this
 // handle; it cannot detach a replacement viewer.
@@ -152,28 +172,36 @@ func (r *ResidentRelay) closeAfterDrain(err error) {
 }
 
 type residentViewerState struct {
-	owner  *ResidentRelay
-	writer ContextWriter
-	ctx    context.Context
-	cancel context.CancelFunc
-	wake   chan struct{}
-	done   chan ResidentViewerResult
+	owner      *ResidentRelay
+	writer     ContextWriter
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wake       chan struct{}
+	progress   chan struct{}
+	done       chan ResidentViewerResult
+	finishedCh chan struct{}
 
-	mu          sync.Mutex
-	queue       [][]byte
-	buffered    int
-	written     uint64
-	drainErr    error
-	drainClosed bool
-	ended       bool
-	endOnce     sync.Once
+	mu               sync.Mutex
+	queue            [][]byte
+	buffered         int
+	written          uint64
+	drainErr         error
+	drainClosed      bool
+	ended            bool
+	writing          bool
+	endRequested     bool
+	endErr           error
+	extraUndelivered int
+	finalResult      ResidentViewerResult
+	endOnce          sync.Once
 }
 
 func newResidentViewerState(owner *ResidentRelay, writer ContextWriter) *residentViewerState {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &residentViewerState{
 		owner: owner, writer: writer, ctx: ctx, cancel: cancel,
-		wake: make(chan struct{}, 1), done: make(chan ResidentViewerResult, 1),
+		wake: make(chan struct{}, 1), progress: make(chan struct{}, 1),
+		done: make(chan ResidentViewerResult, 1), finishedCh: make(chan struct{}),
 	}
 }
 
@@ -184,10 +212,8 @@ func (v *residentViewerState) offer(value []byte) {
 		return
 	}
 	if len(value) > AttachLagBufferBytes-v.buffered {
-		undelivered := uint64(v.buffered + len(value))
-		written := v.written
 		v.mu.Unlock()
-		v.finish(ResidentViewerResult{Err: ErrAttachLagOverflow, Written: written, Undelivered: undelivered})
+		v.endNowWithExtra(ErrAttachLagOverflow, len(value))
 		return
 	}
 	v.queue = append(v.queue, append([]byte(nil), value...))
@@ -197,9 +223,25 @@ func (v *residentViewerState) offer(value []byte) {
 }
 
 func (v *residentViewerState) endNow(err error) {
+	v.endNowWithExtra(err, 0)
+}
+
+func (v *residentViewerState) endNowWithExtra(err error, extra int) {
 	v.mu.Lock()
-	result := ResidentViewerResult{Err: err, Written: v.written, Undelivered: uint64(v.buffered)}
+	if v.ended || v.endRequested {
+		v.mu.Unlock()
+		return
+	}
+	v.endRequested = true
+	v.endErr = err
+	v.extraUndelivered = extra
+	writing := v.writing
+	result := ResidentViewerResult{Err: err, Written: v.written, Undelivered: uint64(v.buffered + extra)}
 	v.mu.Unlock()
+	v.cancel()
+	if writing {
+		return
+	}
 	v.finish(result)
 }
 
@@ -244,12 +286,26 @@ func (v *residentViewerState) writeLoop() {
 			if len(value) == 0 {
 				break
 			}
+			v.mu.Lock()
+			if v.endRequested {
+				v.mu.Unlock()
+				v.finishRequested()
+				return
+			}
+			v.writing = true
+			v.mu.Unlock()
 			count, err := v.writer.Write(v.ctx, value)
 			if count < 0 || count > len(value) {
+				v.mu.Lock()
+				v.writing = false
+				v.mu.Unlock()
 				v.endNow(fmt.Errorf("resident viewer writer returned invalid byte count %d", count))
 				return
 			}
 			v.commitWrite(count)
+			if v.finishRequested() {
+				return
+			}
 			if err != nil {
 				v.endNow(err)
 				return
@@ -279,8 +335,9 @@ func (v *residentViewerState) next() ([]byte, bool, ResidentViewerResult) {
 
 func (v *residentViewerState) commitWrite(count int) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.writing = false
 	if v.ended || len(v.queue) == 0 {
+		v.mu.Unlock()
 		return
 	}
 	v.written += uint64(count)
@@ -291,12 +348,61 @@ func (v *residentViewerState) commitWrite(count int) {
 	} else {
 		v.queue[0] = v.queue[0][count:]
 	}
+	v.mu.Unlock()
+	v.signalProgress()
+}
+
+func (v *residentViewerState) finishRequested() bool {
+	v.mu.Lock()
+	if !v.endRequested || v.ended {
+		v.mu.Unlock()
+		return false
+	}
+	result := ResidentViewerResult{
+		Err: v.endErr, Written: v.written,
+		Undelivered: uint64(v.buffered + v.extraUndelivered),
+	}
+	v.mu.Unlock()
+	v.finish(result)
+	return true
+}
+
+func (v *residentViewerState) flush(ctx context.Context) ResidentFlushResult {
+	v.mu.Lock()
+	target := v.written + uint64(v.buffered)
+	v.mu.Unlock()
+	for {
+		v.mu.Lock()
+		written := v.written
+		ended := v.ended
+		v.mu.Unlock()
+		if written >= target {
+			return ResidentFlushResult{Confirmed: true, Written: target}
+		}
+		if ended {
+			return ResidentFlushResult{Confirmed: true, Written: written, Undelivered: target - written}
+		}
+		select {
+		case <-ctx.Done():
+			v.endNow(ctx.Err())
+			<-v.finishedCh
+		case <-v.progress:
+		}
+	}
+}
+
+func (v *residentViewerState) signalProgress() {
+	select {
+	case v.progress <- struct{}{}:
+	default:
+	}
 }
 
 func (v *residentViewerState) finish(result ResidentViewerResult) {
 	v.endOnce.Do(func() {
 		v.mu.Lock()
 		v.ended = true
+		v.finalResult = result
 		v.queue = nil
 		v.buffered = 0
 		v.mu.Unlock()
@@ -304,5 +410,7 @@ func (v *residentViewerState) finish(result ResidentViewerResult) {
 		v.cancel()
 		v.done <- result
 		close(v.done)
+		close(v.finishedCh)
+		v.signalProgress()
 	})
 }

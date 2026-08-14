@@ -165,6 +165,54 @@ func TestResidentRelayExposesOneSerializedWriter(t *testing.T) {
 	}
 }
 
+func TestResidentRelayFlushCompletesCountedTailWithoutWaitingForPTYEOF(t *testing.T) {
+	reader := newResidentStepReader()
+	relay := NewResidentRelay(reader, &residentBufferWriter{})
+	sink := &residentBufferWriter{}
+	viewer, err := relay.AdmitViewer(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = relay.Run(ctx) }()
+	reader.send([]byte("tail"), nil)
+	waitResidentBytes(t, sink, []byte("tail"))
+	result := relay.Flush(context.Background())
+	if !result.Confirmed || result.Written != 4 || result.Undelivered != 0 {
+		t.Fatalf("Flush() = %#v, want confirmed four-byte tail", result)
+	}
+	viewer.Release()
+}
+
+func TestResidentRelayFlushTimeoutFixesExactUndeliveredTail(t *testing.T) {
+	reader := newResidentStepReader()
+	relay := NewResidentRelay(reader, &residentBufferWriter{})
+	sink := &residentGateWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	viewer, err := relay.AdmitViewer(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = relay.Run(ctx) }()
+	reader.send([]byte("tail"), nil)
+	select {
+	case <-sink.entered:
+	case <-time.After(time.Second):
+		t.Fatal("tail writer did not block")
+	}
+	flushCtx, stopFlush := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer stopFlush()
+	result := relay.Flush(flushCtx)
+	if !result.Confirmed || result.Written != 0 || result.Undelivered != 4 {
+		t.Fatalf("Flush() = %#v, want confirmed four-byte shortfall", result)
+	}
+	if viewerResult := waitResidentViewer(t, viewer.Done()); viewerResult.Undelivered != 4 {
+		t.Fatalf("viewer result = %#v, want fixed four-byte shortfall", viewerResult)
+	}
+}
+
 type residentReadStep struct {
 	value []byte
 	err   error

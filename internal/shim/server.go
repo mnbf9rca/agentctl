@@ -313,7 +313,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	if !ok {
 		return fmt.Errorf("unknown harness %q", request.Harness)
 	}
-	if request.OperatorInput == nil || request.OperatorOutput == nil {
+	if request.OperatorMode != OperatorDetached && (request.OperatorInput == nil || request.OperatorOutput == nil) {
 		return errors.New("shim server requires operator input and output")
 	}
 	runtime, err := s.lifecycle.start(ctx, request, spec)
@@ -323,14 +323,15 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	serverCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watcher := watchChild(serverCtx, runtime.child)
-	roleInput := newRoleInputWriter(runtime.relay.Writer())
-	operations := newOperationExecutor(spec, roleInput, nil)
 	stopDone := make(chan struct{}, 1)
 	handler := &requestHandler{
 		session: request.Session, role: request.Role,
 		shimPID: runtime.record.ShimPID, childPID: runtime.record.ChildPID,
-		operations: operations,
 	}
+	roleInput := newRoleInputWriter(runtime.relay.Writer(), func() bool {
+		return handler.readiness() && handler.operationPhase() == shimOperationActive
+	})
+	handler.operations = newOperationExecutor(spec, roleInput, nil)
 	handler.observe = func() Response { return s.observeRuntime(runtime, handler.readiness()) }
 	handler.stop = func(stopCtx context.Context) (Response, error) {
 		return s.stopRuntime(stopCtx, runtime, watcher)
@@ -347,6 +348,21 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	resizeErr := s.forwardResizeEvents(serverCtx, runtime)
 	acceptErr := make(chan error, 1)
 	go s.serveConnections(serverCtx, runtime.listener, handler, acceptErr)
+	var attachAcceptErr <-chan error
+	var attachment *attachServer
+	if runtime.attachListener != nil {
+		attachment = newAttachServer(attachServerConfig{
+			Session: request.Session, Role: request.Role, ShimUID: uint32(os.Geteuid()),
+			Relay: runtime.resident, Input: roleInput,
+			Resize: func(size ptyx.WindowSize) error {
+				return runtime.terminal.SetWindowSize(runtime.child.Master(), size)
+			},
+			Phase: handler.operationPhase,
+		})
+		attachErrors := make(chan error, 1)
+		attachAcceptErr = attachErrors
+		go s.serveAttachConnections(serverCtx, runtime.attachListener, attachment, attachErrors)
+	}
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- runtime.waitReady(serverCtx) }()
 
@@ -370,6 +386,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				watcherDone = nil
 				continue
 			}
+			flushAttachment(attachment)
 			cancel()
 			cleanup := s.cleanupRuntime(runtime, false)
 			if ready {
@@ -381,6 +398,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				CleanupObservation: cleanup.Observation, CleanupErr: cleanup.Err,
 			}
 		case <-stopDone:
+			flushAttachment(attachment)
 			cancel()
 			return s.cleanupRuntime(runtime, false).Err
 		case err := <-relayErr:
@@ -389,6 +407,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				continue
 			}
 			if exit, observed := waitObservedChildExit(watcher, ptyx.ReadinessPollInterval); observed {
+				flushAttachment(attachment)
 				cancel()
 				cleanup := s.cleanupRuntime(runtime, false)
 				if ready {
@@ -411,11 +430,26 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntime(runtime, true))
 			}
 			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntime(runtime, true))
+		case err := <-attachAcceptErr:
+			cancel()
+			if errors.Is(err, net.ErrClosed) && ctx.Err() != nil {
+				return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntime(runtime, true))
+			}
+			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntime(runtime, true))
 		case <-ctx.Done():
 			cancel()
 			return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntime(runtime, true))
 		}
 	}
+}
+
+func flushAttachment(server *attachServer) {
+	if server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), AttachTailFlushTimeout)
+	defer cancel()
+	server.childExited(ctx)
 }
 
 func waitObservedChildExit(watcher *childWatcher, timeout time.Duration) (ptyx.ExitObservation, bool) {
@@ -508,6 +542,20 @@ func (s *Server) serveConnections(ctx context.Context, listener roleListener, ha
 	}
 }
 
+func (s *Server) serveAttachConnections(ctx context.Context, listener roleListener, handler *attachServer, fatal chan<- error) {
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			fatal <- err
+			return
+		}
+		go func() {
+			defer func() { _ = connection.Close() }()
+			_ = handler.handleConnection(ctx, connection)
+		}()
+	}
+}
+
 func (s *Server) observeRuntime(runtime *roleRuntime, ready bool) Response {
 	result := s.observeProcess(runtime.record.ChildPID, *runtime.record.ChildStartToken)
 	childPID := runtime.record.ChildPID
@@ -595,6 +643,11 @@ func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeC
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
+	if runtime.attachListener != nil {
+		if err := runtime.attachListener.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
 	var signalErr error
 	if signalChild {
 		observation := runtime.child.SignalProcessGroup(syscall.SIGHUP)
@@ -605,6 +658,9 @@ func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeC
 		cleanupErrors = append(cleanupErrors, signalErr)
 	}
 	cleanupErrors = append(cleanupErrors, runtime.restoreOuterTerminal())
+	if runtime.closeResident != nil {
+		cleanupErrors = append(cleanupErrors, runtime.closeResident())
+	}
 	if runtime.restoreEndpoint != nil {
 		cleanupErrors = append(cleanupErrors, runtime.restoreEndpoint())
 	}
@@ -660,6 +716,7 @@ func observeRemainingRoleArtifacts(path *RolePath) ([]string, error) {
 		name     string
 	}{
 		{artifact: "socket", root: path.runtimeSession, name: path.Role + ".sock"},
+		{artifact: "attach", root: path.runtimeSession, name: path.Role + ".attach"},
 		{artifact: "record", root: path.stateRoles, name: path.Role + ".json"},
 		{artifact: "lock", root: path.runtimeSession, name: path.Role + ".lock"},
 	}
@@ -736,14 +793,19 @@ type roleInputWriter interface {
 }
 
 type gatedRoleInputWriter struct {
-	writer operationWriter
-	gate   chan struct{}
+	writer        operationWriter
+	gate          chan struct{}
+	viewerAllowed func() bool
 }
 
-func newRoleInputWriter(writer operationWriter) roleInputWriter {
+func newRoleInputWriter(writer operationWriter, viewerAllowed ...func() bool) roleInputWriter {
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
-	return &gatedRoleInputWriter{writer: writer, gate: gate}
+	var allowed func() bool
+	if len(viewerAllowed) != 0 {
+		allowed = viewerAllowed[0]
+	}
+	return &gatedRoleInputWriter{writer: writer, gate: gate, viewerAllowed: allowed}
 }
 
 func (w *gatedRoleInputWriter) WriteViewer(ctx context.Context, value []byte) (int, error) {
@@ -752,6 +814,12 @@ func (w *gatedRoleInputWriter) WriteViewer(ctx context.Context, value []byte) (i
 		return 0, err
 	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if w.viewerAllowed != nil && !w.viewerAllowed() {
+		return len(value), nil
+	}
 	return writer.Write(ctx, value)
 }
 
@@ -760,6 +828,10 @@ func (w *gatedRoleInputWriter) BeginDelivery(ctx context.Context) (operationWrit
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
 	case <-w.gate:
+	}
+	if err := ctx.Err(); err != nil {
+		w.gate <- struct{}{}
+		return nil, nil, err
 	}
 	var once sync.Once
 	return w.writer, func() { once.Do(func() { w.gate <- struct{}{} }) }, nil

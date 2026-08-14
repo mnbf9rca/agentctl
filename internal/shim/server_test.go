@@ -1355,6 +1355,25 @@ func TestShimViewerInputCannotSplitDeliveryTransaction(t *testing.T) {
 	}
 }
 
+func TestShimViewerInputRechecksCancellationAndRolePhaseAtCommit(t *testing.T) {
+	writer := &recordingOperationWriter{}
+	active := true
+	input := newRoleInputWriter(writer, func() bool { return active })
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := input.WriteViewer(cancelled, []byte("departed")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled WriteViewer() error = %v, want context.Canceled", err)
+	}
+	active = false
+	if count, err := input.WriteViewer(context.Background(), []byte("stopping")); err != nil || count != len("stopping") {
+		t.Fatalf("stopping WriteViewer() = %d, %v, want consumed discard", count, err)
+	}
+	if len(writer.calls) != 0 {
+		t.Fatalf("disallowed viewer bytes reached PTY: %#v", writer.calls)
+	}
+}
+
 type recordingOperationWriter struct {
 	mu    sync.Mutex
 	calls [][]byte
