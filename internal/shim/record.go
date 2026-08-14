@@ -59,7 +59,7 @@ const (
 )
 
 // CleanupFailure is the single factual record field added by R19. Remaining
-// uses the fixed child/socket/record/lock order and identifies only artifacts
+// uses the fixed child/socket/attach/record/lock order and identifies only artifacts
 // observed still present.
 type CleanupFailure struct {
 	Cause       string             `json:"cause"`
@@ -220,7 +220,7 @@ func validateCleanupFailure(failure CleanupFailure) error {
 	if len(failure.Remaining) == 0 {
 		return errors.New("cleanup failure must identify at least one remaining artifact")
 	}
-	order := map[string]int{"child": 0, "socket": 1, "record": 2, "lock": 3}
+	order := map[string]int{"child": 0, "socket": 1, "attach": 2, "record": 3, "lock": 4}
 	previous := -1
 	for _, artifact := range failure.Remaining {
 		index, ok := order[artifact]
@@ -228,7 +228,7 @@ func validateCleanupFailure(failure CleanupFailure) error {
 			return fmt.Errorf("unknown remaining cleanup artifact %q", artifact)
 		}
 		if index <= previous {
-			return errors.New("remaining cleanup artifacts must be unique and in child,socket,record,lock order")
+			return errors.New("remaining cleanup artifacts must be unique and in child,socket,attach,record,lock order")
 		}
 		previous = index
 	}

@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/mnbf9rca/agentctl/internal/control"
+	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
 const shellqImportPath = "github.com/mnbf9rca/agentctl/internal/shellq"
@@ -158,6 +160,96 @@ func TestControlRegistryLifecycleOperationsCarryNoPayload(t *testing.T) {
 		if command.Kind == control.OperationControl && command.Payload != "" {
 			t.Fatalf("control operation %q carries payload %q; lifecycle operations must be structurally payload-free", command.Operation, command.Payload)
 		}
+		if strings.Contains(command.Operation, "attach") || strings.Contains(command.Payload, "attach") {
+			t.Fatalf("control registry contains attach bytes in operation %q payload %q; attach is a separate wire surface", command.Operation, command.Payload)
+		}
+	}
+}
+
+func TestAttachNamespaceIsTheSocketPathValidatedAgainstDarwinCapacity(t *testing.T) {
+	root := repositoryRoot(t)
+	var guardedPaths []string
+	for _, src := range parseProductionGo(t, root) {
+		if src.rel != "internal/shim/namespace.go" {
+			continue
+		}
+		for _, declaration := range src.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Name.Name != "validatedRolePaths" {
+				continue
+			}
+			ast.Inspect(function, func(node ast.Node) bool {
+				literal, ok := node.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				name, ok := literal.Type.(*ast.Ident)
+				if !ok || name.Name != "SocketPathTooLongError" {
+					return true
+				}
+				for _, element := range literal.Elts {
+					pair, ok := element.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					key, keyOK := pair.Key.(*ast.Ident)
+					value, valueOK := pair.Value.(*ast.Ident)
+					if keyOK && valueOK && key.Name == "Path" {
+						guardedPaths = append(guardedPaths, value.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if got, want := strings.Join(guardedPaths, ","), "attachPath"; got != want {
+		t.Fatalf("validatedRolePaths Darwin capacity guard targets = %q, want longest path %q", guardedPaths, want)
+	}
+}
+
+func TestAttachControlUnionHasExactlyApprovedFields(t *testing.T) {
+	typeOfControl := reflect.TypeOf(shim.AttachControl{})
+	got := make([]string, 0, typeOfControl.NumField())
+	for index := 0; index < typeOfControl.NumField(); index++ {
+		got = append(got, typeOfControl.Field(index).Name)
+	}
+	want := []string{
+		"Version", "Kind", "Session", "Role", "Rows", "Cols", "Outcome", "ViewerPID",
+		"PeerPID", "PeerUID", "ShimUID", "Cause", "Disposition", "Bytes", "Undelivered", "KnownUndelivered",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("shim.AttachControl fields = %#v, want exact closed union %#v", got, want)
+	}
+}
+
+func TestShimHasOneProductionProtocolVersion(t *testing.T) {
+	root := repositoryRoot(t)
+	var declarations []string
+	for _, src := range parseProductionGo(t, root) {
+		if !strings.HasPrefix(filepath.ToSlash(src.rel), "internal/shim/") {
+			continue
+		}
+		for _, declaration := range src.file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.CONST {
+				continue
+			}
+			for _, specification := range general.Specs {
+				value, ok := specification.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range value.Names {
+					if strings.HasSuffix(strings.ToLower(name.Name), "protocolversion") {
+						declarations = append(declarations, filepath.ToSlash(src.rel)+":"+name.Name)
+					}
+				}
+			}
+		}
+	}
+	want := []string{"internal/shim/namespace.go:ShimProtocolVersion"}
+	if !reflect.DeepEqual(declarations, want) {
+		t.Fatalf("shim protocol version declarations = %#v, want one shared production version %#v", declarations, want)
 	}
 }
 

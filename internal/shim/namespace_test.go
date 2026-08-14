@@ -28,6 +28,10 @@ func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	if got, want := len(productionSocket), 98; got != want {
 		t.Fatalf("worst-case production socket length = %d, want %d", got, want)
 	}
+	productionAttach := filepath.Join(production.Runtime, strings.Repeat("s", 32), strings.Repeat("r", 32)+".attach")
+	if got, want := len(productionAttach), 100; got != want {
+		t.Fatalf("worst-case production attach length = %d, want %d", got, want)
+	}
 
 	overridden, err := resolveNamespaceRoots(501, "/private/tmp/runtime", "/private/tmp/state", "/ignored")
 	if err != nil {
@@ -416,24 +420,27 @@ func TestSocketPresentReportsNonSocketAsTopologyDisagreement(t *testing.T) {
 	}
 }
 
-func TestNamespaceRolePathEnforcesNameCapsAndResolvedSocketCapacityBeforeMutation(t *testing.T) {
+func TestNamespaceRolePathUsesLongestAttachPathForCapacityBeforeMutation(t *testing.T) {
 	parent := shortTempDir(t)
 	stateRoot := filepath.Join(parent, "state")
-	for _, socketBytes := range []int{103, 104, 105} {
-		t.Run(fmt.Sprintf("socket-%d", socketBytes), func(t *testing.T) {
-			runtimeRoot := rootForSocketLength(t, parent, socketBytes)
-			namespace, err := openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: stateRoot + fmt.Sprint(socketBytes)})
+	for _, attachBytes := range []int{103, 104, 105} {
+		t.Run(fmt.Sprintf("attach-%d", attachBytes), func(t *testing.T) {
+			runtimeRoot := rootForAttachLength(t, parent, attachBytes)
+			namespace, err := openNamespaceRoots(namespaceRoots{Runtime: runtimeRoot, State: stateRoot + fmt.Sprint(attachBytes)})
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = namespace.Close() })
 			rolePath, err := namespace.RolePath("s", "r")
-			if socketBytes == 103 {
+			if attachBytes == 103 {
 				if err != nil {
 					t.Fatalf("RolePath at 103 bytes: %v", err)
 				}
-				if got := len(rolePath.Socket); got != 103 {
-					t.Fatalf("socket length = %d, want 103", got)
+				if got := len(rolePath.Attach); got != 103 {
+					t.Fatalf("attach length = %d, want 103", got)
+				}
+				if got := len(rolePath.Socket); got != 101 {
+					t.Fatalf("control socket length = %d, want 101", got)
 				}
 				_ = rolePath.Close()
 				return
@@ -524,13 +531,13 @@ func TestNamespaceObservationFailureIsNotReportedAsSubstitution(t *testing.T) {
 	}
 }
 
-func rootForSocketLength(t *testing.T, parent string, socketBytes int) string {
+func rootForAttachLength(t *testing.T, parent string, attachBytes int) string {
 	t.Helper()
-	const suffixBytes = len("/s/r.sock")
-	wantRootBytes := socketBytes - suffixBytes
+	const suffixBytes = len("/s/r.attach")
+	wantRootBytes := attachBytes - suffixBytes
 	fillerBytes := wantRootBytes - len(parent) - 1
 	if fillerBytes < 1 {
-		t.Fatalf("temporary path %q is too long for socket fixture", parent)
+		t.Fatalf("temporary path %q is too long for attach fixture", parent)
 	}
 	return filepath.Join(parent, strings.Repeat("x", fillerBytes))
 }
