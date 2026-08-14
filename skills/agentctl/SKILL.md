@@ -52,10 +52,14 @@ The exact foreground form is `agentctl run --session SESSION --role ROLE
 It runs one role in the foreground using the current working directory and
 creates or extends the durable fleet. It creates or contacts no tmux server,
 session, window, or pane. A different stored fleet directory is refused before
-the role starts or durable state changes. It remains attached through child
-exit. `launch --from-template FILE` supplies fleet shape from strict JSON.
-Passing neither `--detached` nor `--tmux` launches detached; a template may
-select `presentation`, and an explicit flag overrides it.
+the role starts or durable state changes. Before cwd or runtime construction,
+`run` requires both standard input and standard output to be terminals. Pipes
+select exit 2; another terminal-observation failure selects exit 6. Neither
+refusal creates the runtime root, state root, or `sessions/` entry. See
+[references/exit-codes.md](references/exit-codes.md) for the exact rows. It
+remains attached through child exit. `launch --from-template FILE` supplies
+fleet shape from strict JSON. Passing neither `--detached` nor `--tmux` launches detached;
+a template may select `presentation`, and an explicit flag overrides it.
 
 ### 2.1 Author a launch template when the operator asks
 
