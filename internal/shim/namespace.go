@@ -553,49 +553,62 @@ func (n *Namespace) ObserveRoleArtifacts(session, role string) (RoleArtifacts, e
 	if n.runtime == nil || n.state == nil {
 		return RoleArtifacts{}, errors.New("namespace is closed")
 	}
-	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
-		return RoleArtifacts{}, err
-	}
-	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
-		return RoleArtifacts{}, err
-	}
 
 	var observed RoleArtifacts
-	runtimeSession, present, err := openOptionalPrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
-	if err != nil {
-		return RoleArtifacts{}, err
-	}
-	if present {
-		observed.Socket, err = rootEntryPresent(runtimeSession, role+".sock", "socket", socketPath)
-		if err == nil {
-			observed.Attach, err = rootEntryPresent(runtimeSession, role+".attach", "attach socket", attachPath)
-		}
-		if err == nil {
-			observed.Lock, err = rootEntryPresent(runtimeSession, role+".lock", "lockfile", lockPath)
-		}
-		closeErr := runtimeSession.Close()
-		if err != nil || closeErr != nil {
-			return RoleArtifacts{}, errors.Join(err, closeErr)
+	var observationErrors []error
+	if err := verifyRetainedRoot("runtime", n.RuntimeRoot, n.runtime); err != nil {
+		observationErrors = append(observationErrors, err)
+	} else {
+		runtimeSession, present, err := openOptionalPrivateChild("runtime", filepath.Join(n.RuntimeRoot, session), n.runtime, session)
+		if err != nil {
+			observationErrors = append(observationErrors, err)
+		} else if present {
+			runtimeObserved, err := observeRuntimeRoleArtifacts(runtimeSession, role, socketPath, attachPath, lockPath)
+			observed.Socket = runtimeObserved.Socket
+			observed.Attach = runtimeObserved.Attach
+			observed.Lock = runtimeObserved.Lock
+			observationErrors = append(observationErrors, err)
 		}
 	}
 
-	stateSessions, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions"), n.state, "sessions")
+	if err := verifyRetainedRoot("state", n.StateRoot, n.state); err != nil {
+		observationErrors = append(observationErrors, err)
+	} else {
+		observed.Record, err = observeStateRoleRecord(n.state, n.StateRoot, session, role, recordPath)
+		observationErrors = append(observationErrors, err)
+	}
+	return observed, errors.Join(observationErrors...)
+}
+
+func observeRuntimeRoleArtifacts(runtimeSession *os.Root, role, socketPath, attachPath, lockPath string) (RoleArtifacts, error) {
+	var observed RoleArtifacts
+	var socketErr, attachErr, lockErr error
+	observed.Socket, socketErr = rootEntryPresent(runtimeSession, role+".sock", "socket", socketPath)
+	observed.Attach, attachErr = rootEntryPresent(runtimeSession, role+".attach", "attach socket", attachPath)
+	observed.Lock, lockErr = rootEntryPresent(runtimeSession, role+".lock", "lockfile", lockPath)
+	return observed, errors.Join(socketErr, attachErr, lockErr, runtimeSession.Close())
+}
+
+func observeStateRoleRecord(state *os.Root, stateRoot, session, role, recordPath string) (observed bool, err error) {
+	stateSessions, present, err := openOptionalPrivateChild("state", filepath.Join(stateRoot, "sessions"), state, "sessions")
 	if err != nil || !present {
-		return observed, err
+		return false, err
 	}
-	stateSession, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session), stateSessions, session)
-	closeSessionsErr := stateSessions.Close()
-	if err != nil || closeSessionsErr != nil || !present {
-		return observed, errors.Join(err, closeSessionsErr)
+	defer func() { err = errors.Join(err, stateSessions.Close()) }()
+
+	stateSession, present, err := openOptionalPrivateChild("state", filepath.Join(stateRoot, "sessions", session), stateSessions, session)
+	if err != nil || !present {
+		return false, err
 	}
-	stateRoles, present, err := openOptionalPrivateChild("state", filepath.Join(n.StateRoot, "sessions", session, "roles"), stateSession, "roles")
-	closeSessionErr := stateSession.Close()
-	if err != nil || closeSessionErr != nil || !present {
-		return observed, errors.Join(err, closeSessionErr)
+	defer func() { err = errors.Join(err, stateSession.Close()) }()
+
+	stateRoles, present, err := openOptionalPrivateChild("state", filepath.Join(stateRoot, "sessions", session, "roles"), stateSession, "roles")
+	if err != nil || !present {
+		return false, err
 	}
-	observed.Record, err = rootEntryPresent(stateRoles, role+".json", "record", recordPath)
-	closeRolesErr := stateRoles.Close()
-	return observed, errors.Join(err, closeRolesErr)
+	defer func() { err = errors.Join(err, stateRoles.Close()) }()
+
+	return rootEntryPresent(stateRoles, role+".json", "record", recordPath)
 }
 
 func openOptionalPrivateChild(kind, fullPath string, parent *os.Root, name string) (*os.Root, bool, error) {
