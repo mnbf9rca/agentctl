@@ -2473,7 +2473,8 @@ each mode.
 
 #### 15.11.1 Presentation selection and the drain path it chooses
 
-`--detached` and `--tmux` are mutually exclusive. Neither means detached.
+`--detached` and `--tmux` are mutually exclusive, and `--detached` is the
+explicit detached choice. **Passing neither means detached.**
 The template's optional top-level `"presentation": "detached" | "tmux"` means
 the same, absent means detached, any other value is a schema refusal, and an
 explicit flag overrides the file. The schema entry, its validation, the flags,
@@ -2664,6 +2665,20 @@ implementation achieves them:
   there, so work from an old connection can never cross into a replacement. The
   stream orders each direction; it does not know about admission.
 - **Input is never delivered while the role is `stopping`** (§15.11.5).
+- **A departed viewer's seat is released promptly, and never latched.** Admission
+  is revoked, and the seat becomes available to the next connection, on any of:
+  stream EOF in either direction; a read or write error on the connection; peer
+  death, which surfaces as one of those; or any of the terminal decisions above.
+  Release is not deferred until the role next produces output, so a role that has
+  gone quiet cannot strand its own seat — the shim does not need the harness to
+  say anything in order to notice that its viewer is gone.
+- **A half-open peer does not hold the seat.** A viewer that closes only its
+  write side produces EOF on the shim's read while remaining able to receive, and
+  that EOF revokes admission on its own: the seat is released and the connection
+  closed, rather than left readable so the departed viewer keeps receiving output
+  beside its replacement. A peer that is neither readable nor draining is bounded
+  instead by the lag buffer, which evicts it (§15.11.4), so no combination of
+  half-open and non-reading leaves a seat held indefinitely.
 - **Ending a viewer is never a role fact.** It changes no runtime state, writes
   no durable record, and is not an input to absence, readiness, or ownership.
 
@@ -2880,8 +2895,15 @@ signals actually handled:
   real loss of provenance, accepted because a terminal left in raw mode is the
   fact the operator must act on first.
 - A signal arriving once part of a selected row has already reached the terminal
-  does not produce a half-written row followed by silence; the row is finished
-  within its bound and the signal follows.
+  does not produce a half-written row followed by silence **where finishing the
+  row is bounded** — that is, when the row is going to the client's own terminal
+  handle, which is non-blocking and therefore completes or gives up within
+  `AttachTailFlushTimeout`. There the row is finished and the signal follows.
+  This promise does **not** extend to a redirected sink: that write may block
+  indefinitely and cannot be interrupted, so the owner acts immediately and the
+  sink is left holding whatever it holds, which §15.8 records as one of the three
+  permitted prefix causes. Promising a finished row on a path where finishing is
+  unbounded would be promising to wait forever.
 - Exactly **one** termios restoration is attempted per attachment, on every path.
 
 **The relay, and what it costs.** The client relays every byte in both
@@ -2951,6 +2973,12 @@ harness", and it is stated as such in the README rather than left implicit. Outp
 viewer until the child exits, because watching a role stop is the observation an
 operator most needs.
 
+On observed child exit the client reports whichever of §15.11.4's child-exit
+dispositions the flush produced — `attach-viewer-ended`,
+`attach-tail-undelivered`, or either `tail-unconfirmed` row when the flush ended
+without establishing its cutoff. A stopping role reaches the same outcomes as any
+other child exit; nothing about the stop path narrows them.
+
 - **active → stopping → stopped.** Observed child exit requests release. If it
   wins, the §15.11.4 tail flush runs before anything is closed, so the stream
   closes only once every byte counted for that flush has been written to the
@@ -3012,13 +3040,13 @@ string observed and then opened, rendered under the `%q` rule.
 | `attach-stdout-failed` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but writing its output to this terminal failed: CAUSE; WRITTEN of RAW received bytes reached the terminal (attach-stdout-failed)` |
 | `attach-terminal-restore-failed` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but restoring the attaching terminal failed: TERMIOS_CAUSE (attach-terminal-restore-failed)` |
 | `attach-transport-failed` | 6 | `agentctl: attach transport for role ROLE in session SESSION failed during ATTACH_PHASE: CAUSE (attach-transport-failed)` |
-| `attach-evicted-slow` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended because keeping it would have required buffering more than 131072 bytes of role output; the role continued running (attach-evicted-slow)` |
+| `attach-evicted-slow` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended because keeping it would have required buffering more than 131072 bytes of role output; ending it stopped nothing in the role (attach-evicted-slow)` |
 | `attach-ended-cleanup-retained` | 6 | `agentctl: attachment to role ROLE in session SESSION ended while the shim retained ownership during cleanup; the role's disposition is not established by this command (attach-ended-cleanup-retained)` |
 | `attach-ended-server-closing` | 6 | `agentctl: attachment to role ROLE in session SESSION ended because the shim closed the stream; the role's disposition is not established by this command (attach-ended-server-closing)` |
 | `attach-viewer-ended` | 0 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed (attach-viewer-ended)` |
 | `attach-tail-unconfirmed` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed and UNDELIVERED further bytes are known not to have been, but the output cutoff was never confirmed, so whether any more of its final output was missed is unknown (attach-tail-unconfirmed)` |
 | `attach-tail-unconfirmed-none-known` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed and no further bytes are known to have been missed, but the output cutoff was never confirmed, so whether any of its final output was missed is unknown (attach-tail-unconfirmed-none-known)` |
-| `attach-counter-exhausted` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended after BYTES bytes because a byte counter reached the largest exactly representable value; the role continued running (attach-counter-exhausted)` |
+| `attach-counter-exhausted` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended after BYTES bytes because a byte counter reached the largest exactly representable value; ending it stopped nothing in the role (attach-counter-exhausted)` |
 | `attach-tail-undelivered` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed, but UNDELIVERED bytes of its final output could not be delivered before the flush deadline and were dropped; the terminal above is incomplete (attach-tail-undelivered)` |
 | `attach-resize-failed` | 6 | `agentctl: could not apply window size ROWSxCOLS to role ROLE in session SESSION: CAUSE (attach-resize-failed)` |
 | `presentation-flag-conflict` | 2 | `agentctl: --detached and --tmux are mutually exclusive` |
@@ -3120,6 +3148,15 @@ the alternatives out, are recorded in
   an order **across** directions, because a full-duplex stream does not provide
   one — a shim may send its final before reading a resize the client has already
   written, and that is conformant.
+- **The seat is released, not latched.** Each of stream EOF, a half-close of the
+  viewer's write side, a read or write error, and peer death is asserted to
+  revoke admission and to make the seat immediately available: a second
+  connection attempted afterwards is **admitted**, not refused with
+  `viewer-present`. Asserted with the role quiet — producing no output — so a
+  shim that only notices a departed viewer on its next write fails the test.
+- **A half-open viewer stops receiving.** After the viewer half-closes its write
+  side, the shim is asserted to close the connection rather than continue sending
+  output to it, so a departed viewer cannot receive beside its replacement.
 - **Admission bounds application, not the transport.** Input and resize decoded
   from a viewer that has since lost admission are asserted never to reach the
   PTY, including when a replacement viewer has been admitted in between, and
@@ -3204,6 +3241,11 @@ the alternatives out, are recorded in
 - **Diagnostic routing follows the destination.** `agentctl attach ROLE 2>file`
   puts every row in the file, including when the relay terminal has stalled;
   rows raised before any private handle exists route the same way.
+- **The signal/emission promise is asserted per path.** A signal arriving
+  mid-row on the client's own terminal handle yields the complete row and then
+  the signal; the same signal on a redirected sink that will not drain yields
+  immediate owner action and a sink holding nothing, a byte-exact prefix, or the
+  whole row — and the test asserts no full-row guarantee there.
 - **Emission shapes.** Where the destination is the saturated relay terminal,
   emitted bytes are asserted to be a byte-exact prefix of the selected template,
   never a paraphrase or marker; emission is asserted skipped when

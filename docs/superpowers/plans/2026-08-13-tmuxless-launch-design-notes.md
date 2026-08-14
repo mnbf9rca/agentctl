@@ -157,8 +157,13 @@ widening the control protocol.
 The wire `Request` carries exactly four fields — version, session, role,
 operation — and has no payload-capable field. Structural tests enforce both
 that shape and the absence of any payload on control-kind registry entries.
-That invariant is what makes "no caller text can reach the PTY" a checkable
-claim rather than a promise. Widening it to carry attach bytes would destroy
+That invariant is what makes the real claim checkable rather than merely
+promised — and the claim has to be stated with its qualifier, because attach
+relays operator keystrokes to the PTY by design: **no caller-supplied text can
+reach the PTY through the control request/registry path.** Unqualified, "no
+caller text can reach the PTY" is false the moment stdin is relayed, and a
+security note that overstates its own invariant is worse than one that states a
+narrower true one. Widening it to carry attach bytes would destroy
 the guarantee the 0.5.0 batch was built to establish.
 
 The no-detach-key ruling simplifies this story rather than complicating it:
