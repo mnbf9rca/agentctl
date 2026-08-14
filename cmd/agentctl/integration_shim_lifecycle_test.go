@@ -589,21 +589,27 @@ func TestIntegrationPublicCommandsConsultRuntimeAnchorBeforeReportingDivergentSt
 	})
 
 	for _, test := range []struct {
-		name      string
-		arguments []string
-		operation string
+		name             string
+		arguments        []string
+		operation        string
+		requiresTerminal bool
 	}{
 		{name: "clear", arguments: []string{"clear", "--session", "root-guard", "planner"}, operation: "clear"},
 		{name: "compact", arguments: []string{"compact", "--session", "root-guard", "planner"}, operation: "compact"},
 		{name: "relaunch", arguments: []string{"relaunch", "--session", "root-guard", "planner"}, operation: "relaunch"},
-		{name: "foreground run", arguments: []string{"run", "--session", "root-guard", "--role", "planner", "--harness", "claude"}, operation: "run"},
+		{name: "foreground run", arguments: []string{"run", "--session", "root-guard", "--role", "planner", "--harness", "claude"}, operation: "run", requiresTerminal: true},
 		{name: "selected status", arguments: []string{"status", "--session", "root-guard"}, operation: "status"},
 		{name: "kill", arguments: []string{"kill", "--session", "root-guard"}, operation: "kill"},
 		{name: "attach", arguments: []string{"attach", "--session", "root-guard"}, operation: "attach"},
 		{name: "same session launch", arguments: []string{"launch", "--session", "root-guard", "--roles", "planner:claude"}, operation: "launch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			result := fixture.runAgentctl(test.arguments...)
+			var result integrationResult
+			if test.requiresTerminal {
+				result = fixture.runAgentctlWithTerminal(test.arguments...)
+			} else {
+				result = fixture.runAgentctl(test.arguments...)
+			}
 			want := fmt.Sprintf("agentctl: refusing to %s role %q in session %q; resolved state root %q differs from lockfile-recorded state root %q (state-root-disagreement)\n", test.operation, "planner", "root-guard", localRoot, recordedRoot)
 			if result.exitCode != exitUnsafe || result.stdout != "" || result.stderr != want {
 				t.Fatalf("result = %#v, want exit %d and %q", result, exitUnsafe, want)

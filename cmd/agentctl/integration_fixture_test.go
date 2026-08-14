@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -729,6 +730,40 @@ func (f *integrationFixture) runAgentctl(arguments ...string) integrationResult 
 	var stderr bytes.Buffer
 	exitCode := runWithRunner(context.Background(), arguments, &stdout, &stderr, f.runner, os.LookupEnv)
 	return integrationResult{exitCode: exitCode, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func (f *integrationFixture) runAgentctlWithTerminal(arguments ...string) integrationResult {
+	f.t.Helper()
+	pair, err := ptyx.NewOpener().Open(ptyx.WindowSize{Rows: 24, Cols: 80})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer pair.Close()
+	slave, err := os.OpenFile(pair.SlaveName(), os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer slave.Close()
+
+	command := exec.Command(f.agentctlPath, arguments...)
+	command.Dir = os.Getenv(integrationProjectEnv)
+	command.Env = os.Environ()
+	if f.agentctlPath == mustIntegrationTestBinary(f.t) {
+		command.Env = environmentWith(command.Env, integrationAgentctlEnv, "1")
+	}
+	var stderr bytes.Buffer
+	command.Stdin, command.Stdout, command.Stderr = slave, slave, &stderr
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	err = command.Run()
+	exitCode := 0
+	if err != nil {
+		var exitError *exec.ExitError
+		if !errors.As(err, &exitError) {
+			f.t.Fatalf("run terminal command %v: %v", arguments, err)
+		}
+		exitCode = exitError.ExitCode()
+	}
+	return integrationResult{exitCode: exitCode, stderr: stderr.String()}
 }
 
 func mustIntegrationTestBinary(t *testing.T) string {

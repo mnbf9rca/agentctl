@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/mnbf9rca/agentctl/internal/attach"
 	"github.com/mnbf9rca/agentctl/internal/config"
@@ -22,7 +23,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, prepared *attach.PreparedRoleTerminal) (dependencies, func() error, error) {
+func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, preparedRole *attach.PreparedRoleTerminal, preparedForeground *preparedForegroundTerminal) (dependencies, func() error, error) {
 	namespace, err := shim.OpenNamespace()
 	if err != nil {
 		return dependencies{}, nil, err
@@ -40,7 +41,7 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, pre
 	server := shim.NewServer(namespace)
 	foreground := productionForegroundExecutor{
 		runner: fleet.NewShimForegroundRunner(server, shimClient, records, inspector, launchDependencies),
-		stdin:  os.Stdin, stdout: os.Stdout, environment: os.Environ,
+		stdin:  os.Stdin, stdout: os.Stdout, environment: os.Environ, prepared: preparedForeground,
 	}
 	collector := statuspkg.NewShimCollector(
 		fleet.NewShimStatusFleetReader(records),
@@ -52,7 +53,7 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, pre
 		records:    records,
 		dispatcher: control.NewShimDispatcher[shim.Response](shimClient, control.NewAncestryObserver(runner), os.Getpid),
 	}
-	roleClient := attach.NewRoleClient(namespace, records, inspector, tmuxClient, prepared, os.Stdin, os.Stdout, os.Stderr)
+	roleClient := attach.NewRoleClient(namespace, records, inspector, tmuxClient, preparedRole, os.Stdin, os.Stdout, os.Stderr)
 	closeAll := func() error { return errors.Join(roleClient.Close(), records.Close(), namespace.Close()) }
 	return dependencies{
 		launch:     launchDependenciesForCLI(),
@@ -127,6 +128,47 @@ type productionForegroundExecutor struct {
 	stdin       *os.File
 	stdout      *os.File
 	environment func() []string
+	prepared    *preparedForegroundTerminal
+}
+
+type preparedForegroundTerminal struct {
+	outerState ptyx.TerminalState
+}
+
+type foregroundNotTerminalError struct{}
+
+func (*foregroundNotTerminalError) Error() string {
+	return "standard input and output must both be terminals"
+}
+
+type foregroundTerminalObservationError struct{ Cause error }
+
+func (e *foregroundTerminalObservationError) Error() string { return e.Cause.Error() }
+func (e *foregroundTerminalObservationError) Unwrap() error { return e.Cause }
+
+func prepareForegroundTerminal(stdin, stdout *os.File) (*preparedForegroundTerminal, error) {
+	return prepareForegroundTerminalWithObserver(stdin, stdout, ptyx.NewTerminal().Observe)
+}
+
+func prepareForegroundTerminalWithObserver(stdin, stdout *os.File, observe func(*os.File) (ptyx.TerminalState, error)) (*preparedForegroundTerminal, error) {
+	if stdin == nil || stdout == nil {
+		return nil, &foregroundNotTerminalError{}
+	}
+	outerState, err := observe(stdin)
+	if err != nil {
+		return nil, classifyForegroundTerminalObservation(err)
+	}
+	if _, err := observe(stdout); err != nil {
+		return nil, classifyForegroundTerminalObservation(err)
+	}
+	return &preparedForegroundTerminal{outerState: outerState}, nil
+}
+
+func classifyForegroundTerminalObservation(err error) error {
+	if errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.ENODEV) {
+		return &foregroundNotTerminalError{}
+	}
+	return &foregroundTerminalObservationError{Cause: err}
 }
 
 // foregroundTerminalRestoreError prevents a known child/lifecycle outcome from
@@ -145,11 +187,15 @@ func (e *foregroundTerminalRestoreError) Unwrap() []error {
 }
 
 func (e productionForegroundExecutor) Execute(ctx context.Context, sessionName string, role config.RoleConfig, directory string) error {
-	terminal := ptyx.NewTerminal()
-	outerState, err := terminal.Observe(e.stdin)
-	if err != nil {
-		return err
+	prepared := e.prepared
+	if prepared == nil {
+		var err error
+		prepared, err = prepareForegroundTerminal(e.stdin, e.stdout)
+		if err != nil {
+			return err
+		}
 	}
+	outerState := prepared.outerState
 	initialSize, err := outerState.WindowSize()
 	if err != nil {
 		return err

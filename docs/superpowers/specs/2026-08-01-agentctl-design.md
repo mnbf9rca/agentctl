@@ -2221,6 +2221,12 @@ terminal copies its observed mode with only `ISIG` cleared so control characters
 PTY retains its own `ISIG` policy and delivers the resulting signal to the harness process group. Its exact syntax is
 §15.1; the cwd is observed before runtime mutation and is not caller-overridable.
 
+After command and value validation, foreground `run` read-only observes both standard input and standard output as
+terminals before cwd observation, shim namespace or fleet-store construction, target observation, or mutation. If
+either descriptor is not a terminal it selects `run-not-a-terminal`; any other failure of either terminal observation
+selects `run-terminal-observation-failed`. Neither refusal creates the runtime root, state root, or `sessions/`
+entry. Foreground `run` does not require standard input and standard output to identify the same terminal.
+
 For an existing fleet whose stored directory differs from that cwd, the exact refusal is:
 
 ```text
@@ -2318,6 +2324,7 @@ sole successful status output and therefore add no diagnostic line.
 | `invalid-root` | 2 | `agentctl: invalid ROOT_KIND ROOT: RULE; no role was mutated` |
 | `invalid-flag` | 2 | `agentctl: invalid flag FLAG: RULE; no role was mutated` |
 | `invalid-request` | 2 | `agentctl: invalid shim request for session SESSION role ROLE: RULE; no role was mutated` |
+| `run-not-a-terminal` | 2 | `agentctl: refusing to run role ROLE in session SESSION; standard input and output must both be terminals (run-not-a-terminal)` |
 | `session-missing` | 3 | `agentctl: session SESSION was not found` |
 | `fleet-config-missing` | 3 | `agentctl: session SESSION has no durable fleet configuration` |
 | `fleet-config-exists` | 3 | `agentctl: refusing to launch session SESSION; durable fleet configuration already exists (fleet-config-exists)` |
@@ -2349,6 +2356,7 @@ sole successful status output and therefore add no diagnostic line.
 | `ancestry-undetermined` | 6 | `agentctl: refusing to OP role ROLE in session SESSION; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
 | `presence-observation-failed` | 6 | `agentctl: could not observe child PID CHILD for role ROLE in session SESSION: kill(CHILD, 0) returned CAUSE (could-not-observe)` |
 | `token-observation-failed` | 6 | `agentctl: could not observe the start token for child PID CHILD in session SESSION role ROLE: CAUSE (could-not-observe)` |
+| `run-terminal-observation-failed` | 6 | `agentctl: could not observe the foreground terminal for role ROLE in session SESSION: CAUSE; no role was started (run-terminal-observation-failed)` |
 | `protocol-read-from-shim-invalid` | 6 | `agentctl: could not read protocol frame from connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-read-invalid)` |
 | `protocol-read-from-client-invalid` | 6 | `agentctl: could not read protocol frame from connected client: CAUSE (protocol-frame-read-invalid)` |
 | `protocol-write-to-shim-failed` | 6 | `agentctl: could not write protocol request to connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-write-failed)` |

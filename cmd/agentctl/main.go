@@ -216,13 +216,14 @@ func runWithRunner(
 	if handled, code := validateBeforeRuntime(arguments, stdout, stderr); handled {
 		return code
 	}
-	var prepared *attach.PreparedRoleTerminal
+	var preparedRole *attach.PreparedRoleTerminal
+	var preparedForeground *preparedForegroundTerminal
 	var selectedRoleSession string
 	var err error
 	if arguments[0] == "attach" {
 		options, parseErr := parseCommand("attach", arguments[1:])
 		if parseErr == nil && options.role != "" {
-			prepared, err = attach.PrepareRoleTerminal(os.Stdin, os.Stdout, os.Stderr)
+			preparedRole, err = attach.PrepareRoleTerminal(os.Stdin, os.Stdout, os.Stderr)
 			if err != nil {
 				selectedRoleSession = options.session
 				if !options.sessionSet {
@@ -255,7 +256,16 @@ func runWithRunner(
 			}
 		}
 	}
-	deps, closeRuntime, err := buildShimDependencies(runner, lookupEnv, prepared)
+	if arguments[0] == "run" {
+		options, parseErr := parseCommand("run", arguments[1:])
+		if parseErr == nil {
+			preparedForeground, err = prepareForegroundTerminal(os.Stdin, os.Stdout)
+			if err != nil {
+				return foregroundError(stderr, options.session, options.role, err)
+			}
+		}
+	}
+	deps, closeRuntime, err := buildShimDependencies(runner, lookupEnv, preparedRole, preparedForeground)
 	if err != nil {
 		return shimSetupError(stderr, arguments[0], err)
 	}
@@ -1017,6 +1027,16 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 }
 
 func foregroundError(stderr io.Writer, sessionName, role string, err error) int {
+	var notTerminal *foregroundNotTerminalError
+	if errors.As(err, &notTerminal) {
+		fmt.Fprintf(stderr, "agentctl: refusing to run role %q in session %q; standard input and output must both be terminals (run-not-a-terminal)\n", role, sessionName)
+		return exitUsage
+	}
+	var observation *foregroundTerminalObservationError
+	if errors.As(err, &observation) {
+		fmt.Fprintf(stderr, "agentctl: could not observe the foreground terminal for role %q in session %q: %q; no role was started (run-terminal-observation-failed)\n", role, sessionName, observation.Cause.Error())
+		return exitTmux
+	}
 	var restore *foregroundTerminalRestoreError
 	if errors.As(err, &restore) {
 		fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, restore.Error())
