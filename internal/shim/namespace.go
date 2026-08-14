@@ -102,6 +102,7 @@ type RolePath struct {
 	StateRoot   string
 	Lock        string
 	Socket      string
+	Attach      string
 	Record      string
 
 	runtimeSession *os.Root
@@ -509,7 +510,7 @@ func (n *Namespace) ExistingRolePath(session, role string) (*RolePath, error) {
 // side. Status uses it before any durable enumeration so a missing lockfile
 // cannot silently acquire anchored confidence.
 func (n *Namespace) ExistingRuntimeRolePath(session, role string) (*RolePath, error) {
-	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	lockPath, socketPath, attachPath, recordPath, err := n.validatedRolePaths(session, role)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +528,7 @@ func (n *Namespace) ExistingRuntimeRolePath(session, role string) (*RolePath, er
 	}
 	return &RolePath{
 		Session: session, Role: role, RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
-		Lock: lockPath, Socket: socketPath, Record: recordPath, runtimeSession: runtimeSession,
+		Lock: lockPath, Socket: socketPath, Attach: attachPath, Record: recordPath, runtimeSession: runtimeSession,
 	}, nil
 }
 
@@ -578,7 +579,7 @@ func (n *Namespace) ListRuntimeRoles(session string) ([]string, error) {
 // ExistingDurableRolePath opens only the already-created durable role side.
 // It permits explicitly unanchored observation when the volatile tree is gone.
 func (n *Namespace) ExistingDurableRolePath(session, role string) (*RolePath, error) {
-	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	lockPath, socketPath, attachPath, recordPath, err := n.validatedRolePaths(session, role)
 	if err != nil {
 		return nil, err
 	}
@@ -606,24 +607,25 @@ func (n *Namespace) ExistingDurableRolePath(session, role string) (*RolePath, er
 	}
 	return &RolePath{
 		Session: session, Role: role, RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
-		Lock: lockPath, Socket: socketPath, Record: recordPath, stateRoles: stateRoles,
+		Lock: lockPath, Socket: socketPath, Attach: attachPath, Record: recordPath, stateRoles: stateRoles,
 	}, nil
 }
 
-func (n *Namespace) validatedRolePaths(session, role string) (string, string, string, error) {
+func (n *Namespace) validatedRolePaths(session, role string) (string, string, string, string, error) {
 	if err := config.ValidateSessionName(session); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if err := config.ValidateRoleName(role); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	lockPath := filepath.Join(n.RuntimeRoot, session, role+".lock")
 	socketPath := filepath.Join(n.RuntimeRoot, session, role+".sock")
+	attachPath := filepath.Join(n.RuntimeRoot, session, role+".attach")
 	recordPath := filepath.Join(n.StateRoot, "sessions", session, "roles", role+".json")
-	if len(socketPath) >= DarwinUnixSocketPathBytes {
-		return "", "", "", &SocketPathTooLongError{Path: socketPath, Length: len(socketPath)}
+	if len(attachPath) >= DarwinUnixSocketPathBytes {
+		return "", "", "", "", &SocketPathTooLongError{Path: attachPath, Length: len(attachPath)}
 	}
-	return lockPath, socketPath, recordPath, nil
+	return lockPath, socketPath, attachPath, recordPath, nil
 }
 
 // SocketPresent observes the exact role socket entry through the retained
@@ -661,7 +663,7 @@ func SocketPresent(path *RolePath) (bool, error) {
 }
 
 func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, error) {
-	lockPath, socketPath, recordPath, err := n.validatedRolePaths(session, role)
+	lockPath, socketPath, attachPath, recordPath, err := n.validatedRolePaths(session, role)
 	if err != nil {
 		return nil, err
 	}
@@ -705,7 +707,7 @@ func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, erro
 	return &RolePath{
 		Session: session, Role: role,
 		RuntimeRoot: n.RuntimeRoot, StateRoot: n.StateRoot,
-		Lock: lockPath, Socket: socketPath, Record: recordPath,
+		Lock: lockPath, Socket: socketPath, Attach: attachPath, Record: recordPath,
 		runtimeSession: runtimeSession, stateRoles: stateRoles,
 	}, nil
 }

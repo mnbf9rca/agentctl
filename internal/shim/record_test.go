@@ -245,7 +245,7 @@ func TestRecordRoundTripsCleanupFailedStateWithOneClosedFactObject(t *testing.T)
 	failure := CleanupFailure{
 		Cause:       "SIGHUP did not produce observed absence",
 		Observation: CleanupObservationPresentMatch,
-		Remaining:   []string{"child", "socket", "record", "lock"},
+		Remaining:   []string{"child", "socket", "attach", "record", "lock"},
 	}
 	failed, err := reservation.WithCleanupFailure(401, nil, failure)
 	if err != nil {
@@ -265,7 +265,7 @@ func TestRecordRoundTripsCleanupFailedStateWithOneClosedFactObject(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"SIGHUP did not produce observed absence","observation":"present-match","remaining":["child","socket","record","lock"]}}` + "\n"
+	want := `{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"SIGHUP did not produce observed absence","observation":"present-match","remaining":["child","socket","attach","record","lock"]}}` + "\n"
 	if string(payload) != want {
 		t.Fatalf("cleanup record payload = %q, want %q", payload, want)
 	}
@@ -279,6 +279,8 @@ func TestRecordRejectsMalformedCleanupFailedFacts(t *testing.T) {
 		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"missing","remaining":["child"]}}`,
 		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","cause":"y","observation":"present-match","remaining":["child"]}}`,
 		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"present-match","remaining":["record","child"]}}`,
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"present-match","remaining":["attach","socket"]}}`,
+		`{"version":1,"state":"cleanup-failed","session":"session","role":"role","shim_pid":400,"nonce":"nonce","child_pid":401,"cleanup":{"cause":"x","observation":"present-match","remaining":["attach","attach"]}}`,
 	} {
 		if err := os.WriteFile(rolePath.Record, []byte(payload), 0o600); err != nil {
 			t.Fatal(err)
