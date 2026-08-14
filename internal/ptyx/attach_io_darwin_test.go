@@ -246,11 +246,12 @@ func TestPTYReaderCancellationIsNotStarvedByContinuouslyReadablePTY(t *testing.T
 		t.Fatalf("Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = pair.Close() })
-	slaveFlags, err := fcntl(int(pair.slave.Fd()), syscall.F_GETFL, 0)
+	slaveFD := int(pair.slave.Fd())
+	slaveFlags, err := fcntl(slaveFD, syscall.F_GETFL, 0)
 	if err != nil {
 		t.Fatalf("read slave flags: %v", err)
 	}
-	if _, err := fcntl(int(pair.slave.Fd()), syscall.F_SETFL, slaveFlags|syscall.O_NONBLOCK); err != nil {
+	if _, err := fcntl(slaveFD, syscall.F_SETFL, slaveFlags|syscall.O_NONBLOCK); err != nil {
 		t.Fatalf("set slave nonblocking: %v", err)
 	}
 	reader, err := NewPTYReader(pair.Master())
@@ -264,7 +265,7 @@ func TestPTYReaderCancellationIsNotStarvedByContinuouslyReadablePTY(t *testing.T
 	go func() {
 		defer close(producerDone)
 		for ctx.Err() == nil {
-			_, writeErr := syscall.Write(int(pair.slave.Fd()), []byte("x"))
+			_, writeErr := syscall.Write(slaveFD, []byte("x"))
 			if writeErr != nil && !errors.Is(writeErr, syscall.EAGAIN) && !errors.Is(writeErr, syscall.EINTR) {
 				return
 			}
