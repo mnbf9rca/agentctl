@@ -644,6 +644,26 @@ func TestSkillVersionParses(t *testing.T) {
 	})
 }
 
+func TestSkillDescribesDetachedDefaultAndBothAttachForms(t *testing.T) {
+	raw, err := skills.Tree.ReadFile(skills.Root + "/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"Passing neither `--detached` nor `--tmux` launches detached",
+		"`attach ROLE` streams a detached role directly",
+		"Bare `attach` remains the fleet-level tmux presentation route",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SKILL.md is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "attach requires an observed tmux presentation") {
+		t.Fatal("SKILL.md still makes the obsolete tmux-only attach claim")
+	}
+}
+
 func TestMetadataVersionParsingRejectsInvalidFrontmatter(t *testing.T) {
 	valid := func(body string) []string { return strings.Split(body, "\n") }
 	for name, lines := range map[string][]string{

@@ -15,7 +15,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
-func TestRunLaunchPassesValidatedFleetToShimAndReportsReadiness(t *testing.T) {
+func TestRunLaunchDefaultsToDetachedAndReportsExactAttachHint(t *testing.T) {
 	t.Parallel()
 
 	directory := "/work"
@@ -25,11 +25,46 @@ func TestRunLaunchPassesValidatedFleetToShimAndReportsReadiness(t *testing.T) {
 		"launch", "--session", "fleet", "--roles", "planner:claude,coder:codex", "--models", "coder:gpt-5.6-sol", "--dir", directory,
 	}, &stdout, &stderr, dependencies{launcher: launcher})
 	wantFleet := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}, {Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol"}}}
-	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.presentation != fleet.PresentationTmux || launcher.directory == nil || *launcher.directory != directory {
+	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.presentation != fleet.PresentationDetached || launcher.directory == nil || *launcher.directory != directory {
 		t.Fatalf("code=%d session=%q fleet=%#v directory=%v stderr=%q", code, launcher.session, launcher.fleet, launcher.directory, stderr.String())
 	}
-	if stderr.String() != "agentctl: launched session \"fleet\"; 2 roles are ready\n" {
+	if stderr.String() != "agentctl: launched session \"fleet\" detached; 2 roles are ready\n"+
+		"agentctl: attach a role with: agentctl attach --session fleet ROLE\n" {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunLaunchPresentationFlagsSelectExactModeAndHint(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		flag         string
+		presentation fleet.Presentation
+		want         string
+	}{
+		{name: "detached", flag: "--detached", presentation: fleet.PresentationDetached, want: "agentctl: launched session \"fleet\" detached; 1 roles are ready\nagentctl: attach a role with: agentctl attach --session fleet ROLE\n"},
+		{name: "tmux", flag: "--tmux", presentation: fleet.PresentationTmux, want: "agentctl: launched session \"fleet\"; 1 roles are ready\nagentctl: attach the fleet with: agentctl attach --session fleet\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			launcher := &launcherStub{result: fleet.ShimLaunchResult{Directory: "/work", TotalRoles: 1}}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude", test.flag}, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+			if code != exitOK || launcher.presentation != test.presentation || stderr.String() != test.want {
+				t.Fatalf("code=%d presentation=%q stderr=%q, want %d %q %q", code, launcher.presentation, stderr.String(), exitOK, test.presentation, test.want)
+			}
+		})
+	}
+}
+
+func TestRunLaunchRefusesConflictingPresentationFlagsBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	launcher := &launcherStub{}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--detached", "--tmux"}, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+	if code != exitUsage || launcher.called || stderr.String() != "agentctl: --detached and --tmux are mutually exclusive\n" {
+		t.Fatalf("code=%d called=%t stderr=%q", code, launcher.called, stderr.String())
 	}
 }
 

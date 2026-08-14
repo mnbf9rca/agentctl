@@ -1,7 +1,7 @@
 ---
 name: agentctl
 description: Use when operating an agentctl fleet — checking runtime status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
-compatibility: Requires the agentctl binary on PATH. Runtime status and control work with or without tmux; attach requires an observed tmux presentation.
+compatibility: Requires the agentctl binary on PATH. Runtime status, control, and detached-role attach work without tmux.
 metadata:
   version: "0.5.0"
 ---
@@ -54,6 +54,8 @@ creates or extends the durable fleet. It creates or contacts no tmux server,
 session, window, or pane. A different stored fleet directory is refused before
 the role starts or durable state changes. It remains attached through child
 exit. `launch --from-template FILE` supplies fleet shape from strict JSON.
+Passing neither `--detached` nor `--tmux` launches detached; a template may
+select `presentation`, and an explicit flag overrides it.
 
 ### 2.1 Author a launch template when the operator asks
 
@@ -101,12 +103,11 @@ status or control.
 ## 6. Operator-only lifecycle facts
 
 `relaunch` starts only a runtime-observed missing role or ESRCH-backed stale
-record; every state that may retain a child refuses. `attach` is presentation
-only. If no tmux presentation is observed it refuses and states that status and
-control remain available without tmux; it never creates a presentation.
+record; every state that may retain a child refuses. `attach ROLE` streams a detached role directly, with one viewer and no output replay. Bare `attach` remains the fleet-level tmux presentation route; if no presentation is observed it lists the direct role commands and never creates a presentation.
 
-agentctl has no arbitrary keystroke/free-text path, no AMQ-state access, no
-agent-initiated per-role restart, and no machine-state inference. Report a
+Only the explicit `attach ROLE` terminal stream carries operator keystrokes;
+control operations have no arbitrary free-text path. agentctl has no AMQ-state
+access, no agent-initiated per-role restart, and no machine-state inference. Report a
 missing sibling to the operator rather than trying to repair it.
 
 ## 7. Branch on exit codes, not prose

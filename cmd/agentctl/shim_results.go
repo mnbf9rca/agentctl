@@ -367,6 +367,214 @@ func shimKillError(stderr io.Writer, sessionName string, err error) int {
 }
 
 func attachNoPresentationError(stderr io.Writer, err *attach.NoPresentationError) int {
-	fmt.Fprintf(stderr, "agentctl: %v\n", err)
+	fmt.Fprintf(stderr, "agentctl: refusing to attach session %s; no tmux presentation was observed; attach a role directly:\n", err.Session)
+	for _, role := range err.Roster {
+		fmt.Fprintf(stderr, "  agentctl attach --session %s %s\n", err.Session, role)
+	}
 	return exitSession
+}
+
+func writeRoleAttachResult(stderr io.Writer, sessionName, role string, result attach.RoleResult) int {
+	switch result.Disposition {
+	case shim.AttachDispositionChildExited:
+		fmt.Fprintf(stderr, "agentctl: role %s in session %s ended while attached; %d bytes were relayed (attach-viewer-ended)\n", role, sessionName, result.Bytes)
+		return exitOK
+	case shim.AttachDispositionViewerEvicted:
+		fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s was ended because keeping it would have required buffering more than 131072 bytes of role output; ending it stopped nothing in the role (attach-evicted-slow)\n", role, sessionName)
+	case shim.AttachDispositionCleanupRetained:
+		fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s ended while the shim retained ownership during cleanup; the role's disposition is not established by this command (attach-ended-cleanup-retained)\n", role, sessionName)
+	case shim.AttachDispositionServerClosing:
+		fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s ended because the shim closed the stream; the role's disposition is not established by this command (attach-ended-server-closing)\n", role, sessionName)
+	case shim.AttachDispositionTailUndelivered:
+		fmt.Fprintf(stderr, "agentctl: role %s in session %s ended while attached; %d bytes were relayed, but %d bytes of its final output could not be delivered before the flush deadline and were dropped; the terminal above is incomplete (attach-tail-undelivered)\n", role, sessionName, result.Bytes, result.Undelivered)
+	case shim.AttachDispositionTailUnconfirmed:
+		if result.KnownUndelivered == 0 {
+			fmt.Fprintf(stderr, "agentctl: role %s in session %s ended while attached; %d bytes were relayed and no further bytes are known to have been missed, but the output cutoff was never confirmed, so whether any more of its final output was missed is unknown (attach-tail-unconfirmed-none-known)\n", role, sessionName, result.Bytes)
+		} else {
+			fmt.Fprintf(stderr, "agentctl: role %s in session %s ended while attached; %d bytes were relayed and %d further bytes are known not to have been, but the output cutoff was never confirmed, so whether any more of its final output was missed is unknown (attach-tail-unconfirmed)\n", role, sessionName, result.Bytes, result.KnownUndelivered)
+		}
+	case shim.AttachDispositionCounterExhausted:
+		fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s was ended after %d bytes because a byte counter reached the largest exactly representable value; ending it stopped nothing in the role (attach-counter-exhausted)\n", role, sessionName, result.Bytes)
+	case shim.AttachDispositionResizeFailed:
+		fmt.Fprintf(stderr, "agentctl: could not apply window size %dx%d to role %s in session %s: %q (attach-resize-failed)\n", result.Rows, result.Cols, role, sessionName, result.Cause)
+	default:
+		fmt.Fprintf(stderr, "agentctl: attach transport for role %s in session %s failed during final: unknown final disposition %q (attach-transport-failed)\n", role, sessionName, result.Disposition)
+		return exitTmux
+	}
+	return exitTmux
+}
+
+func roleAttachError(stderr io.Writer, sessionName, role string, err error) int {
+	var restore *attach.TerminalRestoreError
+	if errors.As(err, &restore) {
+		prior := "locally-terminated"
+		if restore.PriorResult != nil {
+			prior = attachPriorOutcome(restore.PriorResult)
+		}
+		var output *attach.TerminalOutputError
+		if errors.As(restore.Prior, &output) {
+			if output.Prior == nil {
+				prior = "stdout-failed"
+				if output.Stalled {
+					prior = "terminal-stalled"
+				}
+				fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s ended with %s, but restoring the attaching terminal failed: %q (attach-terminal-restore-failed)\n", role, sessionName, prior, restore.Cause.Error())
+				return exitTmux
+			}
+			if output.Prior != nil {
+				writeRoleAttachResult(stderr, sessionName, role, *output.Prior)
+			}
+			writeRoleAttachLocalOutput(stderr, sessionName, role, output, output.Prior != nil)
+			fmt.Fprintf(stderr, "  restoring the attaching terminal failed: %q (attach-terminal-restore-failed)\n", restore.Cause.Error())
+			return exitTmux
+		}
+		var transport *attach.TransportError
+		if errors.As(restore.Prior, &transport) {
+			prior = "transport-failed"
+		}
+		var refusal *attach.RefusalErrorRole
+		if errors.As(restore.Prior, &refusal) {
+			switch refusal.Control.Outcome {
+			case shim.AttachRefusalViewerPresent,
+				shim.AttachRefusalPeerUnverified,
+				shim.AttachRefusalPeerUnobservable,
+				shim.AttachRefusalInitialSizeFailed:
+				prior = string(refusal.Control.Outcome)
+			}
+		}
+		var roleObservation *attach.RoleObservationError
+		if errors.As(restore.Prior, &roleObservation) && roleObservation.Observation.Outcome == shim.OutcomeAnswererDisagreement {
+			prior = string(shim.OutcomeAnswererDisagreement)
+		}
+		var raw *attach.TerminalRawError
+		if errors.As(restore.Prior, &raw) {
+			prior = "terminal-raw-failed"
+		}
+		fmt.Fprintf(stderr, "agentctl: attachment to role %s in session %s ended with %s, but restoring the attaching terminal failed: %q (attach-terminal-restore-failed)\n", role, sessionName, prior, restore.Cause.Error())
+		return exitTmux
+	}
+	var notTerminal *attach.NotTerminalError
+	if errors.As(err, &notTerminal) {
+		if sessionName == "" {
+			fmt.Fprintf(stderr, "agentctl: refusing to attach role %s; standard input and output must both be terminals (attach-not-a-terminal)\n", role)
+			return exitUsage
+		}
+		fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; standard input and output must both be terminals (attach-not-a-terminal)\n", role, sessionName)
+		return exitUsage
+	}
+	var mismatch *attach.TerminalMismatchError
+	if errors.As(err, &mismatch) {
+		if sessionName == "" {
+			fmt.Fprintf(stderr, "agentctl: refusing to attach role %s; standard input and standard output are different terminals (attach-terminal-mismatch)\n", role)
+			return exitUsage
+		}
+		fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; standard input and standard output are different terminals (attach-terminal-mismatch)\n", role, sessionName)
+		return exitUsage
+	}
+	var observation *attach.TerminalObservationError
+	if errors.As(err, &observation) {
+		if sessionName == "" {
+			fmt.Fprintf(stderr, "agentctl: could not observe the attaching terminal for role %s: %q; no attachment was made (attach-terminal-observation-failed)\n", role, observation.Cause.Error())
+			return exitTmux
+		}
+		fmt.Fprintf(stderr, "agentctl: could not observe the attaching terminal for role %s in session %s: %q; no attachment was made (attach-terminal-observation-failed)\n", role, sessionName, observation.Cause.Error())
+		return exitTmux
+	}
+	var presented *attach.PresentedByTmuxError
+	if errors.As(err, &presented) {
+		fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; the role is presented by tmux and its pane is its viewer; use agentctl attach --session %s (attach-presented-by-tmux)\n", role, sessionName, sessionName)
+		return exitUnsafe
+	}
+	var presentationMissing *attach.PresentationMissingError
+	if errors.As(err, &presentationMissing) {
+		fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; it was launched in tmux mode but no presentation was observed, so it has no viewer to share; recreate it with: agentctl relaunch %s (attach-presentation-missing)\n", role, sessionName, role)
+		return exitUnsafe
+	}
+	var listenerAbsent *attach.ListenerAbsentError
+	if errors.As(err, &listenerAbsent) {
+		fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; the role holds its claim but has no attach stream at %q (attach-listener-absent)\n", role, sessionName, listenerAbsent.Path)
+		return exitUnsafe
+	}
+	var listenerUnobservable *attach.ListenerUnobservableError
+	if errors.As(err, &listenerUnobservable) {
+		fmt.Fprintf(stderr, "agentctl: could not observe the attach stream for role %s in session %s at %q: %q; no attachment was made (attach-listener-unobservable)\n", role, sessionName, listenerUnobservable.Path, listenerUnobservable.Cause.Error())
+		return exitTmux
+	}
+	var terminalOpen *attach.TerminalOpenError
+	if errors.As(err, &terminalOpen) {
+		fmt.Fprintf(stderr, "agentctl: could not open this command's own handle on the attaching terminal for role %s in session %s: %q; no attachment was made (attach-terminal-open-failed)\n", role, sessionName, terminalOpen.Cause.Error())
+		return exitTmux
+	}
+	var terminalVerify *attach.TerminalVerifyError
+	if errors.As(err, &terminalVerify) {
+		fmt.Fprintf(stderr, "agentctl: opened a candidate terminal handle for role %s in session %s but could not complete %s: %q; no attachment was made (attach-terminal-verify-failed)\n", role, sessionName, terminalVerify.Stage, terminalVerify.Cause.Error())
+		return exitTmux
+	}
+	var reopen *attach.TerminalReopenMismatchError
+	if errors.As(err, &reopen) {
+		fmt.Fprintf(stderr, "agentctl: opening observed terminal name %q for role %s in session %s produced a candidate handle whose identity did not match the terminal this command is attached to; no attachment was made (attach-terminal-reopen-mismatch)\n", reopen.Path, role, sessionName)
+		return exitTmux
+	}
+	var raw *attach.TerminalRawError
+	if errors.As(err, &raw) {
+		fmt.Fprintf(stderr, "agentctl: could not place the attaching terminal in raw mode for role %s in session %s: %q; no attachment was made (attach-terminal-raw-failed)\n", role, sessionName, raw.Cause.Error())
+		return exitTmux
+	}
+	var signalObservation *attach.SignalObservationError
+	if errors.As(err, &signalObservation) {
+		fmt.Fprintf(stderr, "agentctl: could not observe the current handling of %s for role %s in session %s: %s query failed: %q; no attachment was made and this terminal was not modified (attach-signal-observation-failed)\n", canonicalSignal(signalObservation.Signal), role, sessionName, signalObservation.Observation, signalObservation.Cause.Error())
+		return exitTmux
+	}
+	var output *attach.TerminalOutputError
+	if errors.As(err, &output) {
+		writeRoleAttachLocalOutput(stderr, sessionName, role, output, false)
+		return exitTmux
+	}
+	var refusal *attach.RefusalErrorRole
+	if errors.As(err, &refusal) {
+		switch refusal.Control.Outcome {
+		case shim.AttachRefusalViewerPresent:
+			fmt.Fprintf(stderr, "agentctl: refusing to attach role %s in session %s; a viewer is already attached at PID %d (attach-viewer-present)\n", role, sessionName, refusal.Control.ViewerPID)
+			return exitUnsafe
+		case shim.AttachRefusalPeerUnverified:
+			fmt.Fprintf(stderr, "agentctl: refusing the attach connection for role %s in session %s; connected LOCAL_PEERPID %d has uid %d; expected %d (attach-peer-unverified)\n", role, sessionName, refusal.Control.PeerPID, refusal.Control.PeerUID, refusal.Control.ShimUID)
+			return exitUnsafe
+		case shim.AttachRefusalPeerUnobservable:
+			fmt.Fprintf(stderr, "agentctl: could not observe the attach peer for role %s in session %s: %q (attach-peer-unobservable)\n", role, sessionName, refusal.Control.Cause)
+			return exitTmux
+		case shim.AttachRefusalInitialSizeFailed:
+			fmt.Fprintf(stderr, "agentctl: could not apply window size %dx%d to role %s in session %s: %q (attach-resize-failed)\n", refusal.Control.Rows, refusal.Control.Cols, role, sessionName, refusal.Control.Cause)
+			return exitTmux
+		}
+	}
+	var roleObservation *attach.RoleObservationError
+	if errors.As(err, &roleObservation) {
+		return shimObservationResult(stderr, "attach", sessionName, role, roleObservation.Observation)
+	}
+	var transport *attach.TransportError
+	if errors.As(err, &transport) {
+		fmt.Fprintf(stderr, "agentctl: attach transport for role %s in session %s failed during %s: %q (attach-transport-failed)\n", role, sessionName, transport.Phase, transport.Cause.Error())
+		return exitTmux
+	}
+	return shimOperationError(stderr, "attach", sessionName, role, err)
+}
+
+func attachPriorOutcome(result *attach.RoleResult) string {
+	if result == nil || result.Disposition == "" {
+		return "locally-terminated"
+	}
+	return string(result.Disposition)
+}
+
+func writeRoleAttachLocalOutput(stderr io.Writer, sessionName, role string, output *attach.TerminalOutputError, indented bool) {
+	prior := attachPriorOutcome(output.Prior)
+	prefix := fmt.Sprintf("agentctl: attachment to role %s in session %s ended with %s, but ", role, sessionName, prior)
+	if indented {
+		prefix = "  "
+	}
+	if output.Stalled {
+		fmt.Fprintf(stderr, "%sthis terminal stopped accepting output; %d of %d received bytes reached it before the wait expired and the rest was not displayed (attach-terminal-stalled)\n", prefix, output.Written, output.Raw)
+		return
+	}
+	fmt.Fprintf(stderr, "%swriting its output to this terminal failed: %q; %d of %d received bytes reached the terminal (attach-stdout-failed)\n", prefix, output.Cause.Error(), output.Written, output.Raw)
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
-func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv) (dependencies, func() error, error) {
+func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, prepared *attach.PreparedRoleTerminal) (dependencies, func() error, error) {
 	namespace, err := shim.OpenNamespace()
 	if err != nil {
 		return dependencies{}, nil, err
@@ -32,7 +32,6 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv) (de
 		_ = namespace.Close()
 		return dependencies{}, nil, err
 	}
-	closeAll := func() error { return errors.Join(records.Close(), namespace.Close()) }
 	tmuxClient := tmuxx.New(runner)
 	shimClient := shim.NewClient(namespace)
 	inspector := fleet.NewRuntimeShimRoleInspector(namespace, shimClient)
@@ -53,6 +52,8 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv) (de
 		records:    records,
 		dispatcher: control.NewShimDispatcher[shim.Response](shimClient, control.NewAncestryObserver(runner), os.Getpid),
 	}
+	roleClient := attach.NewRoleClient(namespace, records, inspector, tmuxClient, prepared, os.Stdin, os.Stdout, os.Stderr)
+	closeAll := func() error { return errors.Join(roleClient.Close(), records.Close(), namespace.Close()) }
 	return dependencies{
 		launch:     launchDependenciesForCLI(),
 		launcher:   fleet.NewShimLauncher(tmuxClient, shimClient, records, launchDependencies),
@@ -65,10 +66,11 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv) (de
 			records:  records,
 			delegate: attach.New(tmuxClient, attach.LookupEnv(lookupEnv)),
 		},
-		relauncher: fleet.NewShimRelauncher(tmuxClient, shimClient, records, inspector, launchDependencies),
-		hiddenShim: newProductionHiddenShimCommand(),
-		foreground: foreground,
-		getwd:      os.Getwd,
+		roleAttacher: roleClient,
+		relauncher:   fleet.NewShimRelauncher(tmuxClient, shimClient, records, inspector, launchDependencies),
+		hiddenShim:   newProductionHiddenShimCommand(),
+		foreground:   foreground,
+		getwd:        os.Getwd,
 	}, closeAll, nil
 }
 
@@ -199,13 +201,22 @@ func (a runtimeSessionAttacher) CheckEnvironment() error {
 }
 
 func (a runtimeSessionAttacher) ExecutePresentation(ctx context.Context, sessionName string, out io.Writer) (tmuxx.Session, error) {
-	if _, err := a.records.Read(sessionName); err != nil {
+	record, err := a.records.Read(sessionName)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return tmuxx.Session{}, &fleet.ShimFleetMissingError{Session: sessionName}
 		}
 		return tmuxx.Session{}, err
 	}
-	return a.delegate.ExecutePresentation(ctx, sessionName, out)
+	if record.Presentation == fleet.PresentationDetached {
+		return tmuxx.Session{}, &attach.NoPresentationError{Session: sessionName, Roster: append([]string(nil), record.Roster...)}
+	}
+	target, err := a.delegate.ExecutePresentation(ctx, sessionName, out)
+	var noPresentation *attach.NoPresentationError
+	if errors.As(err, &noPresentation) {
+		noPresentation.Roster = append([]string(nil), record.Roster...)
+	}
+	return target, err
 }
 
 func (a runtimeSessionAttacher) StillRunning(ctx context.Context, target tmuxx.Session) (bool, error) {

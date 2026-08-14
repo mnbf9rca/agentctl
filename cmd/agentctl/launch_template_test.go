@@ -38,7 +38,8 @@ func TestMergeLaunchTemplateD2AddsOverridesAndPinsUnionOrder(t *testing.T) {
 			{Name: "reviewer", Harness: config.HarnessClaude, Model: "sonnet-4"},
 			{Name: "worker", Harness: config.HarnessCodex, Model: "gpt-5", Effort: "max"},
 		}},
-		directory: &directory,
+		directory:    &directory,
+		presentation: fleet.PresentationDetached,
 		template: &launchTemplateProvenance{
 			path: "/fleet.json",
 			roles: []launchRoleProvenance{

@@ -22,7 +22,8 @@ func TestRunLaunchPrintsSkillSkewNoticesAfterShimSuccess(t *testing.T) {
 		launcher: &launcherStub{result: fleet.ShimLaunchResult{Directory: "/work", TotalRoles: 1}},
 		launch:   launchDependencies{skillHome: func() (string, error) { return home, nil }, skillVersion: func() string { return "0.3.0" }},
 	})
-	want := "agentctl: launched session \"fleet\"; 1 roles are ready\n" +
+	want := "agentctl: launched session \"fleet\" detached; 1 roles are ready\n" +
+		"agentctl: attach a role with: agentctl attach --session fleet ROLE\n" +
 		"skill: ~/.claude/skills/agentctl is 0.1.0; this binary is 0.3.0 — run 'agentctl skill install'\n" +
 		"skill: ~/.agents/skills/agentctl is 0.2.0; this binary is 0.3.0 — run 'agentctl skill install'\n"
 	if code != exitOK || stderr.String() != want {

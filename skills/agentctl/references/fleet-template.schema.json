@@ -16,6 +16,13 @@
       "type": "string",
       "pattern": "^/"
     },
+    "presentation": {
+      "type": "string",
+      "enum": [
+        "detached",
+        "tmux"
+      ]
+    },
     "roles": {
       "type": "array",
       "items": {

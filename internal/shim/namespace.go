@@ -789,6 +789,31 @@ func SocketPresent(path *RolePath) (bool, error) {
 	return true, nil
 }
 
+// AttachPresent verifies the descriptor-anchored attach pathname and reports
+// only an observed socket or observed absence. Every other topology or
+// filesystem result remains an error.
+func AttachPresent(path *RolePath) (bool, error) {
+	path.mu.Lock()
+	defer path.mu.Unlock()
+	if path.runtimeSession == nil {
+		return false, errors.New("runtime role path is closed")
+	}
+	if err := verifyRetainedRoot("runtime-session", filepath.Dir(path.Attach), path.runtimeSession); err != nil {
+		return false, err
+	}
+	info, err := path.runtimeSession.Lstat(path.Role + ".attach")
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return false, &SocketTopologyError{Path: path.Attach, Reason: "contains a non-socket artifact"}
+	}
+	return true, nil
+}
+
 func (n *Namespace) rolePath(session, role string, create bool) (*RolePath, error) {
 	lockPath, socketPath, attachPath, recordPath, err := n.validatedRolePaths(session, role)
 	if err != nil {

@@ -13,9 +13,10 @@ import (
 // launchConfiguration is the effective, validated input to fleet.Launch. The
 // template report is nil for the original flag-only launch form.
 type launchConfiguration struct {
-	fleet     config.FleetConfig
-	directory *string
-	template  *launchTemplateProvenance
+	fleet        config.FleetConfig
+	directory    *string
+	presentation fleet.Presentation
+	template     *launchTemplateProvenance
 }
 
 type launchTemplateProvenance struct {
@@ -40,6 +41,62 @@ type mergedTemplateRole struct {
 	templateIndex int
 	fromTemplate  bool
 	sources       launchRoleProvenance
+}
+
+type runTemplateRoleAbsentError struct {
+	path string
+	role string
+}
+
+type runTemplateRoleDuplicateError struct {
+	path string
+	role string
+}
+
+func (e *runTemplateRoleDuplicateError) Error() string {
+	return fmt.Sprintf("role %s appears more than once in template %s (run-template-role-duplicate)", e.role, e.path)
+}
+
+func (e *runTemplateRoleAbsentError) Error() string {
+	return fmt.Sprintf("role %s is not in template %s (run-template-role-absent)", e.role, e.path)
+}
+
+func selectRunTemplateRole(path, roleName string) (config.RoleConfig, error) {
+	document, err := launchtemplate.Decode(path)
+	if err != nil {
+		var templateErr *launchtemplate.Error
+		if errors.As(err, &templateErr) && templateErr.Reason == fmt.Sprintf("duplicate role %q", roleName) {
+			return config.RoleConfig{}, &runTemplateRoleDuplicateError{path: path, role: roleName}
+		}
+		return config.RoleConfig{}, err
+	}
+	for index, role := range document.Roles {
+		if role.Name != roleName {
+			continue
+		}
+		if role.Harness == nil {
+			return config.RoleConfig{}, &launchtemplate.Error{Path: path, Location: fmt.Sprintf("roles[%d].harness", index), Reason: "is required for the selected run role"}
+		}
+		harness, err := config.ParseHarness(*role.Harness)
+		if err != nil {
+			return config.RoleConfig{}, wrapTemplateValidation(path, fmt.Sprintf("roles[%d].harness", index), err)
+		}
+		selected := config.RoleConfig{Name: role.Name, Harness: harness}
+		if role.Model != nil {
+			if err := config.ValidateModelName(*role.Model); err != nil {
+				return config.RoleConfig{}, wrapTemplateValidation(path, fmt.Sprintf("roles[%d].model", index), err)
+			}
+			selected.Model = *role.Model
+		}
+		if role.Effort != nil {
+			if err := config.ValidateEffort(*role.Effort); err != nil {
+				return config.RoleConfig{}, wrapTemplateValidation(path, fmt.Sprintf("roles[%d].effort", index), err)
+			}
+			selected.Effort = *role.Effort
+		}
+		return selected, nil
+	}
+	return config.RoleConfig{}, &runTemplateRoleAbsentError{path: path, role: roleName}
 }
 
 func decodeLaunchTemplate(path *string) (*launchtemplate.Document, error) {
@@ -166,12 +223,23 @@ func mergeLaunchTemplate(document launchtemplate.Document, options launchOptions
 		provenance[index] = role.sources
 	}
 	return launchConfiguration{
-		fleet: effective, directory: directory,
+		fleet: effective, directory: directory, presentation: resolveLaunchPresentation(document.Presentation, options),
 		template: &launchTemplateProvenance{
 			path: document.Path, roles: provenance,
 			directorySupplied: document.Directory != nil, directoryFrom: directoryFrom,
 		},
 	}, nil
+}
+
+func resolveLaunchPresentation(templateValue *string, options launchOptions) fleet.Presentation {
+	presentation := fleet.PresentationDetached
+	if templateValue != nil {
+		presentation = fleet.Presentation(*templateValue)
+	}
+	if options.presentation != "" {
+		presentation = options.presentation
+	}
+	return presentation
 }
 
 func wrapTemplateValidation(path, location string, err error) error {

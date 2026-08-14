@@ -87,6 +87,50 @@ func TestRunLaunchFromTemplatePassesEffectiveFleetAndReportsProvenance(t *testin
 	}
 }
 
+func TestRunLaunchTemplatePresentationAndExplicitFlagPrecedence(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		presentation string
+		flag         string
+		want         fleet.Presentation
+	}{
+		{name: "absent defaults detached", want: fleet.PresentationDetached},
+		{name: "template detached", presentation: `,"presentation":"detached"`, want: fleet.PresentationDetached},
+		{name: "template tmux", presentation: `,"presentation":"tmux"`, want: fleet.PresentationTmux},
+		{name: "flag overrides template", presentation: `,"presentation":"tmux"`, flag: "--detached", want: fleet.PresentationDetached},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeLaunchTemplateFixture(t, t.TempDir(), "fleet.json", `{"version":1`+test.presentation+`,"roles":[{"role":"planner","harness":"claude"}]}`)
+			arguments := []string{"launch", "--session", "fleet", "--from-template", path}
+			if test.flag != "" {
+				arguments = append(arguments, test.flag)
+			}
+			launcher := &launcherStub{result: fleet.ShimLaunchResult{Directory: "/work", TotalRoles: 1}}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), arguments, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+			if code != exitOK || launcher.presentation != test.want {
+				t.Fatalf("code=%d presentation=%q stderr=%q, want %q", code, launcher.presentation, stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestRunLaunchTemplateRejectsInvalidPresentationBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{`"screen"`, `null`, `1`} {
+		path := writeLaunchTemplateFixture(t, t.TempDir(), "fleet.json", `{"version":1,"presentation":`+value+`,"roles":[{"role":"planner","harness":"claude"}]}`)
+		launcher := &launcherStub{}
+		var stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--from-template", path}, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+		if code != exitUsage || launcher.called || !strings.Contains(stderr.String(), "presentation") {
+			t.Fatalf("value=%s code=%d called=%t stderr=%q", value, code, launcher.called, stderr.String())
+		}
+	}
+}
+
 func writeLaunchTemplateFixture(t *testing.T, directory, name, contents string) string {
 	t.Helper()
 	path := filepath.Join(directory, name)

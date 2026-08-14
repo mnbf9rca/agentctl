@@ -3064,9 +3064,9 @@ string observed and then opened, rendered under the `%q` rule.
 | `attach-terminal-verify-failed` | 6 | `agentctl: opened a candidate terminal handle for role ROLE in session SESSION but could not complete STAGE: CAUSE; no attachment was made (attach-terminal-verify-failed)` |
 | `attach-terminal-reopen-mismatch` | 6 | `agentctl: opening observed terminal name PATH for role ROLE in session SESSION produced a candidate handle whose identity did not match the terminal this command is attached to; no attachment was made (attach-terminal-reopen-mismatch)` |
 | `attach-signal-observation-failed` | 6 | `agentctl: could not observe the current handling of SIGNAL for role ROLE in session SESSION: SIGNAL_OBSERVATION query failed: CAUSE; no attachment was made and this terminal was not modified (attach-signal-observation-failed)` |
-| `attach-terminal-mismatch` | 2 | `agentctl: refusing to attach role ROLE in session SESSION; standard input and standard output are different terminals (attach-terminal-mismatch)` |
-| `attach-not-a-terminal` | 2 | `agentctl: refusing to attach role ROLE in session SESSION; standard input and output must both be terminals (attach-not-a-terminal)` |
-| `attach-terminal-observation-failed` | 6 | `agentctl: could not observe the attaching terminal for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-observation-failed)` |
+| `attach-terminal-mismatch` | 2 | With a selected session: `agentctl: refusing to attach role ROLE in session SESSION; standard input and standard output are different terminals (attach-terminal-mismatch)`. Without one: `agentctl: refusing to attach role ROLE; standard input and standard output are different terminals (attach-terminal-mismatch)` |
+| `attach-not-a-terminal` | 2 | With a selected session: `agentctl: refusing to attach role ROLE in session SESSION; standard input and output must both be terminals (attach-not-a-terminal)`. Without one: `agentctl: refusing to attach role ROLE; standard input and output must both be terminals (attach-not-a-terminal)` |
+| `attach-terminal-observation-failed` | 6 | With a selected session: `agentctl: could not observe the attaching terminal for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-observation-failed)`. Without one: `agentctl: could not observe the attaching terminal for role ROLE: CAUSE; no attachment was made (attach-terminal-observation-failed)` |
 | `attach-terminal-raw-failed` | 6 | `agentctl: could not place the attaching terminal in raw mode for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-raw-failed)` |
 | `attach-terminal-stalled` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but this terminal stopped accepting output; WRITTEN of RAW received bytes reached it before the wait expired and the rest was not displayed (attach-terminal-stalled)` |
 | `attach-stdout-failed` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but writing its output to this terminal failed: CAUSE; WRITTEN of RAW received bytes reached the terminal (attach-stdout-failed)` |
@@ -3108,7 +3108,19 @@ because the client cannot report a fact it never received.
 
 Each refusal member selects the like-named `attach-` row, with one stated
 exception: `initial-size-failed` selects `attach-resize-failed`, whose template
-already renders exactly the size and cause it carries.
+already renders exactly the size and cause it carries. Failure to observe
+`LOCAL_PEERPID` on the connected attach socket selects
+`attach-peer-unobservable` before the client hello or any operator input is
+sent.
+
+Terminal checks precede session resolution. For every terminal-first row that
+can be selected by `PrepareRoleTerminal` — `attach-not-a-terminal`,
+`attach-terminal-mismatch`, and `attach-terminal-observation-failed` — the
+session clause is present exactly when a session was selected from explicit
+`--session`, a valid `AGENTCTL_SESSION`, or a successful resolver observation
+made only to populate the already-selected terminal outcome. Resolver failure
+never displaces that outcome; when no session was established, the closed
+no-session template is selected.
 `attach-presented-by-tmux`, `attach-presentation-missing`,
 `attach-listener-absent`, and `attach-listener-unobservable` are selected
 client-side before connecting and have no wire member — a row without a frame is
@@ -3125,9 +3137,9 @@ choice would discard whichever side noticed second.
 
 A single supersession renders as one line using the scalar `PRIOR_OUTCOME`, the
 closed set of each `DISPOSITION` member, each `REFUSAL` member,
-`transport-failed`, `locally-terminated` for a caught signal or panic **only when
-no base outcome had been observed**, and the local outcomes
-`terminal-raw-failed`, `stdout-failed`, and `terminal-stalled`.
+`answerer-disagreement`, `transport-failed`, `locally-terminated` for a caught
+signal or panic **only when no base outcome had been observed**, and the local
+outcomes `terminal-raw-failed`, `stdout-failed`, and `terminal-stalled`.
 `terminal-observation-failed` and `terminal-mismatch` are deliberately **not**
 members: the startup order guarantees both occur before any terminal mutation, so
 no restore failure can compose over them and a member with no reachable
