@@ -135,10 +135,11 @@ func TestResidentRelayReadEventNeverCrossesIntoLaterViewer(t *testing.T) {
 	if terminal, processErr := relay.processRead(residentReadEvent{count: 4, value: []byte("none")}); terminal || processErr != nil {
 		t.Fatalf("viewerless read event processing = terminal %v, error %v", terminal, processErr)
 	}
-	time.Sleep(10 * time.Millisecond)
-	if got := secondSink.bytes(); len(got) != 0 {
-		t.Fatalf("pre-admission output reached replacement viewer: %q", got)
+	sentinel := []byte("new")
+	if terminal, processErr := relay.processRead(residentReadEvent{count: len(sentinel), value: sentinel, viewer: second.state}); terminal || processErr != nil {
+		t.Fatalf("replacement read event processing = terminal %v, error %v", terminal, processErr)
 	}
+	waitResidentBytes(t, secondSink, sentinel)
 	second.Release()
 }
 
