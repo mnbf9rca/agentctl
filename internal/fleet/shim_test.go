@@ -595,7 +595,7 @@ func TestShimLauncherRecordsWholeFleetBeforeStartingShimWindows(t *testing.T) {
 		Stat:  func(string) (os.FileInfo, error) { return testFileInfo{mode: os.ModeDir | 0o755}, nil },
 	})
 
-	result, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	result, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	if err != nil {
 		t.Fatalf("Launch() error = %v", err)
 	}
@@ -612,6 +612,71 @@ func TestShimLauncherRecordsWholeFleetBeforeStartingShimWindows(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, wantEvents) {
 		t.Fatalf("launch events = %#v, want %#v", got, wantEvents)
+	}
+}
+
+// This catches a presentation-blind launcher that creates tmux windows or
+// requires tmux before directly spawning detached roles in durable roster
+// order, and a launcher that compares readiness to anything but spawn PID.
+func TestShimLauncherStartsDetachedRolesDirectlyInRosterOrder(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}, {pid: 5432, wait: make(chan error)}}}
+	records := &fakeShimFleetRecords{events: events}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001), runningShimResponse(5432, 7002)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	dependencies.Environment = func() []string {
+		return []string{"PATH=/usr/bin", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state"}
+	}
+	launcher := NewShimLauncher(nil, lifecycle, records, dependencies)
+
+	result, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
+	if err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	if result.Session.ID != "" || result.TotalRoles != 2 || result.Directory != "/repo path" {
+		t.Fatalf("Launch() = %#v, want detached no-presentation result for two roles", result)
+	}
+	if got, want := events.snapshot(), []string{
+		"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder",
+		"detached-start:planner", "observe:planner", "detached-start:coder", "observe:coder",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached launch events = %#v, want %#v", got, want)
+	}
+	if len(starter.requests) != 2 {
+		t.Fatalf("detached starts = %d, want 2", len(starter.requests))
+	}
+	if got := starter.processesSeen[0].waitCalls; got != 1 {
+		t.Fatalf("planner waiter registrations = %d, want one", got)
+	}
+	first := starter.requests[0]
+	if !reflect.DeepEqual(first.Argv, []string{"/current agentctl", "__shim", "--session", "fleet", "--role", "planner", "--harness", "claude", "--effort", "max"}) || first.Directory != "/repo path" || !reflect.DeepEqual(first.Environment, []string{"PATH=/usr/bin", "AGENTCTL_RUNTIME_ROOT=/runtime", "AGENTCTL_STATE_ROOT=/state"}) || first.Stdin == nil || first.Stdout == nil || first.Stderr == nil {
+		t.Fatalf("first detached request = %#v, want direct fully-typed planner invocation", first)
+	}
+}
+
+// This catches detached rollback treating a failed Start as creation
+// provenance and issuing a stop against a role for which it owns no process.
+func TestShimLauncherDetachedSecondStartFailureStopsOnlyStartedRole(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}, errs: []error{nil, errors.New("start failed")}}
+	records := &fakeShimFleetRecords{events: events}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}, stop: []shim.Response{stoppedShimResponse(7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	launcher := NewShimLauncher(nil, lifecycle, records, dependencies)
+
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationDetached, nil)
+	var rollback *ShimLaunchRollbackError
+	if !errors.As(err, &rollback) || rollback.CleanupErr != nil {
+		t.Fatalf("Launch() error = %T %v, want complete rollback after no-child start failure", err, err)
+	}
+	if got, want := events.snapshot(), []string{"self", "look:amq", "look:claude", "look:codex", "record:fleet:planner,coder", "detached-start:planner", "observe:planner", "detached-start:coder", "stop:planner", "record-remove"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("no-child rollback events = %#v, want %#v", got, want)
 	}
 }
 
@@ -698,7 +763,7 @@ func TestShimLauncherRetainsFleetRecordWhenPresentationFailureReturnsNoOwnerIDs(
 		shimLaunchTestDependencies(events),
 	)
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var rollback *ShimLaunchRollbackError
 	if !errors.As(err, &rollback) || rollback.CleanupErr == nil {
 		t.Fatalf("Launch() error = %T %v, want retained ambiguous-ownership rollback", err, err)
@@ -727,7 +792,7 @@ func TestShimLauncherRetainsReadyPeersWhenLaterPresentationFailureReturnsNoOwner
 	}
 	launcher := NewShimLauncher(presentation, lifecycle, records, shimLaunchTestDependencies(events))
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var rollback *ShimLaunchRollbackError
 	if !errors.As(err, &rollback) || rollback.CleanupErr == nil {
 		t.Fatalf("Launch() error = %T %v, want retained ambiguous-ownership rollback", err, err)
@@ -756,7 +821,7 @@ func TestShimLauncherRollbackStopsChildrenBeforeRemovingOwnedPresentationAndReco
 	}
 	launcher := NewShimLauncher(presentation, lifecycle, records, shimLaunchTestDependencies(events))
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var rollback *ShimLaunchRollbackError
 	if !errors.As(err, &rollback) {
 		t.Fatalf("Launch() error = %T %v, want *ShimLaunchRollbackError", err, err)
@@ -795,7 +860,7 @@ func TestShimLauncherRetainsEverythingWhenRollbackDoesNotObserveChildExit(t *tes
 	}
 	launcher := NewShimLauncher(presentation, lifecycle, records, shimLaunchTestDependencies(events))
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var rollback *ShimLaunchRollbackError
 	if !errors.As(err, &rollback) || rollback.CleanupErr == nil {
 		t.Fatalf("Launch() error = %T %v, want incomplete *ShimLaunchRollbackError", err, err)
@@ -829,7 +894,7 @@ func TestShimLauncherRetainsEverythingWhenRollbackExitWasObservedWithoutSignalAt
 	}
 	launcher := NewShimLauncher(presentation, lifecycle, records, shimLaunchTestDependencies(events))
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var rollback *ShimLaunchRollbackError
 	if !errors.As(err, &rollback) || rollback.CleanupErr == nil {
 		t.Fatalf("Launch() error = %T %v, want incomplete rollback without signal-attempt fact", err, err)
@@ -853,7 +918,7 @@ func TestShimLauncherRecordCommitUncertainStopsBeforePresentationMutation(t *tes
 	lifecycle := &fakeShimLifecycle{events: events}
 	launcher := NewShimLauncher(presentation, lifecycle, records, shimLaunchTestDependencies(events))
 
-	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), nil)
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
 	var uncertain *shim.RecordCommitUncertainError
 	if !errors.As(err, &uncertain) {
 		t.Fatalf("Launch() error = %T %v, want *shim.RecordCommitUncertainError", err, err)
@@ -1020,6 +1085,40 @@ type fakeShimLifecycle struct {
 	observe []shim.Response
 	stop    []shim.Response
 }
+
+type fakeDetachedShimStarter struct {
+	events        *shimEventLog
+	processes     []*fakeDetachedShimProcess
+	processesSeen []*fakeDetachedShimProcess
+	requests      []DetachedShimRequest
+	errs          []error
+}
+
+func (f *fakeDetachedShimStarter) Start(request DetachedShimRequest) (DetachedShimProcess, error) {
+	f.requests = append(f.requests, request)
+	role := request.Argv[5]
+	f.events.add("detached-start:" + role)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	process := f.processes[0]
+	f.processes = f.processes[1:]
+	f.processesSeen = append(f.processesSeen, process)
+	return process, nil
+}
+
+type fakeDetachedShimProcess struct {
+	pid       int
+	wait      chan error
+	waitCalls int
+}
+
+func (p *fakeDetachedShimProcess) PID() int           { return p.pid }
+func (p *fakeDetachedShimProcess) Wait() <-chan error { p.waitCalls++; return p.wait }
 
 func (f *fakeShimLifecycle) Observe(_ context.Context, _, role string) (shim.Response, error) {
 	f.events.add("observe:" + role)

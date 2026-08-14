@@ -123,7 +123,7 @@ type roleRelauncher interface {
 }
 
 type shimFleetLauncher interface {
-	Launch(context.Context, string, config.FleetConfig, *string) (fleet.ShimLaunchResult, error)
+	Launch(context.Context, string, config.FleetConfig, fleet.Presentation, *string) (fleet.ShimLaunchResult, error)
 }
 
 type hiddenShimCommand interface {
@@ -374,7 +374,7 @@ func runWithDependencies(
 		if guarded, code := checkSessionStateRoot(stderr, deps.rootGuard, "launch", options.session); guarded {
 			return code
 		}
-		launched, err := deps.launcher.Launch(ctx, options.session, launchConfig.fleet, launchConfig.directory)
+		launched, err := deps.launcher.Launch(ctx, options.session, launchConfig.fleet, fleet.PresentationTmux, launchConfig.directory)
 		if err != nil {
 			return shimLaunchError(stderr, options.session, launchConfig.fleet.Roles[0].Name, err)
 		}

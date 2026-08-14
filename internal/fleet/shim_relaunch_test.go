@@ -61,28 +61,30 @@ func TestShimRelaunchRefusesEveryNonAbsentRuntimeStateBeforeMutation(t *testing.
 	}
 }
 
-// This catches the pre-Task-4 relaunch path creating a tmux presentation for
-// a run-created detached fleet, which cannot supply an interaction route.
-func TestShimRelaunchTransitionallyRefusesDetachedFleetBeforeRuntimeOrTmuxMutation(t *testing.T) {
+// This catches a relaunch implementation that infers presentation from tmux
+// availability instead of recreating a durable detached role directly.
+func TestShimRelaunchRecreatesDetachedFleetWithoutConsultingTmux(t *testing.T) {
 	t.Parallel()
 
 	events := &shimEventLog{}
 	record := mustShimFleetRecord(t, "fleet", "/repo")
 	record.Presentation = PresentationDetached
 	records := &fakeShimFleetRecords{events: events, record: record}
-	presentation := &fakeShimPresentation{events: events}
-	relauncher := NewShimRelauncher(presentation, &fakeShimLifecycle{events: events}, records, &fakeShimRoleInspector{events: events}, shimLaunchTestDependencies(events))
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, lifecycle, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
 
-	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
-	var refusal *ShimDetachedRelaunchUnsupportedError
-	if !errors.As(err, &refusal) {
-		t.Fatalf("Relaunch() error = %T %v, want detached transitional refusal", err, err)
+	result, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
 	}
-	if got, want := refusal.Error(), `durable fleet presentation is detached; this build cannot recreate a detached role`; got != want {
-		t.Fatalf("refusal error = %q, want %q", got, want)
+	if result.WindowID != "" || result.PaneID != "" || result.PresentationSessionID != "" {
+		t.Fatalf("Relaunch() = %#v, want no tmux presentation IDs", result)
 	}
-	if got, want := events.snapshot(), []string{"record-read:fleet"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("detached relaunch events = %#v, want no runtime or tmux mutation %#v", got, want)
+	if got, want := events.snapshot(), []string{"record-read:fleet", "inspect:planner", "self", "look:amq", "look:claude", "detached-start:planner", "observe:planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached relaunch events = %#v, want direct no-tmux recreation %#v", got, want)
 	}
 }
 

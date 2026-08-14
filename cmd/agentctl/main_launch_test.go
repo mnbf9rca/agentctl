@@ -25,7 +25,7 @@ func TestRunLaunchPassesValidatedFleetToShimAndReportsReadiness(t *testing.T) {
 		"launch", "--session", "fleet", "--roles", "planner:claude,coder:codex", "--models", "coder:gpt-5.6-sol", "--dir", directory,
 	}, &stdout, &stderr, dependencies{launcher: launcher})
 	wantFleet := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}, {Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol"}}}
-	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.directory == nil || *launcher.directory != directory {
+	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.presentation != fleet.PresentationTmux || launcher.directory == nil || *launcher.directory != directory {
 		t.Fatalf("code=%d session=%q fleet=%#v directory=%v stderr=%q", code, launcher.session, launcher.fleet, launcher.directory, stderr.String())
 	}
 	if stderr.String() != "agentctl: launched session \"fleet\"; 2 roles are ready\n" {
@@ -76,16 +76,17 @@ func TestRunLaunchRejectsInvalidConfigurationBeforeShimLauncher(t *testing.T) {
 }
 
 type launcherStub struct {
-	result    fleet.ShimLaunchResult
-	err       error
-	called    bool
-	session   string
-	fleet     config.FleetConfig
-	directory *string
+	result       fleet.ShimLaunchResult
+	err          error
+	called       bool
+	session      string
+	fleet        config.FleetConfig
+	presentation fleet.Presentation
+	directory    *string
 }
 
-func (l *launcherStub) Launch(_ context.Context, sessionName string, fleetConfig config.FleetConfig, directory *string) (fleet.ShimLaunchResult, error) {
+func (l *launcherStub) Launch(_ context.Context, sessionName string, fleetConfig config.FleetConfig, presentation fleet.Presentation, directory *string) (fleet.ShimLaunchResult, error) {
 	l.called = true
-	l.session, l.fleet, l.directory = sessionName, fleetConfig, directory
+	l.session, l.fleet, l.presentation, l.directory = sessionName, fleetConfig, presentation, directory
 	return l.result, l.err
 }

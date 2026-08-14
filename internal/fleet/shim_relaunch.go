@@ -210,17 +210,6 @@ func (e *ShimRelaunchRefusalError) Error() string {
 
 func (e *ShimRelaunchRefusalError) Unwrap() error { return e.Cause }
 
-// ShimDetachedRelaunchUnsupportedError is a transitional fail-closed refusal.
-// This build can persist and run detached fleets but cannot yet recreate one.
-type ShimDetachedRelaunchUnsupportedError struct {
-	Session string
-	Role    string
-}
-
-func (e *ShimDetachedRelaunchUnsupportedError) Error() string {
-	return "durable fleet presentation is detached; this build cannot recreate a detached role"
-}
-
 // ShimRelaunchResult reports the created presentation only as optional UI
 // facts; readiness came from the shim runtime response.
 type ShimRelaunchResult struct {
@@ -281,9 +270,6 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 	if !ok {
 		return ShimRelaunchResult{}, &UnknownRoleError{Role: request.Role, Roster: joinShimRoster(record.Roster)}
 	}
-	if record.Presentation == PresentationDetached {
-		return ShimRelaunchResult{}, &ShimDetachedRelaunchUnsupportedError{Session: session, Role: request.Role}
-	}
 	observation, err := r.inspector.Inspect(ctx, session, request.Role)
 	if err != nil {
 		return ShimRelaunchResult{}, err
@@ -304,7 +290,7 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 		}
 	}
 	executable, err := preflight.CheckShimExecutables(
-		config.FleetConfig{Roles: []config.RoleConfig{role}}, true, r.launcher.lookPath, r.launcher.executable,
+		config.FleetConfig{Roles: []config.RoleConfig{role}}, record.Presentation == PresentationTmux, r.launcher.lookPath, r.launcher.executable,
 	)
 	if err != nil {
 		return ShimRelaunchResult{}, err
@@ -328,46 +314,57 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 			}
 		}
 	}
-	presentationSession, present, err := r.launcher.presentation.FindPresentationSession(ctx, session)
-	if err != nil {
-		return ShimRelaunchResult{}, err
-	}
-	command := shimWindowCommand(executable, session, role)
 	var windowID tmuxx.WindowID
 	var paneID tmuxx.PaneID
-	var panePID int
-	createdSessionID := presentationSession.ID
-	if present {
-		created, err := r.launcher.presentation.CreatePresentationWindow(ctx, presentationSession.ID, role.Name, directory, command)
+	var createdSessionID tmuxx.SessionID
+	present := false
+	var readyErr error
+	if record.Presentation == PresentationDetached {
+		process, err := r.launcher.startDetached(executable, session, directory, role)
 		if err != nil {
 			return ShimRelaunchResult{}, err
 		}
-		windowID, paneID, panePID = created.WindowID, created.PaneID, created.PanePID
+		readyErr = r.launcher.waitDetachedReady(ctx, session, role.Name, process)
 	} else {
-		created, err := r.launcher.presentation.CreatePresentationSession(ctx, session, role.Name, directory, command)
+		presentationSession, found, err := r.launcher.presentation.FindPresentationSession(ctx, session)
 		if err != nil {
 			return ShimRelaunchResult{}, err
 		}
-		createdSessionID = created.SessionID
-		windowID, paneID, panePID = created.WindowID, created.PaneID, created.PanePID
+		present, createdSessionID = found, presentationSession.ID
+		command := shimWindowCommand(executable, session, role)
+		var panePID int
+		if present {
+			created, err := r.launcher.presentation.CreatePresentationWindow(ctx, presentationSession.ID, role.Name, directory, command)
+			if err != nil {
+				return ShimRelaunchResult{}, err
+			}
+			windowID, paneID, panePID = created.WindowID, created.PaneID, created.PanePID
+		} else {
+			created, err := r.launcher.presentation.CreatePresentationSession(ctx, session, role.Name, directory, command)
+			if err != nil {
+				return ShimRelaunchResult{}, err
+			}
+			createdSessionID, windowID, paneID, panePID = created.SessionID, created.WindowID, created.PaneID, created.PanePID
+		}
+		readyErr = r.launcher.waitReady(ctx, session, role.Name, panePID)
 	}
-	if err := r.launcher.waitReady(ctx, session, role.Name, panePID); err != nil {
+	if readyErr != nil {
 		var disagreement *ShimReadyOwnerDisagreementError
-		if errors.As(err, &disagreement) {
+		if errors.As(readyErr, &disagreement) {
 			var cleanupErr error
-			if present {
+			if record.Presentation == PresentationTmux && present {
 				cleanupErr = r.launcher.presentation.RemovePresentationWindow(ctx, windowID)
-			} else {
+			} else if record.Presentation == PresentationTmux {
 				cleanupErr = r.launcher.presentation.RemovePresentationSession(ctx, createdSessionID)
 			}
 			return ShimRelaunchResult{}, &ShimRelaunchRefusalError{
 				Session: session, Role: role.Name, Outcome: shim.OutcomeConcurrentContender,
-				Cause: errors.Join(err, cleanupErr), Observation: ShimRoleObservation{
-					Outcome: shim.OutcomeConcurrentContender, ShimPID: disagreement.ObservedPID, Cause: errors.Join(err, cleanupErr),
+				Cause: errors.Join(readyErr, cleanupErr), Observation: ShimRoleObservation{
+					Outcome: shim.OutcomeConcurrentContender, ShimPID: disagreement.ObservedPID, Cause: errors.Join(readyErr, cleanupErr),
 				},
 			}
 		}
-		return ShimRelaunchResult{}, err
+		return ShimRelaunchResult{}, readyErr
 	}
 	if shimRelaunchHasOverride(request) {
 		replacement := shimFleetRecordWithRelaunchOverride(record, role, directory)
@@ -376,7 +373,7 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 			if errors.As(err, &uncertain) {
 				return ShimRelaunchResult{}, err
 			}
-			cleanupErr := r.rollbackOwnedRole(ctx, session, role.Name, present, windowID, createdSessionID)
+			cleanupErr := r.rollbackOwnedRole(ctx, session, role.Name, record.Presentation, present, windowID, createdSessionID)
 			return ShimRelaunchResult{}, &ShimRelaunchRollbackError{
 				Session: session, Role: role.Name, Cause: err, CleanupErr: cleanupErr,
 			}
@@ -410,6 +407,7 @@ func (r ShimRelauncher) rollbackOwnedRole(
 	ctx context.Context,
 	session string,
 	role string,
+	presentation Presentation,
 	presentationExisted bool,
 	windowID tmuxx.WindowID,
 	sessionID tmuxx.SessionID,
@@ -420,6 +418,9 @@ func (r ShimRelauncher) rollbackOwnedRole(
 	}
 	if !shimStopObservedChildExit(response) {
 		return fmt.Errorf("stop reported %s without separate SIGHUP-attempt and observed-child-exit facts", response.Outcome)
+	}
+	if presentation == PresentationDetached {
+		return nil
 	}
 	if presentationExisted {
 		return r.launcher.presentation.RemovePresentationWindow(ctx, windowID)
