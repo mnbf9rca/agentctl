@@ -2895,15 +2895,18 @@ signals actually handled:
   real loss of provenance, accepted because a terminal left in raw mode is the
   fact the operator must act on first.
 - A signal arriving once part of a selected row has already reached the terminal
-  does not produce a half-written row followed by silence **where finishing the
-  row is bounded** — that is, when the row is going to the client's own terminal
-  handle, which is non-blocking and therefore completes or gives up within
-  `AttachTailFlushTimeout`. There the row is finished and the signal follows.
-  This promise does **not** extend to a redirected sink: that write may block
-  indefinitely and cannot be interrupted, so the owner acts immediately and the
-  sink is left holding whatever it holds, which §15.8 records as one of the three
-  permitted prefix causes. Promising a finished row on a path where finishing is
-  unbounded would be promising to wait forever.
+  does not **truncate the emission attempt early**. On the client's own terminal
+  handle, which is non-blocking, the attempt runs to its own bound
+  (`AttachReportTimeout`) and the signal follows it; the signal does not cut it
+  short. What lands may still be a byte-exact prefix — a non-blocking write can
+  report partial progress and then `EAGAIN`, so a bounded attempt is not a
+  completed one, and saturation remains one of the three permitted prefix causes.
+  The promise is about ordering, not completeness: the operator does not get a
+  row interrupted by its own signal handler. On a redirected sink the attempt is
+  not bounded at all — that write may block indefinitely and cannot be
+  interrupted — so the owner acts immediately and the sink is left holding
+  whatever it holds. Promising a *finished* row on either path would be false on
+  the first and unbounded on the second.
 - Exactly **one** termios restoration is attempted per attachment, on every path.
 
 **The relay, and what it costs.** The client relays every byte in both
@@ -2982,8 +2985,10 @@ other child exit; nothing about the stop path narrows them.
 - **active → stopping → stopped.** Observed child exit requests release. If it
   wins, the §15.11.4 tail flush runs before anything is closed, so the stream
   closes only once every byte counted for that flush has been written to the
-  data stream or the flush ended; the client reports `attach-viewer-ended`, or `attach-tail-undelivered`
-  when a tail was dropped.
+  data stream or the flush ended; the client reports whichever child-exit
+  disposition that flush produced — `attach-viewer-ended` when it completed,
+  `attach-tail-undelivered` when a counted tail was dropped, or either
+  `tail-unconfirmed` row when the flush ended without establishing its cutoff.
 - **active → stopping → active** (a stop that did not end the child). The
   listener resumes accepting, and the admitted viewer's input is admitted again.
   No viewer is evicted by the round trip.
@@ -3241,11 +3246,15 @@ the alternatives out, are recorded in
 - **Diagnostic routing follows the destination.** `agentctl attach ROLE 2>file`
   puts every row in the file, including when the relay terminal has stalled;
   rows raised before any private handle exists route the same way.
-- **The signal/emission promise is asserted per path.** A signal arriving
-  mid-row on the client's own terminal handle yields the complete row and then
-  the signal; the same signal on a redirected sink that will not drain yields
-  immediate owner action and a sink holding nothing, a byte-exact prefix, or the
-  whole row — and the test asserts no full-row guarantee there.
+- **The signal/emission promise is asserted as ordering, not completeness.** A
+  signal arriving mid-row on the client's own terminal handle is asserted not to
+  cut the attempt short: the attempt runs to `AttachReportTimeout` and the signal
+  follows, with what landed asserted to be the whole row **or** a byte-exact
+  prefix — never a row interrupted mid-write by the handler, and never asserted
+  complete, since a saturated terminal can leave a prefix within the bound. On a
+  redirected sink that will not drain, the same signal is asserted to yield
+  immediate owner action and a sink holding nothing, a prefix, or the whole row,
+  with no bound and no full-row guarantee.
 - **Emission shapes.** Where the destination is the saturated relay terminal,
   emitted bytes are asserted to be a byte-exact prefix of the selected template,
   never a paraphrase or marker; emission is asserted skipped when
