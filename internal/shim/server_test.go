@@ -129,6 +129,92 @@ func TestServerRunServesClosedOperationsAndCleansOnlyAfterObservedAbsence(t *tes
 	}
 }
 
+func TestServerRunDetachedServesAttachAndControlBeforeCleanExit(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	child := newServerRunChild(t, 457)
+	writer := &recordingOperationWriter{}
+	terminal := &serverRunTerminal{}
+	deps := lifecycleDependencies{
+		rolePath: namespace.RolePath, pid: os.Getpid,
+		nonce: func() (string, error) { return "server-run-detached", nil },
+		acquireClaim: func(path *RolePath, advisory Advisory) (claimHandle, error) {
+			return AcquireClaim(path, advisory)
+		},
+		writeRecord: WriteRecord,
+		startToken:  func(int) (StartToken, error) { return StartToken{Sec: 1, Usec: 3}, nil },
+		starter: lifecycleStarterFunc(func(context.Context, ptyx.StartRequest) (ptyx.Child, error) {
+			return child, nil
+		}),
+		listen:       listenRoleSocket,
+		listenAttach: listenRoleSocket,
+		newMasterEndpoint: func(*os.File) (ptyx.ContextReadWriter, func() error, error) {
+			return &lifecycleFakeEndpoint{}, func() error { return nil }, nil
+		},
+		newResidentRelay: func(*os.File, ptyx.ContextWriter) (lifecycleResidentRelay, func() error, error) {
+			reader := &serverResidentReader{}
+			return &serverTestResidentRelay{ResidentRelay: ptyx.NewResidentRelay(reader, writer)}, func() error { return nil }, nil
+		},
+		terminal: terminal,
+	}
+	server := &Server{
+		lifecycle: roleLifecycle{deps: deps},
+		observeProcess: func(_ int, token StartToken) ProcessResult {
+			select {
+			case <-child.done:
+				return ProcessResult{Observation: ProcessAbsent}
+			default:
+				observed := token
+				return ProcessResult{Observation: ProcessPresentMatch, ObservedToken: &observed}
+			}
+		},
+		resizeEvents: func() (<-chan os.Signal, func()) { return make(chan os.Signal), func() {} },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- server.Run(ctx, RunRequest{
+			Session: "fleet", Role: "planner", Harness: "codex", OperatorMode: OperatorDetached,
+			Environment: []string{"PATH=/usr/bin"}, InitialSize: ptyx.WindowSize{Rows: 24, Cols: 80},
+		})
+	}()
+
+	client := NewClient(namespace)
+	waitServerRunning(t, client, "fleet", "planner")
+	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: base + "/runtime/fleet/planner.attach", Net: "unix"})
+	if err != nil {
+		t.Fatalf("DialUnix(attach) error = %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	admitAttachClient(t, connection)
+	writeAttachFrame(t, connection, AttachFrame{Kind: AttachFrameViewerInput, Data: []byte("typed")})
+	waitAttachCondition(t, func() bool {
+		writer.mu.Lock()
+		defer writer.mu.Unlock()
+		return reflect.DeepEqual(writer.calls, [][]byte{[]byte("typed")})
+	})
+	if response, err := client.Stop(context.Background(), "fleet", "planner"); err != nil || response.Outcome != OutcomeStopChildExited {
+		t.Fatalf("Stop() = %#v, %v", response, err)
+	}
+	final := readAttachControlKind(t, connection, AttachControlFinal)
+	if final.Disposition != AttachDispositionChildExited {
+		t.Fatalf("attach final = %#v, want child-exited", final)
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Server.Run() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("detached Server.Run() did not cleanly stop")
+	}
+}
+
 func TestServerRunReturnsTypedProtocolFailureAfterStoppedChildResponseWriteFault(t *testing.T) {
 	base := shortTempDir(t)
 	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
@@ -252,7 +338,7 @@ func TestShimServerRefusesIdentityAndReadinessBeforePTYMutation(t *testing.T) {
 	writer := &recordingOperationWriter{}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error { return nil }),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error { return nil }),
 	}
 
 	wrongIdentity := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"other","role":"planner","operation":"clear"}`))
@@ -279,7 +365,7 @@ func TestShimServerControlOperationsUseNoPTYPath(t *testing.T) {
 	stopResponse := Response{Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID, SignalAttempted: &attempted, Signal: &signal, ChildExitObserved: &exitObserved}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: shimPID, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 		observe:    func() Response { return observeResponse },
 		stop:       func(context.Context) (Response, error) { return stopResponse, nil },
 	}
@@ -306,7 +392,7 @@ func TestShimStopWaitsForInflightPayloadReportAndRefusesLaterMutatingOperationsW
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 			close(payloadStarted)
 			<-releasePayload
 			return nil
@@ -386,7 +472,7 @@ func TestShimPayloadParkedBeforeStopRefusesAfterStopBeginsWithoutPTYWrite(t *tes
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 			firstPayload.Do(func() { close(firstPayloadStarted) })
 			<-releaseFirstPayload
 			return nil
@@ -989,7 +1075,7 @@ func TestShimServerVersionAndRegistryRefusalsPrecedeMutation(t *testing.T) {
 	writer := &recordingOperationWriter{}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 	}
 
 	skew := exchangeWithHandler(t, handler, []byte(`{"version":2,"session":"fleet","role":"planner","operation":"invented"}`))
@@ -1099,6 +1185,54 @@ func TestShimRuntimeCleanupPersistsCleanupFailedFactsBeforeReleasingClaim(t *tes
 	}
 }
 
+func TestShimRuntimeCleanupReportsRetainedObservationToPinnedAttachment(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, Advisory{Version: 1, ShimPID: os.Getpid(), Nonce: "attach-cleanup", StateRoot: path.StateRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := StartToken{Sec: 1, Usec: 2}
+	record, err := NewChildStartingRecord(path.Session, path.Role, os.Getpid(), "attach-cleanup").WithChild(456, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRecord(path, record); err != nil {
+		t.Fatal(err)
+	}
+	relay, stopRelay := newAttachTestRelay(t)
+	defer stopRelay()
+	attachment := newAttachServer(attachServerConfig{
+		Session: path.Session, Role: path.Role, ShimUID: 501,
+		Relay: relay, Input: newRoleInputWriter(&recordingOperationWriter{}),
+		PeerIdentity: func(net.Conn) (attachPeerIdentity, error) {
+			return attachPeerIdentity{PID: 101, UID: 501}, nil
+		},
+		Resize: func(ptyx.WindowSize) error { return nil },
+	})
+	viewer, viewerDone := startAttachConnection(t, attachment)
+	readAttachControlKind(t, viewer, AttachControlShimHello)
+	writeAttachControl(t, viewer, AttachControl{Version: 1, Kind: AttachControlHello, Session: path.Session, Role: path.Role, Rows: 24, Cols: 80})
+	readAttachControlKind(t, viewer, AttachControlAdmitted)
+	runtime := &roleRuntime{path: path, claim: claim, record: record, child: &stopRaceChild{pid: 456}}
+	server := &Server{
+		cleanupTimeout: -time.Nanosecond,
+		observeProcess: func(int, StartToken) ProcessResult {
+			return ProcessResult{Observation: ProcessPresentMatch}
+		},
+	}
+	cleanupDone := make(chan runtimeCleanupResult, 1)
+	go func() { cleanupDone <- server.cleanupRuntimeWithAttachment(runtime, false, attachment, nil) }()
+	final := readAttachControlKind(t, viewer, AttachControlFinal)
+	if final.Disposition != AttachDispositionCleanupRetained {
+		t.Fatalf("cleanup final = %#v, want cleanup-retained", final)
+	}
+	result := <-cleanupDone
+	if result.Observation != ProcessPresentMatch {
+		t.Fatalf("cleanup observation = %q, want present-match", result.Observation)
+	}
+	waitAttachServer(t, viewerDone)
+}
+
 func exchangeWithHandler(t *testing.T, handler *requestHandler, request []byte) Response {
 	t.Helper()
 	client, server := net.Pipe()
@@ -1133,7 +1267,7 @@ func TestShimPayloadOperationWritesClosedSequenceAndReportsOnlyObservedFacts(t *
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
 	waits := make([]time.Duration, 0, 1)
-	executor := newOperationExecutor(spec, writer, func(_ context.Context, duration time.Duration) error {
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(_ context.Context, duration time.Duration) error {
 		waits = append(waits, duration)
 		return nil
 	})
@@ -1156,7 +1290,7 @@ func TestShimPayloadOperationWritesClosedSequenceAndReportsOnlyObservedFacts(t *
 func TestShimControlOperationsNeverReachThePTYWriter(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, nil)
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), nil)
 
 	for _, operation := range []string{"observe", "stop"} {
 		if _, err := executor.Deliver(context.Background(), operation); !errors.Is(err, ErrOperationHasNoPayload) {
@@ -1171,7 +1305,7 @@ func TestShimControlOperationsNeverReachThePTYWriter(t *testing.T) {
 func TestShimPayloadCancellationReportsResidueWithoutSubmit(t *testing.T) {
 	spec, _ := harness.Lookup("claude")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 		return context.Canceled
 	})
 
@@ -1193,7 +1327,7 @@ func TestShimClientDisconnectCancelsDeliveryBeforeSubmit(t *testing.T) {
 	waiting := make(chan struct{})
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456, ready: true,
-		operations: newOperationExecutor(spec, writer, func(ctx context.Context, _ time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(ctx context.Context, _ time.Duration) error {
 			close(waiting)
 			<-ctx.Done()
 			return ctx.Err()
@@ -1237,7 +1371,7 @@ func TestShimCompletedRequestDeadlineDoesNotCancelLongStop(t *testing.T) {
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 		stop: func(ctx context.Context) (Response, error) {
 			select {
 			case <-time.After(ShimProtocolIOTimeout + 100*time.Millisecond):
@@ -1284,7 +1418,7 @@ func TestShimCompletedRequestDeadlineDoesNotCancelLongStop(t *testing.T) {
 func TestShimConcurrentPayloadOperationsRemainWholeSequences(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, func(context.Context, time.Duration) error { return nil })
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error { return nil })
 
 	start := make(chan struct{})
 	errorsSeen := make(chan error, 2)
@@ -1311,9 +1445,127 @@ func TestShimConcurrentPayloadOperationsRemainWholeSequences(t *testing.T) {
 	}
 }
 
+func TestShimViewerInputCannotSplitDeliveryTransaction(t *testing.T) {
+	spec, _ := harness.Lookup("codex")
+	writer := &recordingOperationWriter{}
+	input := newRoleInputWriter(writer)
+	waiting := make(chan struct{})
+	releaseWait := make(chan struct{})
+	executor := newOperationExecutor(spec, input, func(context.Context, time.Duration) error {
+		close(waiting)
+		<-releaseWait
+		return nil
+	})
+
+	deliveryDone := make(chan error, 1)
+	go func() {
+		_, err := executor.Deliver(context.Background(), "clear")
+		deliveryDone <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not reach its transaction wait")
+	}
+	viewerDone := make(chan error, 1)
+	go func() {
+		_, err := input.WriteViewer(context.Background(), []byte("viewer"))
+		viewerDone <- err
+	}()
+	select {
+	case err := <-viewerDone:
+		t.Fatalf("viewer input split the delivery transaction: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseWait)
+	if err := <-deliveryDone; err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+	if err := <-viewerDone; err != nil {
+		t.Fatalf("WriteViewer() error = %v", err)
+	}
+	if got, want := writer.calls, [][]byte{{0x15}, []byte("/clear"), {'\r'}, []byte("viewer")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PTY writes = %#v, want indivisible delivery followed by viewer chunk %#v", got, want)
+	}
+}
+
+func TestShimViewerInputRechecksCancellationAndRolePhaseAtCommit(t *testing.T) {
+	writer := &recordingOperationWriter{}
+	active := true
+	input := newRoleInputWriter(writer, func() bool { return active })
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := input.WriteViewer(cancelled, []byte("departed")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled WriteViewer() error = %v, want context.Canceled", err)
+	}
+	active = false
+	if count, err := input.WriteViewer(context.Background(), []byte("stopping")); err != nil || count != len("stopping") {
+		t.Fatalf("stopping WriteViewer() = %d, %v, want consumed discard", count, err)
+	}
+	if len(writer.calls) != 0 {
+		t.Fatalf("disallowed viewer bytes reached PTY: %#v", writer.calls)
+	}
+}
+
+func TestShimStopReportsPendingWhileWaitingForViewerCommitBarrier(t *testing.T) {
+	writer := &residentGateWriterForShim{entered: make(chan struct{}), release: make(chan struct{})}
+	handler := &requestHandler{}
+	input := newRoleInputWriter(writer, func() bool { return handler.operationPhase() == shimOperationActive })
+	handler.inputBarrier = input.(roleInputBarrier)
+	viewerDone := make(chan error, 1)
+	go func() {
+		_, err := input.WriteViewer(context.Background(), []byte("viewer"))
+		viewerDone <- err
+	}()
+	<-writer.entered
+	stopDone := make(chan error, 1)
+	go func() {
+		_, admitted, err := handler.beginStop(context.Background())
+		if !admitted && err == nil {
+			err = errors.New("stop transition was not admitted")
+		}
+		stopDone <- err
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("stop crossed an in-flight viewer commit: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if handler.operationPhase() != shimOperationStopping {
+		t.Fatalf("pending stop phase = %q, want stopping", handler.operationPhase())
+	}
+	close(writer.release)
+	if err := <-viewerDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatal(err)
+	}
+	if handler.operationPhase() != shimOperationStopping {
+		t.Fatalf("phase = %q, want stopping", handler.operationPhase())
+	}
+}
+
 type recordingOperationWriter struct {
 	mu    sync.Mutex
 	calls [][]byte
+}
+
+type residentGateWriterForShim struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *residentGateWriterForShim) Write(ctx context.Context, value []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-w.release:
+		return len(value), nil
+	}
 }
 
 type stopRaceChild struct{ pid int }
@@ -1372,6 +1624,33 @@ func (c *serverRunChild) CloseMaster() error { return nil }
 
 type serverRunRelay struct {
 	writer operationWriter
+}
+
+type serverResidentReader struct{}
+
+func (*serverResidentReader) Read(ctx context.Context, _ []byte) (int, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+type serverTestResidentRelay struct{ *ptyx.ResidentRelay }
+
+func (*serverTestResidentRelay) MarkReady(ptyx.TerminalState) error { return nil }
+func (r *serverTestResidentRelay) Writer() operationWriter          { return r.ResidentRelay.Writer() }
+
+func waitServerRunning(t *testing.T, client *Client, session, role string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response, err := client.Observe(context.Background(), session, role)
+		if err == nil && response.Outcome == OutcomeRunning {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not become ready: response=%#v error=%v", response, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (*serverRunRelay) Run(ctx context.Context) error      { <-ctx.Done(); return ctx.Err() }

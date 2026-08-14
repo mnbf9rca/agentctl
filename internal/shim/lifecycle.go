@@ -31,7 +31,18 @@ type RunRequest struct {
 	OperatorOutput ptyx.ContextWriter
 	OuterTerminal  *os.File
 	OuterState     ptyx.TerminalState
+	OperatorMode   OperatorMode
 }
+
+// OperatorMode is selected by trusted launcher wiring. It is never decoded
+// from the hidden shim argv or any attach/control request.
+type OperatorMode uint8
+
+const (
+	OperatorForeground OperatorMode = iota
+	OperatorTmux
+	OperatorDetached
+)
 
 // LifecycleCommitUncertainError preserves the fail-closed durable-record
 // contract at its first consumer. The visible record is retained and no later
@@ -95,6 +106,28 @@ type claimHandle interface {
 	Close() error
 }
 
+type orderedCleanupClaim interface {
+	RemoveRuntimeArtifacts() error
+	CloseAndRemoveLock() error
+}
+
+func removeClaimRuntimeArtifacts(claim claimHandle) error {
+	if ordered, ok := claim.(orderedCleanupClaim); ok {
+		return ordered.RemoveRuntimeArtifacts()
+	}
+	return nil
+}
+
+func releaseClaimAfterRecord(claim claimHandle) error {
+	if ordered, ok := claim.(orderedCleanupClaim); ok {
+		return ordered.CloseAndRemoveLock()
+	}
+	if combined, ok := claim.(interface{ CloseAndRemove() error }); ok {
+		return combined.CloseAndRemove()
+	}
+	return claim.Close()
+}
+
 type roleListener interface {
 	Accept() (net.Conn, error)
 	Close() error
@@ -104,6 +137,12 @@ type lifecycleRelay interface {
 	Run(context.Context) error
 	Writer() operationWriter
 	MarkReady(ptyx.TerminalState) error
+}
+
+type lifecycleResidentRelay interface {
+	lifecycleRelay
+	AdmitViewer(ptyx.ContextWriter) (*ptyx.ResidentViewer, error)
+	Flush(context.Context) ptyx.ResidentFlushResult
 }
 
 type lifecycleDependencies struct {
@@ -122,8 +161,10 @@ type lifecycleDependencies struct {
 	cleanupTimeout      time.Duration
 	starter             ptyx.ChildStarter
 	listen              func(string) (roleListener, error)
+	listenAttach        func(string) (roleListener, error)
 	newMasterEndpoint   func(*os.File) (ptyx.ContextReadWriter, func() error, error)
 	newRelay            func(ptyx.ContextReader, ptyx.ContextWriter, ptyx.ContextReadWriter) lifecycleRelay
+	newResidentRelay    func(*os.File, ptyx.ContextWriter) (lifecycleResidentRelay, func() error, error)
 	terminal            ptyx.Terminal
 }
 
@@ -138,9 +179,12 @@ type roleRuntime struct {
 	record           Record
 	child            ptyx.Child
 	listener         roleListener
+	attachListener   roleListener
 	relay            lifecycleRelay
+	resident         lifecycleResidentRelay
 	terminal         ptyx.Terminal
 	restoreEndpoint  func() error
+	closeResident    func() error
 	outerTerminal    *os.File
 	outerState       ptyx.TerminalState
 	outerModeApplied bool
@@ -163,6 +207,7 @@ func newRoleLifecycle(namespace *Namespace) roleLifecycle {
 		cleanupTimeout:      ptyx.ReadinessTimeout,
 		starter:             ptyx.ExecChildStarter{},
 		listen:              listenRoleSocket,
+		listenAttach:        listenRoleSocket,
 		newMasterEndpoint: func(file *os.File) (ptyx.ContextReadWriter, func() error, error) {
 			endpoint, err := ptyx.NewFileEndpoint(file)
 			if err != nil {
@@ -172,6 +217,14 @@ func newRoleLifecycle(namespace *Namespace) roleLifecycle {
 		},
 		newRelay: func(input ptyx.ContextReader, output ptyx.ContextWriter, master ptyx.ContextReadWriter) lifecycleRelay {
 			return ptyxRelayAdapter{relay: ptyx.NewRelay(input, output, master)}
+		},
+		newResidentRelay: func(master *os.File, writer ptyx.ContextWriter) (lifecycleResidentRelay, func() error, error) {
+			reader, err := ptyx.NewPTYReader(master)
+			if err != nil {
+				return nil, nil, err
+			}
+			relay := ptyx.NewResidentRelay(reader, writer)
+			return residentRelayAdapter{relay: relay}, reader.Close, nil
 		},
 		terminal: ptyx.NewTerminal(),
 	}
@@ -206,7 +259,27 @@ func (a ptyxRelayAdapter) MarkReady(state ptyx.TerminalState) error {
 	return a.relay.MarkReady(state)
 }
 
+type residentRelayAdapter struct{ relay *ptyx.ResidentRelay }
+
+func (a residentRelayAdapter) Run(ctx context.Context) error { return a.relay.Run(ctx) }
+func (a residentRelayAdapter) Writer() operationWriter       { return a.relay.Writer() }
+func (a residentRelayAdapter) MarkReady(state ptyx.TerminalState) error {
+	if !state.Settled() {
+		return ptyx.ErrTerminalNotSettled
+	}
+	return nil
+}
+func (a residentRelayAdapter) AdmitViewer(writer ptyx.ContextWriter) (*ptyx.ResidentViewer, error) {
+	return a.relay.AdmitViewer(writer)
+}
+func (a residentRelayAdapter) Flush(ctx context.Context) ptyx.ResidentFlushResult {
+	return a.relay.Flush(ctx)
+}
+
 func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harness.Spec) (*roleRuntime, error) {
+	if request.OperatorMode != OperatorForeground && request.OperatorMode != OperatorTmux && request.OperatorMode != OperatorDetached {
+		return nil, fmt.Errorf("unknown operator mode %d", request.OperatorMode)
+	}
 	if l.deps.removeRecord == nil {
 		l.deps.removeRecord = RemoveRecord
 	}
@@ -242,12 +315,9 @@ func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harne
 	}
 	cleanupNoChild := func(cause error) (*roleRuntime, error) {
 		var cleanupErrors []error
+		cleanupErrors = append(cleanupErrors, removeClaimRuntimeArtifacts(claim))
 		cleanupErrors = append(cleanupErrors, l.deps.removeRecord(path))
-		if cleanClaim, ok := claim.(interface{ CloseAndRemove() error }); ok {
-			cleanupErrors = append(cleanupErrors, cleanClaim.CloseAndRemove())
-		} else {
-			cleanupErrors = append(cleanupErrors, claim.Close())
-		}
+		cleanupErrors = append(cleanupErrors, releaseClaimAfterRecord(claim))
 		cleanupErrors = append(cleanupErrors, path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}
@@ -293,14 +363,32 @@ func (l roleLifecycle) start(ctx context.Context, request RunRequest, spec harne
 	if err != nil {
 		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, nil)
 	}
+	var attachListener roleListener
+	if request.OperatorMode == OperatorDetached {
+		attachListener, err = l.deps.listenAttach(path.Attach)
+		if err != nil {
+			return l.cleanupStartedChild(path, claim, childRecord, child, token, err, listener)
+		}
+	}
 	master, restore, err := l.deps.newMasterEndpoint(child.Master())
 	if err != nil {
-		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, listener)
+		return l.cleanupStartedChild(path, claim, childRecord, child, token, err, listener, attachListener)
 	}
-	relay := l.deps.newRelay(request.OperatorInput, request.OperatorOutput, master)
+	var relay lifecycleRelay
+	var resident lifecycleResidentRelay
+	var closeResident func() error
+	if request.OperatorMode == OperatorDetached {
+		resident, closeResident, err = l.deps.newResidentRelay(child.Master(), master)
+		if err != nil {
+			return l.cleanupStartedChild(path, claim, childRecord, child, token, errors.Join(err, restore()), listener, attachListener)
+		}
+		relay = resident
+	} else {
+		relay = l.deps.newRelay(request.OperatorInput, request.OperatorOutput, master)
+	}
 	return &roleRuntime{
-		path: path, claim: claim, record: childRecord, child: child, listener: listener,
-		relay: relay, terminal: l.deps.terminal, restoreEndpoint: restore,
+		path: path, claim: claim, record: childRecord, child: child, listener: listener, attachListener: attachListener,
+		relay: relay, resident: resident, terminal: l.deps.terminal, restoreEndpoint: restore, closeResident: closeResident,
 		outerTerminal: request.OuterTerminal, outerState: request.OuterState,
 	}, nil
 }
@@ -312,11 +400,13 @@ func (l roleLifecycle) cleanupStartedChild(
 	child ptyx.Child,
 	token StartToken,
 	cause error,
-	listener roleListener,
+	listeners ...roleListener,
 ) (*roleRuntime, error) {
 	var cleanupErrors []error
-	if listener != nil {
-		cleanupErrors = append(cleanupErrors, listener.Close())
+	for _, listener := range listeners {
+		if listener != nil {
+			cleanupErrors = append(cleanupErrors, listener.Close())
+		}
 	}
 	signal := child.SignalProcessGroup(syscall.SIGHUP)
 	cleanupErrors = append(cleanupErrors, signal.Err)
@@ -329,12 +419,9 @@ func (l roleLifecycle) cleanupStartedChild(
 	var uncertain *LifecycleCommitUncertainError
 	commitUncertain := errors.As(cause, &uncertain)
 	if result.MayReportAbsent() && !commitUncertain {
+		cleanupErrors = append(cleanupErrors, removeClaimRuntimeArtifacts(claim))
 		cleanupErrors = append(cleanupErrors, l.deps.removeRecord(path))
-		if cleanClaim, ok := claim.(interface{ CloseAndRemove() error }); ok {
-			cleanupErrors = append(cleanupErrors, cleanClaim.CloseAndRemove())
-		} else {
-			cleanupErrors = append(cleanupErrors, claim.Close())
-		}
+		cleanupErrors = append(cleanupErrors, releaseClaimAfterRecord(claim))
 		cleanupErrors = append(cleanupErrors, path.Close())
 		return nil, errors.Join(cause, errors.Join(cleanupErrors...))
 	}
@@ -381,7 +468,7 @@ func cleanupObservationFromProcess(observation ProcessObservation) CleanupObserv
 
 func orderedCleanupArtifacts(present map[string]bool) []string {
 	var ordered []string
-	for _, artifact := range []string{"child", "socket", "record", "lock"} {
+	for _, artifact := range []string{"child", "socket", "attach", "record", "lock"} {
 		if present[artifact] {
 			ordered = append(ordered, artifact)
 		}

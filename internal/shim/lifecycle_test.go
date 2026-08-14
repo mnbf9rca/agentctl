@@ -95,6 +95,66 @@ func TestShimLifecycleOrdersClaimReservationChildIdentityListenerAndReadiness(t 
 	}
 }
 
+func TestShimDetachedLifecycleStartsBothListenersBeforeResidentDrain(t *testing.T) {
+	calls := &lifecycleCallLog{}
+	child := newLifecycleFakeChild(t, 456)
+	resident := &lifecycleFakeResidentRelay{calls: calls}
+	deps := lifecycleDependencies{
+		rolePath: func(session, role string) (*RolePath, error) {
+			return &RolePath{Session: session, Role: role, StateRoot: "/state", Socket: "/runtime/fleet/planner.sock", Attach: "/runtime/fleet/planner.attach"}, nil
+		},
+		pid:   func() int { return 123 },
+		nonce: func() (string, error) { return "nonce", nil },
+		acquireClaim: func(*RolePath, Advisory) (claimHandle, error) {
+			calls.add("claim")
+			return &lifecycleFakeClaim{calls: calls}, nil
+		},
+		writeRecord: func(_ *RolePath, record Record) error { calls.add("record:" + string(record.State)); return nil },
+		startToken:  func(int) (StartToken, error) { return StartToken{Sec: 9, Usec: 10}, nil },
+		starter: lifecycleStarterFunc(func(context.Context, ptyx.StartRequest) (ptyx.Child, error) {
+			calls.add("child-start")
+			return child, nil
+		}),
+		listen: func(path string) (roleListener, error) {
+			calls.add("listen-control:" + path)
+			return &lifecycleFakeListener{}, nil
+		},
+		listenAttach: func(path string) (roleListener, error) {
+			calls.add("listen-attach:" + path)
+			return &lifecycleFakeListener{}, nil
+		},
+		newMasterEndpoint: func(*os.File) (ptyx.ContextReadWriter, func() error, error) {
+			calls.add("master-endpoint")
+			return &lifecycleFakeEndpoint{}, func() error { return nil }, nil
+		},
+		newResidentRelay: func(*os.File, ptyx.ContextWriter) (lifecycleResidentRelay, func() error, error) {
+			calls.add("resident-relay")
+			return resident, func() error { return nil }, nil
+		},
+		terminal: &lifecycleFakeTerminal{calls: calls},
+	}
+	lifecycle := roleLifecycle{deps: deps}
+	spec, _ := harness.Lookup("codex")
+	runtime, err := lifecycle.start(context.Background(), RunRequest{
+		Session: "fleet", Role: "planner", Harness: "codex", OperatorMode: OperatorDetached,
+		InitialSize: ptyx.WindowSize{Rows: 24, Cols: 80},
+	}, spec)
+	if err != nil {
+		t.Fatalf("start() error = %v", err)
+	}
+	if runtime.attachListener == nil || runtime.resident != resident {
+		t.Fatalf("detached runtime = %#v, want attach listener and resident relay", runtime)
+	}
+	want := []string{
+		"claim", "record:child-starting", "child-start", "record:child-recorded",
+		"listen-control:/runtime/fleet/planner.sock", "listen-attach:/runtime/fleet/planner.attach",
+		"master-endpoint", "resident-relay",
+	}
+	if got := calls.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached lifecycle calls = %#v, want %#v", got, want)
+	}
+}
+
 func TestShimLifecycleFailsClosedOnUncertainReservationCommitBeforeFork(t *testing.T) {
 	calls := &lifecycleCallLog{}
 	claim := &lifecycleFakeClaim{calls: calls}
@@ -161,7 +221,7 @@ func TestShimLifecycleCleansClaimAfterDefiniteReservationWriteFailure(t *testing
 	if err == nil || !strings.Contains(err.Error(), "write failed before rename") {
 		t.Fatalf("start() error = %v, want definite record failure", err)
 	}
-	wantCalls := []string{"claim", "record:child-starting", "record-remove", "claim-clean"}
+	wantCalls := []string{"claim", "record:child-starting", "claim-runtime-clean", "record-remove", "claim-clean"}
 	if got := calls.snapshot(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("lifecycle calls = %#v, want %#v", got, wantCalls)
 	}
@@ -279,7 +339,7 @@ func TestShimLifecycleRemovesReservationWhenChildStartProvesNoChild(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "fork failed") {
 		t.Fatalf("start() error = %v, want fork failure", err)
 	}
-	wantCalls := []string{"claim", "record:child-starting", "child-start", "record-remove", "claim-clean"}
+	wantCalls := []string{"claim", "record:child-starting", "child-start", "claim-runtime-clean", "record-remove", "claim-clean"}
 	if got := calls.snapshot(); !reflect.DeepEqual(got, wantCalls) {
 		t.Fatalf("lifecycle calls = %#v, want %#v", got, wantCalls)
 	}
@@ -374,6 +434,11 @@ type lifecycleFakeClaim struct{ calls *lifecycleCallLog }
 
 func (c *lifecycleFakeClaim) Close() error          { c.calls.add("claim-close"); return nil }
 func (c *lifecycleFakeClaim) CloseAndRemove() error { c.calls.add("claim-clean"); return nil }
+func (c *lifecycleFakeClaim) RemoveRuntimeArtifacts() error {
+	c.calls.add("claim-runtime-clean")
+	return nil
+}
+func (c *lifecycleFakeClaim) CloseAndRemoveLock() error { c.calls.add("claim-clean"); return nil }
 
 type lifecycleStarterFunc func(context.Context, ptyx.StartRequest) (ptyx.Child, error)
 
@@ -400,6 +465,21 @@ func (r *lifecycleFakeRelay) Writer() operationWriter   { return &lifecycleFakeE
 func (r *lifecycleFakeRelay) MarkReady(ptyx.TerminalState) error {
 	r.calls.add("mark-ready")
 	return nil
+}
+
+type lifecycleFakeResidentRelay struct{ calls *lifecycleCallLog }
+
+func (r *lifecycleFakeResidentRelay) Run(context.Context) error { return nil }
+func (r *lifecycleFakeResidentRelay) Writer() operationWriter   { return &lifecycleFakeEndpoint{} }
+func (r *lifecycleFakeResidentRelay) MarkReady(ptyx.TerminalState) error {
+	r.calls.add("resident-ready")
+	return nil
+}
+func (*lifecycleFakeResidentRelay) AdmitViewer(ptyx.ContextWriter) (*ptyx.ResidentViewer, error) {
+	return nil, nil
+}
+func (*lifecycleFakeResidentRelay) Flush(context.Context) ptyx.ResidentFlushResult {
+	return ptyx.ResidentFlushResult{Confirmed: true}
 }
 
 type lifecycleFakeTerminal struct {

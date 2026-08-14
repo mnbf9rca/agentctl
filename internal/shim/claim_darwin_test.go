@@ -46,13 +46,15 @@ func TestClaimUsesKernelFlockAndPreservesContendedSocket(t *testing.T) {
 
 func TestClaimAcquisitionRemovesOnlyAStaleSocketAfterOwnership(t *testing.T) {
 	rolePath := newTestRolePath(t)
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	listener.SetUnlinkOnClose(false)
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
+	for _, socket := range []string{rolePath.Socket, rolePath.Attach} {
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
@@ -60,8 +62,10 @@ func TestClaimAcquisitionRemovesOnlyAStaleSocketAfterOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = claim.Close() })
-	if _, err := os.Lstat(rolePath.Socket); !os.IsNotExist(err) {
-		t.Fatalf("stale socket remains after claim: %v", err)
+	for _, socket := range []string{rolePath.Socket, rolePath.Attach} {
+		if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+			t.Fatalf("stale socket %q remains after claim: %v", socket, err)
+		}
 	}
 }
 
@@ -75,16 +79,66 @@ func TestClaimCloseAndRemoveDeletesOnlyItsVerifiedLockAndSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenUnix() error = %v", err)
 	}
+	listener.SetUnlinkOnClose(false)
 	if err := listener.Close(); err != nil {
 		t.Fatalf("listener.Close() error = %v", err)
+	}
+	attachListener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Attach, Net: "unix"})
+	if err != nil {
+		t.Fatalf("attach ListenUnix() error = %v", err)
+	}
+	attachListener.SetUnlinkOnClose(false)
+	if err := attachListener.Close(); err != nil {
+		t.Fatalf("attach listener.Close() error = %v", err)
 	}
 	if err := claim.CloseAndRemove(); err != nil {
 		t.Fatalf("CloseAndRemove() error = %v", err)
 	}
-	for _, artifact := range []string{path.Lock, path.Socket} {
+	for _, artifact := range []string{path.Lock, path.Socket, path.Attach} {
 		if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("Lstat(%q) error = %v, want os.ErrNotExist", artifact, err)
 		}
+	}
+}
+
+func TestClaimOrderedCleanupRemovesRuntimeSocketsBeforeHeldLock(t *testing.T) {
+	path := newTestRolePath(t)
+	claim, err := AcquireClaim(path, testAdvisory(path, os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, socket := range []string{path.Socket, path.Attach} {
+		listener, listenErr := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+		if listenErr != nil {
+			t.Fatal(listenErr)
+		}
+		listener.SetUnlinkOnClose(false)
+		if closeErr := listener.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	if err := claim.RemoveRuntimeArtifacts(); err != nil {
+		t.Fatal(err)
+	}
+	for _, socket := range []string{path.Socket, path.Attach} {
+		if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime artifact %q remains: %v", socket, err)
+		}
+	}
+	if _, err := os.Lstat(path.Lock); err != nil {
+		t.Fatalf("lock was removed before durable record phase: %v", err)
+	}
+	if claim.file == nil {
+		t.Fatal("flock was released before durable record phase")
+	}
+	if err := claim.CloseAndRemoveLock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path.Lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock remains after final claim release: %v", err)
+	}
+	if claim.file != nil {
+		t.Fatal("flock remains held after final claim release")
 	}
 }
 
@@ -100,6 +154,34 @@ func TestClaimRefusesUnsafeSocketAndLockArtifactsWithoutRepair(t *testing.T) {
 		}
 		if data, readErr := os.ReadFile(rolePath.Socket); readErr != nil || string(data) != "not a socket" {
 			t.Fatalf("unsafe socket artifact was repaired: data=%q error=%v", data, readErr)
+		}
+	})
+
+	t.Run("regular attach path preserves stale control socket", func(t *testing.T) {
+		rolePath := newTestRolePath(t)
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: rolePath.Socket, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rolePath.Attach, []byte("not a socket"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := AcquireClaim(rolePath, testAdvisory(rolePath, os.Getpid()))
+		if claim != nil {
+			_ = claim.Close()
+		}
+		if err == nil {
+			t.Fatal("AcquireClaim accepted regular file at attach path")
+		}
+		if info, statErr := os.Lstat(rolePath.Socket); statErr != nil || info.Mode()&os.ModeSocket == 0 {
+			t.Fatalf("unsafe attach refusal mutated stale control socket: info=%v error=%v", info, statErr)
+		}
+		if data, readErr := os.ReadFile(rolePath.Attach); readErr != nil || string(data) != "not a socket" {
+			t.Fatalf("unsafe attach artifact was repaired: data=%q error=%v", data, readErr)
 		}
 	})
 

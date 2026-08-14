@@ -30,6 +30,7 @@ type requestHandler struct {
 	operationMu  sync.Mutex
 	phaseMu      sync.RWMutex
 	phase        shimOperationPhase
+	stopPending  bool
 	session      string
 	role         string
 	shimPID      int
@@ -39,6 +40,7 @@ type requestHandler struct {
 	observe      func() Response
 	stop         func(context.Context) (Response, error)
 	stopComplete func()
+	inputBarrier roleInputBarrier
 }
 
 type shimOperationPhase string
@@ -56,26 +58,63 @@ const (
 func (h *requestHandler) operationPhase() shimOperationPhase {
 	h.phaseMu.RLock()
 	defer h.phaseMu.RUnlock()
+	if h.stopPending && (h.phase == "" || h.phase == shimOperationActive) {
+		return shimOperationStopping
+	}
 	if h.phase == "" {
 		return shimOperationActive
 	}
 	return h.phase
 }
 
-func (h *requestHandler) beginStop() (shimOperationPhase, bool) {
+func (h *requestHandler) beginStop(ctx context.Context) (shimOperationPhase, bool, error) {
 	h.phaseMu.Lock()
-	defer h.phaseMu.Unlock()
-	if h.phase == "" || h.phase == shimOperationActive {
-		h.phase = shimOperationStopping
-		return shimOperationStopping, true
+	if h.stopPending || (h.phase != "" && h.phase != shimOperationActive) {
+		phase := h.phase
+		if h.stopPending {
+			phase = shimOperationStopping
+		}
+		h.phaseMu.Unlock()
+		return phase, false, nil
 	}
-	return h.phase, false
+	h.stopPending = true
+	h.phaseMu.Unlock()
+
+	var phase shimOperationPhase
+	transition := func() {
+		h.phaseMu.Lock()
+		defer h.phaseMu.Unlock()
+		h.phase = shimOperationStopping
+		h.stopPending = false
+		phase = shimOperationStopping
+	}
+	if h.inputBarrier != nil {
+		if err := h.inputBarrier.Transition(ctx, transition); err != nil {
+			h.phaseMu.Lock()
+			h.stopPending = false
+			h.phaseMu.Unlock()
+			return h.operationPhase(), false, err
+		}
+	} else {
+		transition()
+	}
+	return phase, true, nil
 }
 
 func (h *requestHandler) setOperationPhase(phase shimOperationPhase) {
 	h.phaseMu.Lock()
 	h.phase = phase
+	h.stopPending = false
 	h.phaseMu.Unlock()
+}
+
+func (h *requestHandler) withActivePhase(action func() error) error {
+	h.phaseMu.RLock()
+	defer h.phaseMu.RUnlock()
+	if h.stopPending || (h.phase != "" && h.phase != shimOperationActive) {
+		return errAttachAdmissionUnavailable
+	}
+	return action()
 }
 
 func (h *requestHandler) operationPhaseResponse(outcome Outcome, phase shimOperationPhase) Response {
@@ -175,7 +214,10 @@ func (h *requestHandler) handleConnection(ctx context.Context, connection net.Co
 			if h.stop == nil {
 				return errors.New("shim stop handler is unavailable")
 			}
-			phase, admitted := h.beginStop()
+			phase, admitted, beginErr := h.beginStop(requestCtx)
+			if beginErr != nil {
+				return beginErr
+			}
 			if !admitted {
 				return writeHandlerResponse(connection, h.alreadyStoppingResponse(phase))
 			}
@@ -313,7 +355,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	if !ok {
 		return fmt.Errorf("unknown harness %q", request.Harness)
 	}
-	if request.OperatorInput == nil || request.OperatorOutput == nil {
+	if request.OperatorMode != OperatorDetached && (request.OperatorInput == nil || request.OperatorOutput == nil) {
 		return errors.New("shim server requires operator input and output")
 	}
 	runtime, err := s.lifecycle.start(ctx, request, spec)
@@ -323,13 +365,18 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	serverCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watcher := watchChild(serverCtx, runtime.child)
-	operations := newOperationExecutor(spec, runtime.relay.Writer(), nil)
 	stopDone := make(chan struct{}, 1)
 	handler := &requestHandler{
 		session: request.Session, role: request.Role,
 		shimPID: runtime.record.ShimPID, childPID: runtime.record.ChildPID,
-		operations: operations,
 	}
+	roleInput := newRoleInputWriter(runtime.relay.Writer(), func() bool {
+		return handler.readiness() && handler.operationPhase() == shimOperationActive
+	})
+	if barrier, ok := roleInput.(roleInputBarrier); ok {
+		handler.inputBarrier = barrier
+	}
+	handler.operations = newOperationExecutor(spec, roleInput, nil)
 	handler.observe = func() Response { return s.observeRuntime(runtime, handler.readiness()) }
 	handler.stop = func(stopCtx context.Context) (Response, error) {
 		return s.stopRuntime(stopCtx, runtime, watcher)
@@ -346,6 +393,21 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	resizeErr := s.forwardResizeEvents(serverCtx, runtime)
 	acceptErr := make(chan error, 1)
 	go s.serveConnections(serverCtx, runtime.listener, handler, acceptErr)
+	var attachAcceptErr <-chan error
+	var attachment *attachServer
+	if runtime.attachListener != nil {
+		attachment = newAttachServer(attachServerConfig{
+			Session: request.Session, Role: request.Role, ShimUID: uint32(os.Geteuid()),
+			Relay: runtime.resident, Input: roleInput,
+			Resize: func(size ptyx.WindowSize) error {
+				return runtime.terminal.SetWindowSize(runtime.child.Master(), size)
+			},
+			Phase: handler.operationPhase, WithActive: handler.withActivePhase,
+		})
+		attachErrors := make(chan error, 1)
+		attachAcceptErr = attachErrors
+		go s.serveAttachConnections(serverCtx, runtime.attachListener, attachment, attachErrors)
+	}
 	readyErr := make(chan error, 1)
 	go func() { readyErr <- runtime.waitReady(serverCtx) }()
 
@@ -356,8 +418,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 		case err := <-readyErr:
 			readyErr = nil
 			if err != nil {
-				cancel()
-				cleanup := s.cleanupRuntime(runtime, true)
+				cleanup := s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel)
 				return lifecycleReadinessFailure(runtime.record.ChildPID, err, cleanup)
 			}
 			handler.setReady()
@@ -369,8 +430,7 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				watcherDone = nil
 				continue
 			}
-			cancel()
-			cleanup := s.cleanupRuntime(runtime, false)
+			cleanup := s.cleanupRuntimeWithAttachment(runtime, false, attachment, cancel)
 			if ready {
 				return errors.Join(foregroundChildExitOutcome(watcher.exit), cleanup.Err)
 			}
@@ -380,16 +440,14 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 				CleanupObservation: cleanup.Observation, CleanupErr: cleanup.Err,
 			}
 		case <-stopDone:
-			cancel()
-			return s.cleanupRuntime(runtime, false).Err
+			return s.cleanupRuntimeWithAttachment(runtime, false, attachment, cancel).Err
 		case err := <-relayErr:
 			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
 				cancel()
 				continue
 			}
 			if exit, observed := waitObservedChildExit(watcher, ptyx.ReadinessPollInterval); observed {
-				cancel()
-				cleanup := s.cleanupRuntime(runtime, false)
+				cleanup := s.cleanupRuntimeWithAttachment(runtime, false, attachment, cancel)
 				if ready {
 					return cleanup.Err
 				}
@@ -399,22 +457,32 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 					CleanupObservation: cleanup.Observation, CleanupErr: cleanup.Err,
 				}
 			}
-			cancel()
-			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntime(runtime, true))
+			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
 		case err := <-resizeErr:
-			cancel()
-			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntime(runtime, true))
+			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
 		case err := <-acceptErr:
-			cancel()
 			if errors.Is(err, net.ErrClosed) && ctx.Err() != nil {
-				return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntime(runtime, true))
+				return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
 			}
-			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntime(runtime, true))
+			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
+		case err := <-attachAcceptErr:
+			if errors.Is(err, net.ErrClosed) && ctx.Err() != nil {
+				return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
+			}
+			return runtimeFailure(runtime.record.ChildPID, err, s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
 		case <-ctx.Done():
-			cancel()
-			return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntime(runtime, true))
+			return runtimeFailure(runtime.record.ChildPID, ctx.Err(), s.cleanupRuntimeWithAttachment(runtime, true, attachment, cancel))
 		}
 	}
+}
+
+func flushAttachment(server *attachServer) {
+	if server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), AttachTailFlushTimeout)
+	defer cancel()
+	server.childExited(ctx)
 }
 
 func waitObservedChildExit(watcher *childWatcher, timeout time.Duration) (ptyx.ExitObservation, bool) {
@@ -507,6 +575,20 @@ func (s *Server) serveConnections(ctx context.Context, listener roleListener, ha
 	}
 }
 
+func (s *Server) serveAttachConnections(ctx context.Context, listener roleListener, handler *attachServer, fatal chan<- error) {
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			fatal <- err
+			return
+		}
+		go func() {
+			defer func() { _ = connection.Close() }()
+			_ = handler.handleConnection(ctx, connection)
+		}()
+	}
+}
+
 func (s *Server) observeRuntime(runtime *roleRuntime, ready bool) Response {
 	result := s.observeProcess(runtime.record.ChildPID, *runtime.record.ChildStartToken)
 	childPID := runtime.record.ChildPID
@@ -587,10 +669,22 @@ func (s *Server) stopRuntime(ctx context.Context, runtime *roleRuntime, watcher 
 }
 
 func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeCleanupResult {
+	return s.cleanupRuntimeWithAttachment(runtime, signalChild, nil, nil)
+}
+
+func (s *Server) cleanupRuntimeWithAttachment(runtime *roleRuntime, signalChild bool, attachment *attachServer, stopServices func()) runtimeCleanupResult {
 	var cleanupErrors []error
 	remaining := make(map[string]bool)
+	if attachment != nil {
+		attachment.beginTerminal()
+	}
 	if runtime.listener != nil {
 		if err := runtime.listener.Close(); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	if runtime.attachListener != nil {
+		if err := runtime.attachListener.Close(); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}
 	}
@@ -603,24 +697,30 @@ func (s *Server) cleanupRuntime(runtime *roleRuntime, signalChild bool) runtimeC
 	if signalErr != nil && (!result.MayReportAbsent() || (!errors.Is(signalErr, syscall.ESRCH) && !errors.Is(signalErr, os.ErrProcessDone))) {
 		cleanupErrors = append(cleanupErrors, signalErr)
 	}
+	if attachment != nil {
+		if result.MayReportAbsent() {
+			flushAttachment(attachment)
+		} else {
+			attachment.cleanupRetained()
+		}
+	}
+	if stopServices != nil {
+		stopServices()
+	}
 	cleanupErrors = append(cleanupErrors, runtime.restoreOuterTerminal())
+	if runtime.closeResident != nil {
+		cleanupErrors = append(cleanupErrors, runtime.closeResident())
+	}
 	if runtime.restoreEndpoint != nil {
 		cleanupErrors = append(cleanupErrors, runtime.restoreEndpoint())
 	}
 	cleanupErrors = append(cleanupErrors, runtime.child.CloseMaster())
 	if result.MayReportAbsent() {
+		cleanupErrors = append(cleanupErrors, removeClaimRuntimeArtifacts(runtime.claim))
 		if err := RemoveRecord(runtime.path); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}
-		if cleanClaim, ok := runtime.claim.(interface{ CloseAndRemove() error }); ok {
-			if err := cleanClaim.CloseAndRemove(); err != nil {
-				cleanupErrors = append(cleanupErrors, err)
-			}
-		} else {
-			if err := runtime.claim.Close(); err != nil {
-				cleanupErrors = append(cleanupErrors, err)
-			}
-		}
+		cleanupErrors = append(cleanupErrors, releaseClaimAfterRecord(runtime.claim))
 	} else {
 		remaining["child"] = true
 		cleanupErrors = append(cleanupErrors, fmt.Errorf("child cleanup observation was %s", result.Observation))
@@ -659,6 +759,7 @@ func observeRemainingRoleArtifacts(path *RolePath) ([]string, error) {
 		name     string
 	}{
 		{artifact: "socket", root: path.runtimeSession, name: path.Role + ".sock"},
+		{artifact: "attach", root: path.runtimeSession, name: path.Role + ".attach"},
 		{artifact: "record", root: path.stateRoles, name: path.Role + ".json"},
 		{artifact: "lock", root: path.runtimeSession, name: path.Role + ".lock"},
 	}
@@ -729,22 +830,88 @@ type operationWriter interface {
 	Write(context.Context, []byte) (int, error)
 }
 
+type roleInputWriter interface {
+	WriteViewer(context.Context, []byte) (int, error)
+	BeginDelivery(context.Context) (operationWriter, func(), error)
+}
+
+type roleInputBarrier interface {
+	Barrier(context.Context) error
+	Transition(context.Context, func()) error
+}
+
+type gatedRoleInputWriter struct {
+	writer        operationWriter
+	gate          chan struct{}
+	viewerAllowed func() bool
+}
+
+func newRoleInputWriter(writer operationWriter, viewerAllowed ...func() bool) roleInputWriter {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	var allowed func() bool
+	if len(viewerAllowed) != 0 {
+		allowed = viewerAllowed[0]
+	}
+	return &gatedRoleInputWriter{writer: writer, gate: gate, viewerAllowed: allowed}
+}
+
+func (w *gatedRoleInputWriter) WriteViewer(ctx context.Context, value []byte) (int, error) {
+	writer, release, err := w.BeginDelivery(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if w.viewerAllowed != nil && !w.viewerAllowed() {
+		return len(value), nil
+	}
+	return writer.Write(ctx, value)
+}
+
+func (w *gatedRoleInputWriter) BeginDelivery(ctx context.Context) (operationWriter, func(), error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-w.gate:
+	}
+	if err := ctx.Err(); err != nil {
+		w.gate <- struct{}{}
+		return nil, nil, err
+	}
+	var once sync.Once
+	return w.writer, func() { once.Do(func() { w.gate <- struct{}{} }) }, nil
+}
+
+func (w *gatedRoleInputWriter) Barrier(ctx context.Context) error {
+	return w.Transition(ctx, func() {})
+}
+
+func (w *gatedRoleInputWriter) Transition(ctx context.Context, transition func()) error {
+	_, release, err := w.BeginDelivery(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	transition()
+	return nil
+}
+
 type operationWait func(context.Context, time.Duration) error
 
 type operationExecutor struct {
 	harness harness.Spec
-	writer  operationWriter
+	input   roleInputWriter
 	wait    operationWait
-	gate    chan struct{}
 }
 
-func newOperationExecutor(spec harness.Spec, writer operationWriter, wait operationWait) *operationExecutor {
+func newOperationExecutor(spec harness.Spec, input roleInputWriter, wait operationWait) *operationExecutor {
 	if wait == nil {
 		wait = waitOperationDelay
 	}
-	gate := make(chan struct{}, 1)
-	gate <- struct{}{}
-	return &operationExecutor{harness: spec, writer: writer, wait: wait, gate: gate}
+	return &operationExecutor{harness: spec, input: input, wait: wait}
 }
 
 func waitOperationDelay(ctx context.Context, duration time.Duration) error {
@@ -768,24 +935,23 @@ func (e *operationExecutor) Deliver(ctx context.Context, operation string) (Resp
 	if command.Kind != control.OperationPayload {
 		return Response{}, ErrOperationHasNoPayload
 	}
-	select {
-	case <-ctx.Done():
-		return cancelledDelivery(0), ctx.Err()
-	case <-e.gate:
+	writer, release, err := e.input.BeginDelivery(ctx)
+	if err != nil {
+		return cancelledDelivery(0), err
 	}
-	defer func() { e.gate <- struct{}{} }()
+	defer release()
 
-	if _, err := e.writer.Write(ctx, e.harness.InputClearBytes()); err != nil {
+	if _, err := writer.Write(ctx, e.harness.InputClearBytes()); err != nil {
 		return cancelledOrFailedDelivery(0, err)
 	}
-	payloadWritten, err := e.writer.Write(ctx, []byte(command.Payload))
+	payloadWritten, err := writer.Write(ctx, []byte(command.Payload))
 	if err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
 	if err := e.wait(ctx, payloadSubmitDelay); err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
-	if _, err := e.writer.Write(ctx, e.harness.SubmitBytes()); err != nil {
+	if _, err := writer.Write(ctx, e.harness.SubmitBytes()); err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
 	written := uint64(payloadWritten)
