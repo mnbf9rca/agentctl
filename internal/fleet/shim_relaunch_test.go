@@ -61,6 +61,31 @@ func TestShimRelaunchRefusesEveryNonAbsentRuntimeStateBeforeMutation(t *testing.
 	}
 }
 
+// This catches the pre-Task-4 relaunch path creating a tmux presentation for
+// a run-created detached fleet, which cannot supply an interaction route.
+func TestShimRelaunchTransitionallyRefusesDetachedFleetBeforeRuntimeOrTmuxMutation(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	records := &fakeShimFleetRecords{events: events, record: record}
+	presentation := &fakeShimPresentation{events: events}
+	relauncher := NewShimRelauncher(presentation, &fakeShimLifecycle{events: events}, records, &fakeShimRoleInspector{events: events}, shimLaunchTestDependencies(events))
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	var refusal *ShimDetachedRelaunchUnsupportedError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("Relaunch() error = %T %v, want detached transitional refusal", err, err)
+	}
+	if got, want := refusal.Error(), `durable fleet presentation is detached; this build cannot recreate a detached role`; got != want {
+		t.Fatalf("refusal error = %q, want %q", got, want)
+	}
+	if got, want := events.snapshot(), []string{"record-read:fleet"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached relaunch events = %#v, want no runtime or tmux mutation %#v", got, want)
+	}
+}
+
 func TestShimRelaunchRemovesStaleRecordOnlyAfterFreshESRCHThenStartsOneShim(t *testing.T) {
 	t.Parallel()
 

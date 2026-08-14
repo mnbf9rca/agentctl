@@ -459,6 +459,75 @@ func TestShimFleetRecordStoreConcurrentVersionCheckedReplacementHasOneMutationWi
 	}
 }
 
+// This catches valid roster/config mutations silently changing the durable
+// presentation chosen at fleet creation.
+func TestShimFleetRecordStoreRejectsPresentationChangeForEveryMutationAPI(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(ShimFleetRecord) ShimFleetRecord
+		apply  func(*ShimFleetRecordStore, ShimFleetRecord, ShimFleetRecord) error
+	}{
+		{
+			name: "replace",
+			mutate: func(record ShimFleetRecord) ShimFleetRecord {
+				return shimFleetRecordWithRelaunchOverride(record, config.RoleConfig{Name: "planner", Harness: config.HarnessClaude, Model: "next"}, "/repo")
+			},
+			apply: func(store *ShimFleetRecordStore, expected, replacement ShimFleetRecord) error {
+				return store.ReplaceOwned(expected, replacement)
+			},
+		},
+		{
+			name: "extend",
+			mutate: func(record ShimFleetRecord) ShimFleetRecord {
+				replacement := record
+				replacement.Roster = append(append([]string(nil), record.Roster...), "reviewer")
+				replacement.Roles = map[string]ShimFleetRoleRecord{"planner": record.Roles["planner"], "coder": record.Roles["coder"], "reviewer": {Harness: "codex"}}
+				return replacement
+			},
+			apply: func(store *ShimFleetRecordStore, expected, replacement ShimFleetRecord) error {
+				return store.ExtendOwned(expected, replacement)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			stateRoot := t.TempDir()
+			if err := os.Chmod(stateRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			store, err := OpenShimFleetRecordStore(stateRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			expected := mustShimFleetRecord(t, "fleet", "/repo")
+			if err := store.Create(expected); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(stateRoot, "sessions", "fleet", "fleet.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := test.mutate(expected)
+			replacement.Presentation = PresentationDetached
+			err = test.apply(store, expected, replacement)
+			var presentation *ShimFleetPresentationMutationError
+			if !errors.As(err, &presentation) || presentation.Expected != PresentationTmux || presentation.Replacement != PresentationDetached {
+				t.Fatalf("mutation error = %T %#v, want typed tmux-to-detached refusal", err, presentation)
+			}
+			after, err := os.ReadFile(filepath.Join(stateRoot, "sessions", "fleet", "fleet.json"))
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("mutation changed durable bytes: after=%q before=%q err=%v", after, before, err)
+			}
+			observed, err := store.Read("fleet")
+			if err != nil || !reflect.DeepEqual(observed, expected) {
+				t.Fatalf("Read() after mutation = %#v, %v; want unchanged %#v", observed, err, expected)
+			}
+		})
+	}
+}
+
 func TestShimFleetRecordStoreReplacementCommitUncertaintyRetainsVisibleReplacement(t *testing.T) {
 	t.Parallel()
 

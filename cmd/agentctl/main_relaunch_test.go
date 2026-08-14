@@ -74,6 +74,22 @@ func TestRunRelaunchMapsCommitAndOwnedRollbackOutcomes(t *testing.T) {
 	}
 }
 
+// This catches presentation-blind relaunch output that claims a detached
+// fleet was recreated even though this transitional build cannot do so.
+func TestRunRelaunchRendersDetachedPresentationTransitionRefusalExactly(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	err := &fleet.ShimDetachedRelaunchUnsupportedError{Session: "fleet", Role: "planner"}
+	code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "fleet", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
+		resolver: &resolverStub{selected: "fleet"}, relauncher: &relauncherStub{err: err},
+	})
+	want := "agentctl: refusing to relaunch role \"planner\" in session \"fleet\"; durable fleet presentation is detached and this build cannot recreate a detached role (detached-relaunch-unsupported)\n"
+	if code != exitUnsafe || stderr.String() != want {
+		t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), exitUnsafe, want)
+	}
+}
+
 func TestRunRelaunchRejectsInvalidOverridesBeforeDependencies(t *testing.T) {
 	t.Parallel()
 

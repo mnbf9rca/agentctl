@@ -88,6 +88,17 @@ func (e *ShimFleetMutationConflictError) Error() string {
 	return fmt.Sprintf("refusing concurrent durable fleet mutation for session %q: %s", e.Session, e.Cause)
 }
 
+// ShimFleetPresentationMutationError rejects a valid record mutation that
+// would silently rewrite the fleet-level presentation decision.
+type ShimFleetPresentationMutationError struct {
+	Expected    Presentation
+	Replacement Presentation
+}
+
+func (e *ShimFleetPresentationMutationError) Error() string {
+	return fmt.Sprintf("fleet mutation must retain presentation %q, not %q", e.Expected, e.Replacement)
+}
+
 // NewShimFleetRecord validates and copies the complete fleet configuration.
 func NewShimFleetRecord(session, directory string, presentation Presentation, fleet config.FleetConfig) (ShimFleetRecord, error) {
 	record := ShimFleetRecord{
@@ -435,6 +446,9 @@ func (s *ShimFleetRecordStore) replaceOwned(expected, replacement ShimFleetRecor
 	}
 	if expected.Session != replacement.Session || expected.Version != replacement.Version {
 		return errors.New("fleet replacement must retain version and session")
+	}
+	if expected.Presentation != replacement.Presentation {
+		return &ShimFleetPresentationMutationError{Expected: expected.Presentation, Replacement: replacement.Presentation}
 	}
 	if extend {
 		if len(replacement.Roster) != len(expected.Roster)+1 || !reflect.DeepEqual(replacement.Roster[:len(expected.Roster)], expected.Roster) {
