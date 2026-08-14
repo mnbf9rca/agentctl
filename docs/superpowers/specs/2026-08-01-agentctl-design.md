@@ -2896,9 +2896,19 @@ signals actually handled:
   fact the operator must act on first.
 - A signal arriving once part of a selected row has already reached the terminal
   does not **truncate the emission attempt early**. On the client's own terminal
-  handle, which is non-blocking, the attempt runs to its own bound
-  (`AttachReportTimeout`) and the signal follows it; the signal does not cut it
-  short. What lands may still be a byte-exact prefix — a non-blocking write can
+  handle, which is non-blocking, the attempt runs to its own bound and the signal
+  follows it; the signal does not cut it short.
+
+  That bound is `AttachReportTimeout` = `2s`, and it terminates on exactly one of
+  three conditions: **complete**, every byte of the selected template written;
+  **error**, a write failure other than a would-block; or **deadline**, the bound
+  elapsing. "Runs to its bound" means *at most* that long — a row that completes
+  immediately does not wait. Two seconds is deliberately far shorter than
+  `AttachTailFlushTimeout`: the tail flush is bounding delivery of the session's
+  own output, which the operator wants, whereas this bounds a single small
+  diagnostic line, and an operator whose terminal has stopped accepting output
+  should get their exit code back promptly rather than waiting out a
+  session-sized budget to be told the terminal is not draining. What lands may still be a byte-exact prefix — a non-blocking write can
   report partial progress and then `EAGAIN`, so a bounded attempt is not a
   completed one, and saturation remains one of the three permitted prefix causes.
   The promise is about ordering, not completeness: the operator does not get a
@@ -3251,7 +3261,9 @@ the alternatives out, are recorded in
   cut the attempt short: the attempt runs to `AttachReportTimeout` and the signal
   follows, with what landed asserted to be the whole row **or** a byte-exact
   prefix — never a row interrupted mid-write by the handler, and never asserted
-  complete, since a saturated terminal can leave a prefix within the bound. On a
+  complete, since a saturated terminal can leave a prefix within the bound. The
+  bound is asserted as a maximum, not a wait: a row to a healthy terminal
+  completes without consuming `AttachReportTimeout`. On a
   redirected sink that will not drain, the same signal is asserted to yield
   immediate owner action and a sink holding nothing, a prefix, or the whole row,
   with no bound and no full-row guarantee.
