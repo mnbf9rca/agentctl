@@ -2462,9 +2462,26 @@ proceed to its next typed gate.
 ### 15.11 Detached launch and the per-role attach stream
 
 Provenance: this contract answers issue #225. Its first draft was written against
-a stale base and was rebuilt on `6655ed9`; §16 is retained unchanged. Every
-constant below is derived from a recorded measurement named at its point of use,
-not chosen.
+a stale base and was rebuilt on `6655ed9`; §16 is retained unchanged. The constants below are of
+**two kinds, and the difference is stated because a policy rationale is not an
+empirical derivation**:
+
+- **Measured.** `AttachLagBufferBytes` = `131072` is derived from recorded
+  artifacts named at its point of use — a 61,489-byte initial paint and a
+  45,777-byte resize repaint, both from codex-cli 0.147.0 at 200x60, with their
+  hashes.
+- **Policy.** `AttachTailFlushTimeout` = `10s` and `AttachReportTimeout` = `2s`
+  are chosen bounds. Each carries a rationale at its point of use, and each says
+  what it is trading, but neither is derived from a measurement and neither
+  claims to be. `AttachClientQueueBytes` = `131072` is a policy mirror of the
+  measured lag buffer: it serves the same instantaneous-lag purpose on the client
+  side, which is why it takes the same value, but no separate measurement
+  supports it.
+
+An earlier version of this sentence claimed every constant was measured and not
+chosen. That was false for three of the four, and a provenance claim that
+overstates its own basis is worse than one that admits which values are
+judgement.
 
 The reopening of the options paper's Option-C rejection is exactly and only
 per-role attach for detached roles. There is no virtual screen model, no fleet
