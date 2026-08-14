@@ -74,19 +74,17 @@ func TestRunRelaunchMapsCommitAndOwnedRollbackOutcomes(t *testing.T) {
 	}
 }
 
-// This catches presentation-blind relaunch output that claims a detached
-// fleet was recreated even though this transitional build cannot do so.
-func TestRunRelaunchRendersDetachedPresentationTransitionRefusalExactly(t *testing.T) {
+// This catches detached relaunch failures reaching the generic renderer rather
+// than the same factual detached-start rows as launch.
+func TestRunRelaunchRendersDetachedStartRetainedExactly(t *testing.T) {
 	t.Parallel()
 
 	var stderr bytes.Buffer
-	err := &fleet.ShimDetachedRelaunchUnsupportedError{Session: "fleet", Role: "planner"}
-	code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "fleet", "planner"}, &bytes.Buffer{}, &stderr, dependencies{
-		resolver: &resolverStub{selected: "fleet"}, relauncher: &relauncherStub{err: err},
-	})
-	want := "agentctl: refusing to relaunch role \"planner\" in session \"fleet\"; durable fleet presentation is detached and this build cannot recreate a detached role (detached-relaunch-unsupported)\n"
-	if code != exitUnsafe || stderr.String() != want {
-		t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), exitUnsafe, want)
+	err := &fleet.ShimDetachedStartRetainedError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("exited"), CleanupErr: errors.New("socket remained")}
+	code := runWithDependencies(context.Background(), []string{"relaunch", "--session", "fleet", "planner"}, &bytes.Buffer{}, &stderr, dependencies{resolver: &resolverStub{selected: "fleet"}, relauncher: &relauncherStub{err: err}})
+	want := "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" failed before readiness: exited; cleanup left retained artifacts: socket remained (detached-start-retained)\n"
+	if code != exitLaunchUnproven || stderr.String() != want {
+		t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), exitLaunchUnproven, want)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
@@ -84,6 +85,41 @@ func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t
 				t.Fatalf("presentation = %q, want %q", got, test.wantPresentation)
 			}
 		})
+	}
+}
+
+// Production mutation caught: passing requireTmux=true to foreground
+// preflight would refuse a role before its actual amq requirement is checked.
+func TestShimForegroundRunnerPreflightDoesNotLookUpTmux(t *testing.T) {
+	t.Parallel()
+
+	events := &foregroundEvents{}
+	var lookups []string
+	runner := NewShimForegroundRunner(
+		&fakeForegroundServer{events: events, release: make(chan struct{})},
+		fakeForegroundLifecycle{events: events},
+		&fakeForegroundRecords{events: events},
+		fakeForegroundInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}},
+		ShimLaunchDependencies{
+			LookPath: func(name string) (string, error) {
+				lookups = append(lookups, name)
+				if name == "amq" {
+					return "", errors.New("not found")
+				}
+				return "/tools/" + name, nil
+			},
+			Executable: func() (string, error) { return "/tools/agentctl", nil },
+		},
+	)
+	err := runner.Run(context.Background(), ShimForegroundRequest{
+		Session: "fleet", Role: config.RoleConfig{Name: "planner", Harness: config.HarnessClaude}, Directory: "/work",
+	})
+	var missing *preflight.MissingExecutableError
+	if !errors.As(err, &missing) || missing.Name != "amq" {
+		t.Fatalf("Run() error = %T %v, want missing amq", err, err)
+	}
+	if want := []string{"amq"}; !reflect.DeepEqual(lookups, want) {
+		t.Fatalf("preflight lookups = %#v, want %#v", lookups, want)
 	}
 }
 

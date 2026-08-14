@@ -12,7 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
@@ -61,28 +63,167 @@ func TestShimRelaunchRefusesEveryNonAbsentRuntimeStateBeforeMutation(t *testing.
 	}
 }
 
-// This catches the pre-Task-4 relaunch path creating a tmux presentation for
-// a run-created detached fleet, which cannot supply an interaction route.
-func TestShimRelaunchTransitionallyRefusesDetachedFleetBeforeRuntimeOrTmuxMutation(t *testing.T) {
+// This catches a relaunch implementation that infers presentation from tmux
+// availability instead of recreating a durable detached role directly.
+func TestShimRelaunchRecreatesDetachedFleetWithoutConsultingTmux(t *testing.T) {
 	t.Parallel()
 
 	events := &shimEventLog{}
 	record := mustShimFleetRecord(t, "fleet", "/repo")
 	record.Presentation = PresentationDetached
 	records := &fakeShimFleetRecords{events: events, record: record}
-	presentation := &fakeShimPresentation{events: events}
-	relauncher := NewShimRelauncher(presentation, &fakeShimLifecycle{events: events}, records, &fakeShimRoleInspector{events: events}, shimLaunchTestDependencies(events))
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, lifecycle, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+
+	result, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	if result.WindowID != "" || result.PaneID != "" || result.PresentationSessionID != "" {
+		t.Fatalf("Relaunch() = %#v, want no tmux presentation IDs", result)
+	}
+	if got, want := events.snapshot(), []string{"record-read:fleet", "inspect:planner", "self", "look:amq", "look:claude", "detached-start:planner", "observe:planner"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detached relaunch events = %#v, want direct no-tmux recreation %#v", got, want)
+	}
+}
+
+// This catches applying a detached relaunch override by rebuilding the fleet
+// record with the default tmux presentation instead of preserving its durable
+// detached presentation fact.
+func TestShimRelaunchDetachedOverridePreservesPresentation(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	records := &fakeShimFleetRecords{events: events, record: record}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, &fakeShimLifecycle{events: events, observe: []shim.Response{runningShimResponse(4321, 7001)}}, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+	model := "gpt-5.6-sol"
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner", Model: &model})
+	if err != nil {
+		t.Fatalf("Relaunch() error = %v", err)
+	}
+	if records.replaced == nil || records.replaced.Presentation != PresentationDetached {
+		t.Fatalf("replacement = %#v, want detached presentation preserved", records.replaced)
+	}
+	if got, want := records.replaced.Roles["planner"].Model, model; got != want {
+		t.Fatalf("replacement planner model = %q, want %q", got, want)
+	}
+}
+
+// This catches detached relaunch returning a raw readiness failure after Start
+// instead of retaining the pre-existing fleet record and avoiding peer stop.
+func TestShimRelaunchDetachedReadinessFailureRetainsRecordWithoutStoppingRole(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	records := &fakeShimFleetRecords{events: events, record: record}
+	starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: make(chan error)}}}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{{Version: shim.ShimProtocolVersion, Outcome: shim.OutcomeOrphan}}}
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = starter
+	relauncher := NewShimRelauncher(nil, lifecycle, records, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
 
 	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
-	var refusal *ShimDetachedRelaunchUnsupportedError
-	if !errors.As(err, &refusal) {
-		t.Fatalf("Relaunch() error = %T %v, want detached transitional refusal", err, err)
+	var retained *ShimDetachedStartRetainedError
+	if !errors.As(err, &retained) || retained.CreatedPID != 4321 {
+		t.Fatalf("Relaunch() error = %T %v, want retained detached start for PID 4321", err, err)
 	}
-	if got, want := refusal.Error(), `durable fleet presentation is detached; this build cannot recreate a detached role`; got != want {
-		t.Fatalf("refusal error = %q, want %q", got, want)
+	if got, want := retained.Remaining, "unreconciled detached shim PID 4321 runtime state and durable fleet record"; got != want {
+		t.Fatalf("retained remaining = %q, want %q", got, want)
 	}
-	if got, want := events.snapshot(), []string{"record-read:fleet"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("detached relaunch events = %#v, want no runtime or tmux mutation %#v", got, want)
+	for _, event := range events.snapshot() {
+		if event == "stop:planner" || event == "record-remove" || event == "record-replace:fleet" {
+			t.Fatalf("detached relaunch failure mutated peer or pre-existing record: events=%#v", events.snapshot())
+		}
+	}
+}
+
+// This catches detached relaunch collapsing observed child exit and caller
+// cancellation into generic errors that imply neither retention nor PID facts.
+func TestShimRelaunchDetachedExitAndCancellationRetainRecordedFleet(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name          string
+		context       func() context.Context
+		wait          chan error
+		wantUncertain bool
+	}{
+		{name: "waiter exit", context: context.Background, wait: func() chan error { done := make(chan error, 1); done <- errors.New("exited"); return done }()},
+		{name: "cancellation", context: func() context.Context { ctx, cancel := context.WithCancel(context.Background()); cancel(); return ctx }, wait: make(chan error), wantUncertain: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := &shimEventLog{}
+			record := mustShimFleetRecord(t, "fleet", "/repo")
+			record.Presentation = PresentationDetached
+			starter := &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: test.wait}}}
+			dependencies := shimLaunchTestDependencies(events)
+			dependencies.DetachedStarter = starter
+			relauncher := NewShimRelauncher(nil, &fakeShimLifecycle{events: events}, &fakeShimFleetRecords{events: events, record: record}, &fakeShimRoleInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}, dependencies)
+
+			_, err := relauncher.Relaunch(test.context(), "fleet", RelaunchRequest{Role: "planner"})
+			if test.wantUncertain {
+				var uncertain *ShimDetachedStartUncertainError
+				if !errors.As(err, &uncertain) || uncertain.CreatedPID != 4321 {
+					t.Fatalf("Relaunch() error = %T %v, want uncertain PID 4321", err, err)
+				}
+			} else {
+				var rolledBack *ShimDetachedStartRolledBackError
+				if !errors.As(err, &rolledBack) || rolledBack.CreatedPID != 4321 {
+					t.Fatalf("Relaunch() error = %T %v, want rolled-back PID 4321", err, err)
+				}
+			}
+			for _, event := range events.snapshot() {
+				if strings.HasPrefix(event, "stop:") || event == "record-remove" || event == "record-replace:fleet" {
+					t.Fatalf("failure mutated pre-existing fleet: events=%#v", events.snapshot())
+				}
+			}
+		})
+	}
+}
+
+// This catches detached relaunch post-exit reconciliation depending on a fake
+// OutcomeMissing response that production shim.Client cannot return after the
+// lock/socket cleanup. Complete typed artifact absence is the rollback fact.
+func TestShimRelaunchDetachedImmediateExitUsesProductionArtifactAbsence(t *testing.T) {
+	events := &shimEventLog{}
+	inspector, lifecycle := emptyRuntimeArtifactInspector(t, events)
+	record := mustShimFleetRecord(t, "fleet", "/repo")
+	record.Presentation = PresentationDetached
+	wait := make(chan error, 1)
+	wait <- errors.New("exit status 1")
+	dependencies := shimLaunchTestDependencies(events)
+	dependencies.DetachedStarter = &fakeDetachedShimStarter{events: events, processes: []*fakeDetachedShimProcess{{pid: 4321, wait: wait}}}
+	dependencies.ArtifactInspector = inspector
+	start := time.Unix(1000, 0)
+	nowCalls := 0
+	dependencies.Now = func() time.Time {
+		nowCalls++
+		if nowCalls <= 2 {
+			return start
+		}
+		return start.Add(ptyx.ReadinessTimeout)
+	}
+	relauncher := NewShimRelauncher(nil, lifecycle, &fakeShimFleetRecords{events: events, record: record}, inspector, dependencies)
+
+	_, err := relauncher.Relaunch(context.Background(), "fleet", RelaunchRequest{Role: "planner"})
+	rolledBack, ok := err.(*ShimDetachedStartRolledBackError)
+	if !ok || rolledBack.CreatedPID != 4321 {
+		t.Fatalf("Relaunch() error = %T %v, want rolled back after production artifact absence", err, err)
+	}
+	want := []string{"record-read:fleet", "self", "look:amq", "look:claude", "detached-start:planner", "artifacts:planner"}
+	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("production-equivalent relaunch events = %#v, want artifact proof with fleet retained %#v", got, want)
 	}
 }
 
@@ -547,6 +688,43 @@ func runtimeInspectorFixture(t *testing.T, state shim.RecordState) (*shim.Namesp
 		t.Fatalf("Claim.Close() error = %v", err)
 	}
 	return namespace, path
+}
+
+func emptyRuntimeArtifactInspector(t *testing.T, events *shimEventLog) (*recordingRuntimeArtifactInspector, ShimLifecycle) {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "a5-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(short root): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", filepath.Join(base, "runtime"))
+	t.Setenv("AGENTCTL_STATE_ROOT", filepath.Join(base, "state"))
+	namespace, err := shim.OpenNamespace()
+	if err != nil {
+		t.Fatalf("OpenNamespace() error = %v", err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatalf("RolePath() error = %v", err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatalf("RolePath.Close() error = %v", err)
+	}
+	lifecycle := shim.NewClient(namespace)
+	return &recordingRuntimeArtifactInspector{RuntimeShimRoleInspector: NewRuntimeShimRoleInspector(namespace, lifecycle), events: events}, lifecycle
+}
+
+type recordingRuntimeArtifactInspector struct {
+	*RuntimeShimRoleInspector
+	events *shimEventLog
+}
+
+func (i *recordingRuntimeArtifactInspector) InspectArtifacts(ctx context.Context, session, role string) (shim.RoleArtifacts, error) {
+	if i.events != nil {
+		i.events.add("artifacts:" + role)
+	}
+	return i.RuntimeShimRoleInspector.InspectArtifacts(ctx, session, role)
 }
 
 type inspectorLifecycle struct {

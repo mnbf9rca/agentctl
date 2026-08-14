@@ -25,7 +25,7 @@ func TestRunLaunchPassesValidatedFleetToShimAndReportsReadiness(t *testing.T) {
 		"launch", "--session", "fleet", "--roles", "planner:claude,coder:codex", "--models", "coder:gpt-5.6-sol", "--dir", directory,
 	}, &stdout, &stderr, dependencies{launcher: launcher})
 	wantFleet := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}, {Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol"}}}
-	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.directory == nil || *launcher.directory != directory {
+	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.presentation != fleet.PresentationTmux || launcher.directory == nil || *launcher.directory != directory {
 		t.Fatalf("code=%d session=%q fleet=%#v directory=%v stderr=%q", code, launcher.session, launcher.fleet, launcher.directory, stderr.String())
 	}
 	if stderr.String() != "agentctl: launched session \"fleet\"; 2 roles are ready\n" {
@@ -58,6 +58,35 @@ func TestRunLaunchMapsClosedPreownershipAndCommitOutcomes(t *testing.T) {
 	}
 }
 
+// This catches detached typed outcomes falling through the generic launch
+// renderer and losing their observed PID, cleanup, or uncertainty facts.
+func TestRunLaunchRendersDetachedStartOutcomesExactly(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		err  error
+		code int
+		want string
+	}{
+		{name: "failed", err: &fleet.ShimDetachedStartFailedError{Session: "fleet", Role: "planner", Cause: errors.New("exec denied")}, code: exitLaunch, want: "agentctl: could not start a detached shim for role \"planner\" in session \"fleet\": exec denied; no child was started and cleanup removed every artifact owned by this invocation (detached-start-failed)\n"},
+		// This catches rendering a later no-child detached start failure with
+		// incomplete earlier-role cleanup as generic or complete cleanup.
+		{name: "failed retained", err: &fleet.ShimDetachedStartFailedError{Session: "fleet", Role: "coder", Cause: errors.New("exec denied"), Remaining: "role planner and durable fleet record", CleanupErr: errors.New("planner retained")}, code: exitLaunchUnproven, want: "agentctl: could not start a detached shim for role \"coder\" in session \"fleet\": exec denied; cleanup left role planner and durable fleet record: planner retained (detached-start-retained)\n"},
+		{name: "rolled back", err: &fleet.ShimDetachedStartRolledBackError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("exited")}, code: exitLaunch, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" failed before readiness: exited; cleanup observed child absence and removed every artifact owned by this invocation (detached-start-rolled-back)\n"},
+		{name: "retained", err: &fleet.ShimDetachedStartRetainedError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("exited"), CleanupErr: errors.New("lock remained")}, code: exitLaunchUnproven, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" failed before readiness: exited; cleanup left retained artifacts: lock remained (detached-start-retained)\n"},
+		{name: "uncertain", err: &fleet.ShimDetachedStartUncertainError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("deadline")}, code: exitLaunchUnproven, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" neither became ready nor was observed to exit; nothing was removed and the durable record was retained (detached-start-uncertain)\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &bytes.Buffer{}, &stderr, dependencies{launcher: &launcherStub{err: test.err}})
+			if code != test.code || stderr.String() != test.want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
+			}
+		})
+	}
+}
+
 func TestRunLaunchRejectsInvalidConfigurationBeforeShimLauncher(t *testing.T) {
 	t.Parallel()
 
@@ -76,16 +105,17 @@ func TestRunLaunchRejectsInvalidConfigurationBeforeShimLauncher(t *testing.T) {
 }
 
 type launcherStub struct {
-	result    fleet.ShimLaunchResult
-	err       error
-	called    bool
-	session   string
-	fleet     config.FleetConfig
-	directory *string
+	result       fleet.ShimLaunchResult
+	err          error
+	called       bool
+	session      string
+	fleet        config.FleetConfig
+	presentation fleet.Presentation
+	directory    *string
 }
 
-func (l *launcherStub) Launch(_ context.Context, sessionName string, fleetConfig config.FleetConfig, directory *string) (fleet.ShimLaunchResult, error) {
+func (l *launcherStub) Launch(_ context.Context, sessionName string, fleetConfig config.FleetConfig, presentation fleet.Presentation, directory *string) (fleet.ShimLaunchResult, error) {
 	l.called = true
-	l.session, l.fleet, l.directory = sessionName, fleetConfig, directory
+	l.session, l.fleet, l.presentation, l.directory = sessionName, fleetConfig, presentation, directory
 	return l.result, l.err
 }

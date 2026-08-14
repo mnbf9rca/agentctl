@@ -571,7 +571,7 @@ func TestIntegrationShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery
 		{Name: "planner", Harness: config.HarnessClaude},
 		{Name: "coder", Harness: config.HarnessCodex},
 	}}
-	launched, err := launcher.Launch(context.Background(), "shim-layout", fleetConfig, nil)
+	launched, err := launcher.Launch(context.Background(), "shim-layout", fleetConfig, fleet.PresentationTmux, nil)
 	if err != nil {
 		t.Fatalf("shim Launch() error = %v", err)
 	}
@@ -638,7 +638,7 @@ func TestIntegrationShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchSta
 	_, records, lifecycle, inspector := fixture.shimStack(t)
 	launcher := fleet.NewShimLauncher(fixture.client, lifecycle, records, fixture.shimLaunchDependencies())
 	fleetConfig := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}
-	launched, err := launcher.Launch(context.Background(), "shim-race", fleetConfig, nil)
+	launched, err := launcher.Launch(context.Background(), "shim-race", fleetConfig, fleet.PresentationTmux, nil)
 	if err != nil {
 		t.Fatalf("shim Launch() error = %v", err)
 	}
@@ -725,7 +725,7 @@ func TestIntegrationShimKillObservesChildExitBeforePresentationAndFleetCleanup(t
 	_, records, lifecycle, inspector := fixture.shimStack(t)
 	launcher := fleet.NewShimLauncher(fixture.client, lifecycle, records, fixture.shimLaunchDependencies())
 	fleetConfig := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}
-	launched, err := launcher.Launch(context.Background(), "shim-kill", fleetConfig, nil)
+	launched, err := launcher.Launch(context.Background(), "shim-kill", fleetConfig, fleet.PresentationTmux, nil)
 	if err != nil {
 		t.Fatalf("shim Launch() error = %v", err)
 	}
@@ -762,7 +762,7 @@ func TestIntegrationShimStopLetsInflightPayloadReportAndRefusesLaterPayload(t *t
 	_, records, lifecycle, _ := fixture.shimStack(t)
 	launcher := fleet.NewShimLauncher(fixture.client, lifecycle, records, fixture.shimLaunchDependencies())
 	fleetConfig := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}}
-	if _, err := launcher.Launch(context.Background(), "shim-stop-order", fleetConfig, nil); err != nil {
+	if _, err := launcher.Launch(context.Background(), "shim-stop-order", fleetConfig, fleet.PresentationTmux, nil); err != nil {
 		t.Fatalf("shim Launch() error = %v", err)
 	}
 	fixture.waitStubInvocations(1)

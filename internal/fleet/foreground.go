@@ -86,7 +86,7 @@ func (r ShimForegroundRunner) Run(ctx context.Context, request ShimForegroundReq
 	if r.server == nil || r.lifecycle == nil || r.records == nil || r.inspector == nil {
 		return errors.New("foreground shim runner requires server, lifecycle, records, and inspector")
 	}
-	if _, err := preflight.CheckShimExecutables(config.FleetConfig{Roles: []config.RoleConfig{request.Role}}, r.launcher.lookPath, r.launcher.executable); err != nil {
+	if _, err := preflight.CheckShimExecutables(config.FleetConfig{Roles: []config.RoleConfig{request.Role}}, false, r.launcher.lookPath, r.launcher.executable); err != nil {
 		return err
 	}
 

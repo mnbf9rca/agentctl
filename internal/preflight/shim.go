@@ -29,7 +29,7 @@ func (e *ShimExecutableError) Unwrap() error { return e.Err }
 // CheckShimExecutables resolves the exact current binary before checking the
 // external programs needed by the unchanged harness argv. It performs no
 // process or filesystem mutation.
-func CheckShimExecutables(fleet config.FleetConfig, lookPath LookPathFunc, executable ExecutableFunc) (string, error) {
+func CheckShimExecutables(fleet config.FleetConfig, requireTmux bool, lookPath LookPathFunc, executable ExecutableFunc) (string, error) {
 	path, err := executable()
 	if err != nil {
 		return "", &ShimExecutableError{Err: err}
@@ -37,7 +37,7 @@ func CheckShimExecutables(fleet config.FleetConfig, lookPath LookPathFunc, execu
 	if !filepath.IsAbs(path) {
 		return "", &ShimExecutableError{Path: path}
 	}
-	if err := CheckExecutables(fleet, lookPath); err != nil {
+	if err := CheckExecutables(fleet, requireTmux, lookPath); err != nil {
 		return "", err
 	}
 	return path, nil

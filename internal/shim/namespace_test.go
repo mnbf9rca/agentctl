@@ -3,6 +3,7 @@ package shim
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -12,6 +13,146 @@ import (
 	"syscall"
 	"testing"
 )
+
+// This catches an artifact observer that infers whole-role absence from only
+// the advisory lockfile or durable record while a control socket, attach
+// socket, or the independently rooted counterpart still exists.
+func TestNamespaceObserveRoleArtifactsTracksEveryCleanupArtifact(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Lock, []byte("lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path.Record, []byte("record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	control, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attach, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Attach, Net: "unix"})
+	if err != nil {
+		_ = control.Close()
+		t.Fatal(err)
+	}
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := namespace.ObserveRoleArtifacts("fleet", "planner")
+	if err != nil {
+		t.Fatalf("ObserveRoleArtifacts() error = %v", err)
+	}
+	want := RoleArtifacts{Socket: true, Attach: true, Record: true, Lock: true}
+	if got != want {
+		t.Fatalf("ObserveRoleArtifacts() = %#v, want every remaining artifact %#v", got, want)
+	}
+
+	if err := control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := attach.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path.Lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path.Record); err != nil {
+		t.Fatal(err)
+	}
+	got, err = namespace.ObserveRoleArtifacts("fleet", "planner")
+	if err != nil || got != (RoleArtifacts{}) {
+		t.Fatalf("ObserveRoleArtifacts() after cleanup = %#v, %v, want complete absence", got, err)
+	}
+}
+
+// This catches an artifact observer that returns a zero-value observation when
+// a later independent root check fails after an earlier artifact is present.
+func TestNamespaceObserveRoleArtifactsRetainsPresenceAcrossIndependentObservationError(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+	path, err := namespace.RolePath("fleet", "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := net.ListenUnix("unix", &net.UnixAddr{Name: path.Socket, Net: "unix"})
+	if err != nil {
+		_ = path.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = control.Close() })
+	if err := path.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	originalStateRoot := namespace.StateRoot + "-original"
+	if err := os.Rename(namespace.StateRoot, originalStateRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(namespace.StateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := namespace.ObserveRoleArtifacts("fleet", "planner")
+	if got != (RoleArtifacts{Socket: true}) {
+		t.Fatalf("ObserveRoleArtifacts() = %#v, want earlier observed socket retained", got)
+	}
+	var substituted *RootSubstitutedError
+	if !errors.As(err, &substituted) || substituted.Kind != "state" || substituted.Path != namespace.StateRoot {
+		t.Fatalf("ObserveRoleArtifacts() error = %T %#v, want exact state *RootSubstitutedError", err, err)
+	}
+}
+
+// This catches an artifact observer that stops after the first independent
+// root observation error instead of returning errors.Join of every failure.
+func TestNamespaceObserveRoleArtifactsJoinsIndependentObservationErrors(t *testing.T) {
+	base := shortTempDir(t)
+	namespace, err := openNamespaceRoots(namespaceRoots{Runtime: base + "/runtime", State: base + "/state"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = namespace.Close() })
+
+	for _, root := range []string{namespace.RuntimeRoot, namespace.StateRoot} {
+		if err := os.Rename(root, root+"-original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := namespace.ObserveRoleArtifacts("fleet", "planner")
+	if got != (RoleArtifacts{}) {
+		t.Fatalf("ObserveRoleArtifacts() = %#v, want no observed artifacts", got)
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		t.Fatalf("ObserveRoleArtifacts() error = %T %v, want errors.Join of runtime and state observations", err, err)
+	}
+	want := map[string]string{"runtime": namespace.RuntimeRoot, "state": namespace.StateRoot}
+	for _, child := range joined.Unwrap() {
+		var substituted *RootSubstitutedError
+		if errors.As(child, &substituted) && want[substituted.Kind] == substituted.Path {
+			delete(want, substituted.Kind)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("ObserveRoleArtifacts() joined errors missed independent observations: %v", want)
+	}
+}
 
 func TestNamespaceResolvesProductionAndDeclaredRoots(t *testing.T) {
 	production, err := resolveNamespaceRoots(1234567890, "", "", "/Users/test/Library/Application Support")
