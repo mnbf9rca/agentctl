@@ -323,7 +323,8 @@ func (s *Server) Run(ctx context.Context, request RunRequest) error {
 	serverCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	watcher := watchChild(serverCtx, runtime.child)
-	operations := newOperationExecutor(spec, runtime.relay.Writer(), nil)
+	roleInput := newRoleInputWriter(runtime.relay.Writer())
+	operations := newOperationExecutor(spec, roleInput, nil)
 	stopDone := make(chan struct{}, 1)
 	handler := &requestHandler{
 		session: request.Session, role: request.Role,
@@ -729,22 +730,54 @@ type operationWriter interface {
 	Write(context.Context, []byte) (int, error)
 }
 
+type roleInputWriter interface {
+	WriteViewer(context.Context, []byte) (int, error)
+	BeginDelivery(context.Context) (operationWriter, func(), error)
+}
+
+type gatedRoleInputWriter struct {
+	writer operationWriter
+	gate   chan struct{}
+}
+
+func newRoleInputWriter(writer operationWriter) roleInputWriter {
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &gatedRoleInputWriter{writer: writer, gate: gate}
+}
+
+func (w *gatedRoleInputWriter) WriteViewer(ctx context.Context, value []byte) (int, error) {
+	writer, release, err := w.BeginDelivery(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	return writer.Write(ctx, value)
+}
+
+func (w *gatedRoleInputWriter) BeginDelivery(ctx context.Context) (operationWriter, func(), error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-w.gate:
+	}
+	var once sync.Once
+	return w.writer, func() { once.Do(func() { w.gate <- struct{}{} }) }, nil
+}
+
 type operationWait func(context.Context, time.Duration) error
 
 type operationExecutor struct {
 	harness harness.Spec
-	writer  operationWriter
+	input   roleInputWriter
 	wait    operationWait
-	gate    chan struct{}
 }
 
-func newOperationExecutor(spec harness.Spec, writer operationWriter, wait operationWait) *operationExecutor {
+func newOperationExecutor(spec harness.Spec, input roleInputWriter, wait operationWait) *operationExecutor {
 	if wait == nil {
 		wait = waitOperationDelay
 	}
-	gate := make(chan struct{}, 1)
-	gate <- struct{}{}
-	return &operationExecutor{harness: spec, writer: writer, wait: wait, gate: gate}
+	return &operationExecutor{harness: spec, input: input, wait: wait}
 }
 
 func waitOperationDelay(ctx context.Context, duration time.Duration) error {
@@ -768,24 +801,23 @@ func (e *operationExecutor) Deliver(ctx context.Context, operation string) (Resp
 	if command.Kind != control.OperationPayload {
 		return Response{}, ErrOperationHasNoPayload
 	}
-	select {
-	case <-ctx.Done():
-		return cancelledDelivery(0), ctx.Err()
-	case <-e.gate:
+	writer, release, err := e.input.BeginDelivery(ctx)
+	if err != nil {
+		return cancelledDelivery(0), err
 	}
-	defer func() { e.gate <- struct{}{} }()
+	defer release()
 
-	if _, err := e.writer.Write(ctx, e.harness.InputClearBytes()); err != nil {
+	if _, err := writer.Write(ctx, e.harness.InputClearBytes()); err != nil {
 		return cancelledOrFailedDelivery(0, err)
 	}
-	payloadWritten, err := e.writer.Write(ctx, []byte(command.Payload))
+	payloadWritten, err := writer.Write(ctx, []byte(command.Payload))
 	if err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
 	if err := e.wait(ctx, payloadSubmitDelay); err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
-	if _, err := e.writer.Write(ctx, e.harness.SubmitBytes()); err != nil {
+	if _, err := writer.Write(ctx, e.harness.SubmitBytes()); err != nil {
 		return cancelledOrFailedDelivery(payloadWritten, err)
 	}
 	written := uint64(payloadWritten)

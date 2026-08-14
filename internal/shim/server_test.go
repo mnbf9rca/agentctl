@@ -252,7 +252,7 @@ func TestShimServerRefusesIdentityAndReadinessBeforePTYMutation(t *testing.T) {
 	writer := &recordingOperationWriter{}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error { return nil }),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error { return nil }),
 	}
 
 	wrongIdentity := exchangeWithHandler(t, handler, []byte(`{"version":1,"session":"other","role":"planner","operation":"clear"}`))
@@ -279,7 +279,7 @@ func TestShimServerControlOperationsUseNoPTYPath(t *testing.T) {
 	stopResponse := Response{Version: 1, Outcome: OutcomeStopChildExited, ChildPID: &childPID, SignalAttempted: &attempted, Signal: &signal, ChildExitObserved: &exitObserved}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: shimPID, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 		observe:    func() Response { return observeResponse },
 		stop:       func(context.Context) (Response, error) { return stopResponse, nil },
 	}
@@ -306,7 +306,7 @@ func TestShimStopWaitsForInflightPayloadReportAndRefusesLaterMutatingOperationsW
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 			close(payloadStarted)
 			<-releasePayload
 			return nil
@@ -386,7 +386,7 @@ func TestShimPayloadParkedBeforeStopRefusesAfterStopBeginsWithoutPTYWrite(t *tes
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 			firstPayload.Do(func() { close(firstPayloadStarted) })
 			<-releaseFirstPayload
 			return nil
@@ -989,7 +989,7 @@ func TestShimServerVersionAndRegistryRefusalsPrecedeMutation(t *testing.T) {
 	writer := &recordingOperationWriter{}
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 	}
 
 	skew := exchangeWithHandler(t, handler, []byte(`{"version":2,"session":"fleet","role":"planner","operation":"invented"}`))
@@ -1133,7 +1133,7 @@ func TestShimPayloadOperationWritesClosedSequenceAndReportsOnlyObservedFacts(t *
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
 	waits := make([]time.Duration, 0, 1)
-	executor := newOperationExecutor(spec, writer, func(_ context.Context, duration time.Duration) error {
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(_ context.Context, duration time.Duration) error {
 		waits = append(waits, duration)
 		return nil
 	})
@@ -1156,7 +1156,7 @@ func TestShimPayloadOperationWritesClosedSequenceAndReportsOnlyObservedFacts(t *
 func TestShimControlOperationsNeverReachThePTYWriter(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, nil)
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), nil)
 
 	for _, operation := range []string{"observe", "stop"} {
 		if _, err := executor.Deliver(context.Background(), operation); !errors.Is(err, ErrOperationHasNoPayload) {
@@ -1171,7 +1171,7 @@ func TestShimControlOperationsNeverReachThePTYWriter(t *testing.T) {
 func TestShimPayloadCancellationReportsResidueWithoutSubmit(t *testing.T) {
 	spec, _ := harness.Lookup("claude")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, func(context.Context, time.Duration) error {
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error {
 		return context.Canceled
 	})
 
@@ -1193,7 +1193,7 @@ func TestShimClientDisconnectCancelsDeliveryBeforeSubmit(t *testing.T) {
 	waiting := make(chan struct{})
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: 456, ready: true,
-		operations: newOperationExecutor(spec, writer, func(ctx context.Context, _ time.Duration) error {
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), func(ctx context.Context, _ time.Duration) error {
 			close(waiting)
 			<-ctx.Done()
 			return ctx.Err()
@@ -1237,7 +1237,7 @@ func TestShimCompletedRequestDeadlineDoesNotCancelLongStop(t *testing.T) {
 	signalName := "SIGHUP"
 	handler := &requestHandler{
 		session: "fleet", role: "planner", shimPID: 123, childPID: childPID, ready: true,
-		operations: newOperationExecutor(spec, writer, nil),
+		operations: newOperationExecutor(spec, newRoleInputWriter(writer), nil),
 		stop: func(ctx context.Context) (Response, error) {
 			select {
 			case <-time.After(ShimProtocolIOTimeout + 100*time.Millisecond):
@@ -1284,7 +1284,7 @@ func TestShimCompletedRequestDeadlineDoesNotCancelLongStop(t *testing.T) {
 func TestShimConcurrentPayloadOperationsRemainWholeSequences(t *testing.T) {
 	spec, _ := harness.Lookup("codex")
 	writer := &recordingOperationWriter{}
-	executor := newOperationExecutor(spec, writer, func(context.Context, time.Duration) error { return nil })
+	executor := newOperationExecutor(spec, newRoleInputWriter(writer), func(context.Context, time.Duration) error { return nil })
 
 	start := make(chan struct{})
 	errorsSeen := make(chan error, 2)
@@ -1308,6 +1308,50 @@ func TestShimConcurrentPayloadOperationsRemainWholeSequences(t *testing.T) {
 	compactThenClear := [][]byte{{0x15}, []byte("/compact"), {'\r'}, {0x15}, []byte("/clear"), {'\r'}}
 	if !reflect.DeepEqual(got, clearThenCompact) && !reflect.DeepEqual(got, compactThenClear) {
 		t.Fatalf("concurrent PTY writes = %#v, want two non-interleaved operation sequences", got)
+	}
+}
+
+func TestShimViewerInputCannotSplitDeliveryTransaction(t *testing.T) {
+	spec, _ := harness.Lookup("codex")
+	writer := &recordingOperationWriter{}
+	input := newRoleInputWriter(writer)
+	waiting := make(chan struct{})
+	releaseWait := make(chan struct{})
+	executor := newOperationExecutor(spec, input, func(context.Context, time.Duration) error {
+		close(waiting)
+		<-releaseWait
+		return nil
+	})
+
+	deliveryDone := make(chan error, 1)
+	go func() {
+		_, err := executor.Deliver(context.Background(), "clear")
+		deliveryDone <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("delivery did not reach its transaction wait")
+	}
+	viewerDone := make(chan error, 1)
+	go func() {
+		_, err := input.WriteViewer(context.Background(), []byte("viewer"))
+		viewerDone <- err
+	}()
+	select {
+	case err := <-viewerDone:
+		t.Fatalf("viewer input split the delivery transaction: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseWait)
+	if err := <-deliveryDone; err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+	if err := <-viewerDone; err != nil {
+		t.Fatalf("WriteViewer() error = %v", err)
+	}
+	if got, want := writer.calls, [][]byte{{0x15}, []byte("/clear"), {'\r'}, []byte("viewer")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PTY writes = %#v, want indivisible delivery followed by viewer chunk %#v", got, want)
 	}
 }
 
