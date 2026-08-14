@@ -539,7 +539,7 @@ func (inspectorLifecycle) Stop(context.Context, string, string) (shim.Response, 
 
 func mustShimFleetRecord(t *testing.T, session, directory string) ShimFleetRecord {
 	t.Helper()
-	record, err := NewShimFleetRecord(session, directory, shimTestFleet())
+	record, err := NewShimFleetRecord(session, directory, PresentationTmux, shimTestFleet())
 	if err != nil {
 		t.Fatalf("NewShimFleetRecord() error = %v", err)
 	}

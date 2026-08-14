@@ -224,7 +224,7 @@ func runForeignServer(arguments []string) error {
 		return err
 	}
 	defer func() { _ = store.Close() }()
-	record, err := fleet.NewShimFleetRecord(sessionName, mustWorkingDirectory(), config.FleetConfig{Roles: []config.RoleConfig{{Name: roleName, Harness: config.HarnessClaude}}})
+	record, err := fleet.NewShimFleetRecord(sessionName, mustWorkingDirectory(), fleet.PresentationTmux, config.FleetConfig{Roles: []config.RoleConfig{{Name: roleName, Harness: config.HarnessClaude}}})
 	if err != nil {
 		return err
 	}

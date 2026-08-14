@@ -12,6 +12,7 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
+	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/harness"
 	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
@@ -70,13 +71,29 @@ func parseHiddenShimCommand(arguments []string) (hiddenShimOptions, error) {
 }
 
 type productionHiddenShimCommand struct {
-	stdin       *os.File
-	stdout      *os.File
-	environment func() []string
+	stdin            *os.File
+	stdout           *os.File
+	environment      func() []string
+	openFleetRecords func(string) (hiddenShimFleetRecordReader, func() error, error)
+}
+
+// hiddenShimFleetRecordReader keeps mode selection dependent only on the
+// durable fleet boundary, without giving the shim package a fleet dependency.
+type hiddenShimFleetRecordReader interface {
+	Read(string) (fleet.ShimFleetRecord, error)
 }
 
 func newProductionHiddenShimCommand() hiddenShimCommand {
-	return productionHiddenShimCommand{stdin: os.Stdin, stdout: os.Stdout, environment: os.Environ}
+	return productionHiddenShimCommand{
+		stdin: os.Stdin, stdout: os.Stdout, environment: os.Environ,
+		openFleetRecords: func(stateRoot string) (hiddenShimFleetRecordReader, func() error, error) {
+			records, err := fleet.OpenShimFleetRecordStore(stateRoot)
+			if err != nil {
+				return nil, nil, err
+			}
+			return records, records.Close, nil
+		},
+	}
 }
 
 func (c productionHiddenShimCommand) Run(ctx context.Context, arguments []string, _, stderr io.Writer) int {
@@ -89,6 +106,18 @@ func (c productionHiddenShimCommand) Run(ctx context.Context, arguments []string
 		return hiddenShimInvalidRequest(stderr, options, err)
 	}
 	defer func() { _ = namespace.Close() }()
+	if c.openFleetRecords == nil {
+		return hiddenShimFailure(stderr, options, errors.New("hidden shim command has no durable fleet-record reader"))
+	}
+	records, closeRecords, err := c.openFleetRecords(namespace.StateRoot)
+	if err != nil {
+		return hiddenShimFailure(stderr, options, err)
+	}
+	operatorMode, readErr := hiddenShimModeFromFleetRecord(records, options.session)
+	closeErr := closeRecords()
+	if readErr != nil || closeErr != nil {
+		return hiddenShimFailure(stderr, options, errors.Join(readErr, closeErr))
+	}
 	terminal := ptyx.NewTerminal()
 	outerState, err := terminal.Observe(c.stdin)
 	if err != nil {
@@ -111,12 +140,32 @@ func (c productionHiddenShimCommand) Run(ctx context.Context, arguments []string
 		HarnessOptions: options.harnessOptions, Environment: c.environment(), InitialSize: initialSize,
 		OperatorInput: input, OperatorOutput: output,
 		OuterTerminal: c.stdin, OuterState: outerState,
+		OperatorMode: operatorMode,
 	})
 	runErr = errors.Join(runErr, output.Restore(), input.Restore())
 	if runErr != nil {
 		return hiddenShimFailure(stderr, options, runErr)
 	}
 	return exitOK
+}
+
+func hiddenShimOperatorMode(presentation fleet.Presentation) (shim.OperatorMode, error) {
+	switch presentation {
+	case fleet.PresentationTmux:
+		return shim.OperatorTmux, nil
+	case fleet.PresentationDetached:
+		return shim.OperatorDetached, nil
+	default:
+		return 0, fmt.Errorf("durable fleet presentation %q is not recognized", presentation)
+	}
+}
+
+func hiddenShimModeFromFleetRecord(records hiddenShimFleetRecordReader, session string) (shim.OperatorMode, error) {
+	record, err := records.Read(session)
+	if err != nil {
+		return 0, err
+	}
+	return hiddenShimOperatorMode(record.Presentation)
 }
 
 func hiddenShimInvalidRequest(stderr io.Writer, options hiddenShimOptions, err error) int {

@@ -167,7 +167,7 @@ func (l ShimLauncher) Launch(ctx context.Context, session string, fleetConfig co
 	if err != nil {
 		return ShimLaunchResult{}, err
 	}
-	record, err := NewShimFleetRecord(session, directoryName, fleetConfig)
+	record, err := NewShimFleetRecord(session, directoryName, PresentationTmux, fleetConfig)
 	if err != nil {
 		return ShimLaunchResult{}, err
 	}

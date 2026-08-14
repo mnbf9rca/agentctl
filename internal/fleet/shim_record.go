@@ -38,14 +38,24 @@ type ShimFleetRoleRecord struct {
 	Effort  string `json:"effort"`
 }
 
+// Presentation is the closed, durable PTY presentation choice. It is selected
+// by trusted fleet wiring and never supplied through the hidden shim command.
+type Presentation string
+
+const (
+	PresentationDetached Presentation = "detached"
+	PresentationTmux     Presentation = "tmux"
+)
+
 // ShimFleetRecord is the complete session roster/configuration persisted
 // before any role shim may be started.
 type ShimFleetRecord struct {
-	Version   int                            `json:"version"`
-	Session   string                         `json:"session"`
-	Directory string                         `json:"directory"`
-	Roster    []string                       `json:"roster"`
-	Roles     map[string]ShimFleetRoleRecord `json:"roles"`
+	Version      int                            `json:"version"`
+	Session      string                         `json:"session"`
+	Directory    string                         `json:"directory"`
+	Presentation Presentation                   `json:"presentation"`
+	Roster       []string                       `json:"roster"`
+	Roles        map[string]ShimFleetRoleRecord `json:"roles"`
 }
 
 // ShimFleetExistsError reports the kernel-observed session-directory
@@ -79,9 +89,9 @@ func (e *ShimFleetMutationConflictError) Error() string {
 }
 
 // NewShimFleetRecord validates and copies the complete fleet configuration.
-func NewShimFleetRecord(session, directory string, fleet config.FleetConfig) (ShimFleetRecord, error) {
+func NewShimFleetRecord(session, directory string, presentation Presentation, fleet config.FleetConfig) (ShimFleetRecord, error) {
 	record := ShimFleetRecord{
-		Version: ShimFleetRecordVersion, Session: session, Directory: directory,
+		Version: ShimFleetRecordVersion, Session: session, Directory: directory, Presentation: presentation,
 		Roster: make([]string, 0, len(fleet.Roles)),
 		Roles:  make(map[string]ShimFleetRoleRecord, len(fleet.Roles)),
 	}
@@ -106,6 +116,9 @@ func validateShimFleetRecord(record ShimFleetRecord) error {
 	}
 	if !filepath.IsAbs(record.Directory) {
 		return errors.New("fleet record directory must be absolute")
+	}
+	if record.Presentation != PresentationDetached && record.Presentation != PresentationTmux {
+		return fmt.Errorf("fleet record presentation %q must be detached or tmux", record.Presentation)
 	}
 	if len(record.Roster) == 0 {
 		return errors.New("fleet record roster must contain at least one role")
@@ -545,7 +558,7 @@ func decodeShimFleetRecord(payload []byte, expectedSession string) (ShimFleetRec
 	if len(versions) != 1 || strings.TrimSpace(string(versions[0])) != "1" {
 		return ShimFleetRecord{}, &ShimFleetRecordParseError{Cause: "fleet record protocol version is not exactly 1"}
 	}
-	allowed := map[string]bool{"version": true, "session": true, "directory": true, "roster": true, "roles": true}
+	allowed := map[string]bool{"version": true, "session": true, "directory": true, "presentation": true, "roster": true, "roles": true}
 	for name, values := range fields {
 		if len(values) != 1 {
 			return ShimFleetRecord{}, &ShimFleetRecordParseError{Cause: fmt.Sprintf("duplicate field %q", name)}
@@ -554,7 +567,7 @@ func decodeShimFleetRecord(payload []byte, expectedSession string) (ShimFleetRec
 			return ShimFleetRecord{}, &ShimFleetRecordParseError{Cause: fmt.Sprintf("unknown field %q", name)}
 		}
 	}
-	for _, required := range []string{"version", "session", "directory", "roster", "roles"} {
+	for _, required := range []string{"version", "session", "directory", "presentation", "roster", "roles"} {
 		if len(fields[required]) == 0 {
 			return ShimFleetRecord{}, &ShimFleetRecordParseError{Cause: fmt.Sprintf("missing required field %q", required)}
 		}

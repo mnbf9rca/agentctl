@@ -3,12 +3,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/harness"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 )
@@ -28,6 +31,87 @@ func TestParseHiddenShimCommandAcceptsOnlyValidatedLifecycleFields(t *testing.T)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseHiddenShimCommand() = %#v, want %#v", got, want)
 	}
+}
+
+// This catches hidden-shim wiring that chooses a drain path from terminal
+// state, defaults an invalid durable value, or swaps the two trusted modes.
+func TestHiddenShimOperatorModeUsesOnlyDurableClosedPresentation(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		presentation fleet.Presentation
+		want         shim.OperatorMode
+	}{
+		{presentation: fleet.PresentationTmux, want: shim.OperatorTmux},
+		{presentation: fleet.PresentationDetached, want: shim.OperatorDetached},
+	} {
+		got, err := hiddenShimOperatorMode(test.presentation)
+		if err != nil || got != test.want {
+			t.Fatalf("hiddenShimOperatorMode(%q) = %d, %v; want %d, nil", test.presentation, got, err, test.want)
+		}
+	}
+	if _, err := hiddenShimOperatorMode(fleet.Presentation("screen")); err == nil {
+		t.Fatal("hiddenShimOperatorMode(invalid) error = nil, want refusal")
+	}
+}
+
+// This catches hidden command startup that uses a record for another session,
+// starts from a missing record, or proceeds after a durable-record refusal.
+func TestHiddenShimModeReaderRequiresTheSelectedDurableFleet(t *testing.T) {
+	t.Parallel()
+
+	reader := &hiddenShimFleetRecordReaderFake{record: fleet.ShimFleetRecord{Presentation: fleet.PresentationDetached}}
+	got, err := hiddenShimModeFromFleetRecord(reader, "fleet")
+	if err != nil || got != shim.OperatorDetached {
+		t.Fatalf("hiddenShimModeFromFleetRecord() = %d, %v; want detached, nil", got, err)
+	}
+	if reader.session != "fleet" {
+		t.Fatalf("reader session = %q, want fleet", reader.session)
+	}
+
+	refusal := errors.New("fleet record malformed")
+	if _, err := hiddenShimModeFromFleetRecord(&hiddenShimFleetRecordReaderFake{err: refusal}, "fleet"); !errors.Is(err, refusal) {
+		t.Fatalf("hiddenShimModeFromFleetRecord(read refusal) error = %v, want %v", err, refusal)
+	}
+}
+
+// This catches moving durable-record refusal after terminal mutation or server
+// startup. A nil terminal is safe here only when the reader runs first.
+func TestHiddenShimRefusesFleetRecordBeforeTouchingTerminal(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	stateRoot := t.TempDir()
+	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", runtimeRoot)
+	t.Setenv("AGENTCTL_STATE_ROOT", stateRoot)
+	reader := &hiddenShimFleetRecordReaderFake{err: errors.New("durable fleet record missing")}
+	command := productionHiddenShimCommand{
+		openFleetRecords: func(string) (hiddenShimFleetRecordReader, func() error, error) {
+			return reader, func() error { return nil }, nil
+		},
+	}
+	var stderr strings.Builder
+	if got := command.Run(context.Background(), []string{"--session", "fleet", "--role", "planner", "--harness", "claude"}, nil, &stderr); got != exitUnclassified {
+		t.Fatalf("Run() exit = %d, want %d", got, exitUnclassified)
+	}
+	if reader.session != "fleet" || !strings.Contains(stderr.String(), "durable fleet record missing") {
+		t.Fatalf("Run() reader session/output = %q/%q, want selected fleet and durable refusal", reader.session, stderr.String())
+	}
+}
+
+type hiddenShimFleetRecordReaderFake struct {
+	record  fleet.ShimFleetRecord
+	err     error
+	session string
+}
+
+func (r *hiddenShimFleetRecordReaderFake) Read(session string) (fleet.ShimFleetRecord, error) {
+	r.session = session
+	return r.record, r.err
 }
 
 func TestHiddenShimFailureUsesExactCommitUncertainAndOwnershipRetainedRows(t *testing.T) {

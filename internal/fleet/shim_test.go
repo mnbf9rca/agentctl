@@ -31,7 +31,7 @@ func TestShimFleetRecordStorePersistsCompleteVersionedConfig(t *testing.T) {
 		t.Fatalf("OpenShimFleetRecordStore() error = %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	record, err := NewShimFleetRecord("fleet", "/repo path", shimTestFleet())
+	record, err := NewShimFleetRecord("fleet", "/repo path", PresentationTmux, shimTestFleet())
 	if err != nil {
 		t.Fatalf("NewShimFleetRecord() error = %v", err)
 	}
@@ -44,7 +44,7 @@ func TestShimFleetRecordStorePersistsCompleteVersionedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", recordPath, err)
 	}
-	wantPayload := "{\"version\":1,\"session\":\"fleet\",\"directory\":\"/repo path\",\"roster\":[\"planner\",\"coder\"],\"roles\":{\"coder\":{\"harness\":\"codex\",\"model\":\"gpt-5.6-sol\",\"effort\":\"high\"},\"planner\":{\"harness\":\"claude\",\"model\":\"\",\"effort\":\"max\"}}}\n"
+	wantPayload := "{\"version\":1,\"session\":\"fleet\",\"directory\":\"/repo path\",\"presentation\":\"tmux\",\"roster\":[\"planner\",\"coder\"],\"roles\":{\"coder\":{\"harness\":\"codex\",\"model\":\"gpt-5.6-sol\",\"effort\":\"high\"},\"planner\":{\"harness\":\"claude\",\"model\":\"\",\"effort\":\"max\"}}}\n"
 	if string(payload) != wantPayload {
 		t.Fatalf("fleet record payload = %q, want %q", payload, wantPayload)
 	}
@@ -62,6 +62,99 @@ func TestShimFleetRecordStorePersistsCompleteVersionedConfig(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, record) {
 		t.Fatalf("Read() = %#v, want %#v", got, record)
+	}
+}
+
+// This catches a writer that omits presentation, changes its durable spelling,
+// or moves it out of the version-1 schema order.
+func TestShimFleetRecordPresentationIsRequiredAndEncodedInSchemaOrder(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatalf("Chmod(state root): %v", err)
+	}
+	store, err := OpenShimFleetRecordStore(stateRoot)
+	if err != nil {
+		t.Fatalf("OpenShimFleetRecordStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	record, err := NewShimFleetRecord("fleet", "/repo", PresentationTmux, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
+	if err != nil {
+		t.Fatalf("NewShimFleetRecord() error = %v", err)
+	}
+	if err := store.Create(record); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	payload, err := os.ReadFile(filepath.Join(stateRoot, "sessions", "fleet", "fleet.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(fleet record): %v", err)
+	}
+	want := "{\"version\":1,\"session\":\"fleet\",\"directory\":\"/repo\",\"presentation\":\"tmux\",\"roster\":[\"planner\"],\"roles\":{\"planner\":{\"harness\":\"claude\",\"model\":\"\",\"effort\":\"\"}}}\n"
+	if got := string(payload); got != want {
+		t.Fatalf("fleet record bytes = %q, want %q", got, want)
+	}
+	got, err := store.Read("fleet")
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Presentation != PresentationTmux {
+		t.Fatalf("Read().Presentation = %q, want tmux", got.Presentation)
+	}
+}
+
+// This catches accepting the pre-cutover record dialect, accepting a third
+// presentation mode, or interpreting foreign versions beyond the version pass.
+func TestDecodeShimFleetRecordStrictlyRequiresCurrentPresentationSchema(t *testing.T) {
+	t.Parallel()
+
+	valid := "{\"version\":1,\"session\":\"fleet\",\"directory\":\"/repo\",\"presentation\":\"detached\",\"roster\":[\"planner\"],\"roles\":{\"planner\":{\"harness\":\"claude\",\"model\":\"\",\"effort\":\"\"}}}"
+	for _, test := range []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "missing presentation does not adopt old record", payload: "{\"version\":1,\"session\":\"fleet\",\"directory\":\"/repo\",\"roster\":[\"planner\"],\"roles\":{\"planner\":{\"harness\":\"claude\",\"model\":\"\",\"effort\":\"\"}}}", want: "missing required field \"presentation\""},
+		{name: "invalid presentation", payload: strings.Replace(valid, "\"detached\"", "\"screen\"", 1), want: "presentation"},
+		{name: "wrong presentation type", payload: strings.Replace(valid, "\"detached\"", "true", 1), want: "cannot unmarshal bool"},
+		{name: "duplicate presentation", payload: strings.Replace(valid, "\"roster\"", "\"presentation\":\"tmux\",\"roster\"", 1), want: "duplicate field \"presentation\""},
+		{name: "foreign version wins over unknown schema", payload: strings.Replace(valid, "\"version\":1", "\"version\":2,\"unknown\":true", 1), want: "fleet record protocol version is not exactly 1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeShimFleetRecord([]byte(test.payload), "fleet")
+			var malformed *ShimFleetRecordParseError
+			if !errors.As(err, &malformed) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("decodeShimFleetRecord() error = %T %v, want invalid record containing %q", err, err, test.want)
+			}
+		})
+	}
+}
+
+// This catches a foreground/relaunch record mutation that silently resets the
+// launch presentation while replacing or extending role configuration.
+func TestForegroundReplacementPreservesFleetPresentation(t *testing.T) {
+	t.Parallel()
+
+	expected := ShimFleetRecord{
+		Version: 1, Session: "fleet", Directory: "/repo", Presentation: PresentationTmux,
+		Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}},
+	}
+	replacement := foregroundReplacement(expected, config.RoleConfig{Name: "coder", Harness: config.HarnessCodex}, false)
+	if replacement.Presentation != PresentationTmux {
+		t.Fatalf("foregroundReplacement().Presentation = %q, want tmux", replacement.Presentation)
+	}
+}
+
+// This catches a size limit accidentally bypassed by a future writer change.
+func TestMarshalShimFleetRecordRefusesPayloadOverMaximum(t *testing.T) {
+	t.Parallel()
+
+	record := ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/repo", Presentation: PresentationDetached, Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{
+		"planner": {Harness: "claude", Model: strings.Repeat("m", shimFleetRecordMaxBytes)},
+	}}
+	if _, err := marshalShimFleetRecord(record); err == nil {
+		t.Fatal("marshalShimFleetRecord() error = nil, want maximum-size refusal")
 	}
 }
 
@@ -117,7 +210,7 @@ func TestShimFleetRecordStoreConcurrentCreateHasOneKernelWinner(t *testing.T) {
 		t.Fatalf("OpenShimFleetRecordStore(second): %v", err)
 	}
 	defer func() { _ = second.Close() }()
-	record, err := NewShimFleetRecord("fleet", "/repo", shimTestFleet())
+	record, err := NewShimFleetRecord("fleet", "/repo", PresentationTmux, shimTestFleet())
 	if err != nil {
 		t.Fatalf("NewShimFleetRecord() error = %v", err)
 	}
@@ -289,7 +382,7 @@ func TestShimFleetRecordStoreDecodesVersionBeforeUnknownFieldsAndRejectsNestedUn
 		},
 		{
 			name:    "unknown role configuration field",
-			payload: `{"version":1,"session":"fleet","directory":"/repo","roster":["planner"],"roles":{"planner":{"harness":"claude","model":"","effort":"","future":true}}}`,
+			payload: `{"version":1,"session":"fleet","directory":"/repo","presentation":"tmux","roster":["planner"],"roles":{"planner":{"harness":"claude","model":"","effort":"","future":true}}}`,
 			cause:   `roles["planner"]: unknown field "future"`,
 		},
 	}
