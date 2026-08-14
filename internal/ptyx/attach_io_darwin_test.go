@@ -356,6 +356,47 @@ func TestTerminalWriterCompletesPartialWritesWithEINTRAndKqueueRetry(t *testing.
 	}
 }
 
+func TestTerminalWriterEmptyWriteHonorsCancellationAndClose(t *testing.T) {
+	newWriter := func(t *testing.T) *TerminalWriter {
+		t.Helper()
+		file := newTestFile(t, "terminal")
+		writer, err := newTerminalWriter(file, attachIOSyscalls{
+			fcntl: func(_ int, command, _ int) (int, error) {
+				if command == syscall.F_GETFL {
+					return syscall.O_NONBLOCK, nil
+				}
+				return 0, nil
+			},
+			read:  syscall.Read,
+			write: syscall.Write,
+		}, registrationOnlyKqueueSystem(nil))
+		if err != nil {
+			t.Fatalf("newTerminalWriter() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writer.Close() })
+		return writer
+	}
+
+	t.Run("canceled context", func(t *testing.T) {
+		writer := newWriter(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if n, err := writer.Write(ctx, nil); n != 0 || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Write(nil) = (%d, %v), want (0, context.Canceled)", n, err)
+		}
+	})
+
+	t.Run("closed writer", func(t *testing.T) {
+		writer := newWriter(t)
+		if err := writer.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if n, err := writer.Write(context.Background(), nil); n != 0 || !errors.Is(err, ErrAttachDescriptorUnavailable) {
+			t.Fatalf("Write(nil) = (%d, %v), want (0, unavailable descriptor)", n, err)
+		}
+	})
+}
+
 func TestTerminalWriterReturnsExactPrefixOnCancellationAtPermanentSink(t *testing.T) {
 	file := newTestFile(t, "terminal")
 	waitStarted := make(chan struct{})

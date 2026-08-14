@@ -5,6 +5,7 @@ package ptyx
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"syscall"
@@ -35,6 +36,65 @@ func TestKqueueWaiterRegistersDescriptorAndCancellationExactly(t *testing.T) {
 	}
 	if !reflect.DeepEqual(changes, want) {
 		t.Fatalf("registration = %#v, want %#v", changes, want)
+	}
+}
+
+func TestKqueueWaiterRetriesEINTRWhileRegisteringEvents(t *testing.T) {
+	registrations := 0
+	system := kqueueSyscalls{
+		open: func() (int, error) { return 98, nil },
+		kevent: func(_ int, changes, events []syscall.Kevent_t, _ *syscall.Timespec) (int, error) {
+			if len(events) == 0 && len(changes) == 1 {
+				return 0, nil
+			}
+			if len(events) != 0 || len(changes) != 2 {
+				t.Fatalf("registration kevent changes=%#v events=%#v", changes, events)
+			}
+			registrations++
+			if registrations == 1 {
+				return 0, syscall.EINTR
+			}
+			return 0, nil
+		},
+		close: func(int) error { return nil },
+	}
+
+	waiter, err := newKqueueWaiter(24, syscall.EVFILT_READ, system)
+	if err != nil {
+		t.Fatalf("newKqueueWaiter() error = %v", err)
+	}
+	t.Cleanup(func() { _ = waiter.Close() })
+	if registrations != 2 {
+		t.Fatalf("registration calls = %d, want 2", registrations)
+	}
+}
+
+func TestKqueueWaiterWakeRetriesEINTR(t *testing.T) {
+	triggers := 0
+	system := kqueueSyscalls{
+		open: func() (int, error) { return 99, nil },
+		kevent: func(_ int, changes, events []syscall.Kevent_t, _ *syscall.Timespec) (int, error) {
+			if len(events) == 0 && len(changes) == 1 {
+				triggers++
+				if triggers == 1 {
+					return 0, syscall.EINTR
+				}
+			}
+			return 0, nil
+		},
+		close: func(int) error { return nil },
+	}
+
+	waiter, err := newKqueueWaiter(25, syscall.EVFILT_WRITE, system)
+	if err != nil {
+		t.Fatalf("newKqueueWaiter() error = %v", err)
+	}
+	t.Cleanup(func() { _ = waiter.Close() })
+	if err := waiter.Wake(); err != nil {
+		t.Fatalf("Wake() error = %v", err)
+	}
+	if triggers != 2 {
+		t.Fatalf("wake trigger calls = %d, want 2", triggers)
 	}
 }
 
@@ -103,6 +163,169 @@ func TestKqueueWaiterWakesImmediatelyForCancellationAndRetriesEINTR(t *testing.T
 	}
 	if waits != 2 || triggers != 1 {
 		t.Fatalf("waits=%d triggers=%d, want 2 and 1", waits, triggers)
+	}
+}
+
+func TestKqueueWaiterCancellationClosesKqueueWhenWakeFails(t *testing.T) {
+	wantWakeErr := errors.New("wake failed")
+	waitStarted := make(chan struct{})
+	kqueueClosed := make(chan struct{})
+	var closeOnce sync.Once
+	system := kqueueSyscalls{
+		open: func() (int, error) { return 100, nil },
+		kevent: func(_ int, changes, events []syscall.Kevent_t, _ *syscall.Timespec) (int, error) {
+			if len(events) == 0 {
+				if len(changes) == 1 {
+					return 0, wantWakeErr
+				}
+				return 0, nil
+			}
+			close(waitStarted)
+			<-kqueueClosed
+			return 0, syscall.EBADF
+		},
+		close: func(int) error {
+			closeOnce.Do(func() { close(kqueueClosed) })
+			return nil
+		},
+	}
+	waiter, err := newKqueueWaiter(26, syscall.EVFILT_READ, system)
+	if err != nil {
+		t.Fatalf("newKqueueWaiter() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := waiter.Wait(ctx)
+		done <- err
+	}()
+	<-waitStarted
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		closeOnce.Do(func() { close(kqueueClosed) })
+		<-done
+		t.Fatal("Wait() remained blocked after cancellation trigger failed")
+	}
+}
+
+func TestKqueueWaiterCancellationClosesAfterCloseWakeFails(t *testing.T) {
+	wantWakeErr := errors.New("wake failed")
+	waitStarted := make(chan struct{})
+	kqueueClosed := make(chan struct{})
+	var closeOnce sync.Once
+	system := kqueueSyscalls{
+		open: func() (int, error) { return 101, nil },
+		kevent: func(_ int, changes, events []syscall.Kevent_t, _ *syscall.Timespec) (int, error) {
+			if len(events) == 0 {
+				if len(changes) == 1 {
+					return 0, wantWakeErr
+				}
+				return 0, nil
+			}
+			close(waitStarted)
+			<-kqueueClosed
+			return 0, syscall.EBADF
+		},
+		close: func(int) error {
+			closeOnce.Do(func() { close(kqueueClosed) })
+			return nil
+		},
+	}
+	waiter, err := newKqueueWaiter(27, syscall.EVFILT_READ, system)
+	if err != nil {
+		t.Fatalf("newKqueueWaiter() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := waiter.Wait(ctx)
+		done <- err
+	}()
+	<-waitStarted
+	if err := waiter.Close(); !errors.Is(err, wantWakeErr) {
+		t.Fatalf("Close() error = %v, want wake failure", err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		closeOnce.Do(func() { close(kqueueClosed) })
+		<-done
+		t.Fatal("Wait() remained blocked when cancellation followed a failed Close wake")
+	}
+}
+
+func TestKqueueWaiterCancellationFallbackReleasesRealDarwinKevent(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = readEnd.Close()
+		_ = writeEnd.Close()
+	})
+
+	wantWakeErr := errors.New("injected wake failure")
+	waitStarted := make(chan struct{})
+	var waitStartedOnce sync.Once
+	waitCalls := 0
+	wantTrigger := []syscall.Kevent_t{{Ident: kqueueCancelIdent, Filter: syscall.EVFILT_USER, Fflags: syscall.NOTE_TRIGGER}}
+	system := realKqueueSyscalls
+	system.kevent = func(kq int, changes, events []syscall.Kevent_t, timeout *syscall.Timespec) (int, error) {
+		if len(events) == 0 && reflect.DeepEqual(changes, wantTrigger) {
+			return 0, wantWakeErr
+		}
+		if len(events) > 0 {
+			waitCalls++
+			waitStartedOnce.Do(func() { close(waitStarted) })
+		}
+		return syscall.Kevent(kq, changes, events, timeout)
+	}
+	waiter, err := newKqueueWaiter(int(readEnd.Fd()), syscall.EVFILT_READ, system)
+	if err != nil {
+		t.Fatalf("newKqueueWaiter() error = %v", err)
+	}
+	t.Cleanup(func() { _ = waiter.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := waiter.Wait(ctx)
+		done <- err
+	}()
+	<-waitStarted
+	select {
+	case err := <-done:
+		t.Fatalf("real kevent returned before cancellation: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Wait() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		waiter.finalizeClose()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("Wait() remained blocked after guarded kqueue cleanup")
+		}
+		t.Fatal("closing the real Darwin kqueue did not release the active kevent")
+	}
+	if waitCalls != 1 {
+		t.Fatalf("real blocking kevent calls = %d, want 1 (no post-close wait)", waitCalls)
 	}
 }
 
@@ -271,7 +494,7 @@ func TestKqueueWaiterCloseJoinsOnlyTheWokenWaitBeforeClosingFD(t *testing.T) {
 	}
 }
 
-func TestKqueueWaiterCloseReturnsWakeFailureWithoutClosingActiveKqueue(t *testing.T) {
+func TestKqueueWaiterCloseDefersCleanupAfterFailedActiveWake(t *testing.T) {
 	wantErr := errors.New("wake failed")
 	waitStarted := make(chan struct{})
 	releaseWait := make(chan struct{})
@@ -326,5 +549,8 @@ func TestKqueueWaiterCloseReturnsWakeFailureWithoutClosingActiveKqueue(t *testin
 		}
 	case <-time.After(time.Second):
 		t.Fatal("released Wait did not return")
+	}
+	if !closed {
+		t.Fatal("kqueue was not eventually closed after the active wait returned")
 	}
 }

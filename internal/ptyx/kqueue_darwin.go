@@ -32,15 +32,18 @@ var realKqueueSyscalls = kqueueSyscalls{
 // kqueueWaiter owns only its kqueue descriptor. The watched descriptor remains
 // owned by the reader or writer that constructed it.
 type kqueueWaiter struct {
-	fd        int
-	filter    int16
-	kq        int
-	system    kqueueSyscalls
-	waitMu    sync.Mutex
-	lifeMu    sync.Mutex
-	closed    bool
-	closeOnce sync.Once
-	closeErr  error
+	fd           int
+	filter       int16
+	kq           int
+	system       kqueueSyscalls
+	waitMu       sync.Mutex
+	lifeMu       sync.Mutex
+	closed       bool
+	closeOnce    sync.Once
+	fdClose      sync.Once
+	closePending bool
+	wakeFailed   bool
+	closeErr     error
 }
 
 func newKqueueWaiter(fd int, filter int16, system kqueueSyscalls) (*kqueueWaiter, error) {
@@ -53,8 +56,15 @@ func newKqueueWaiter(fd int, filter int16, system kqueueSyscalls) (*kqueueWaiter
 		{Ident: uint64(fd), Filter: filter, Flags: syscall.EV_ADD | syscall.EV_ENABLE},
 		{Ident: kqueueCancelIdent, Filter: syscall.EVFILT_USER, Flags: syscall.EV_ADD | syscall.EV_ENABLE | syscall.EV_CLEAR},
 	}
-	if _, err := system.kevent(kq, changes, nil, nil); err != nil {
-		return nil, errors.Join(fmt.Errorf("register kqueue events: %w", err), system.close(kq))
+	for {
+		_, err := system.kevent(kq, changes, nil, nil)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("register kqueue events: %w", err), system.close(kq))
+		}
+		break
 	}
 	return waiter, nil
 }
@@ -64,7 +74,10 @@ func newKqueueWaiter(fd int, filter int16, system kqueueSyscalls) (*kqueueWaiter
 // 5 and 10; it does not poll and does not park a goroutine in descriptor I/O.
 func (w *kqueueWaiter) Wait(ctx context.Context) (bool, error) {
 	w.waitMu.Lock()
-	defer w.waitMu.Unlock()
+	defer func() {
+		w.waitMu.Unlock()
+		w.finalizePendingClose()
+	}()
 	if w.isClosed() {
 		return false, errKqueueWaiterClosed
 	}
@@ -78,7 +91,7 @@ func (w *kqueueWaiter) Wait(ctx context.Context) (bool, error) {
 		defer close(wakeFinished)
 		select {
 		case <-ctx.Done():
-			_ = w.Wake()
+			w.wakeForCancellation()
 		case <-stopWake:
 		}
 	}()
@@ -90,6 +103,9 @@ func (w *kqueueWaiter) Wait(ctx context.Context) (bool, error) {
 	events := make([]syscall.Kevent_t, 4)
 	for {
 		count, err := w.system.kevent(w.kq, nil, events, nil)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return false, contextErr
+		}
 		if w.isClosed() {
 			return false, errKqueueWaiterClosed
 		}
@@ -121,6 +137,32 @@ func (w *kqueueWaiter) Wait(ctx context.Context) (bool, error) {
 			return event.Flags&syscall.EV_EOF != 0, nil
 		}
 	}
+}
+
+// wakeForCancellation falls back to closing the waiter-owned kqueue when a
+// trigger fails. On Darwin, closing the kqueue releases the active kevent with
+// EBADF; Wait checks the canceled context before the closed lifecycle state and
+// never re-enters kevent, so descriptor reuse cannot redirect another wait.
+func (w *kqueueWaiter) wakeForCancellation() {
+	w.lifeMu.Lock()
+	if w.closed {
+		fallbackClose := w.closePending && w.wakeFailed
+		w.lifeMu.Unlock()
+		if fallbackClose {
+			w.finalizeClose()
+		}
+		return
+	}
+	wakeErr := w.wakeLocked()
+	if wakeErr == nil {
+		w.lifeMu.Unlock()
+		return
+	}
+	w.closed = true
+	w.wakeFailed = true
+	w.closeErr = errors.Join(w.closeErr, wakeErr)
+	w.lifeMu.Unlock()
+	w.finalizeClose()
 }
 
 func (w *kqueueWaiter) isClosed() bool {
@@ -158,8 +200,16 @@ func (w *kqueueWaiter) wakeLocked() error {
 func (w *kqueueWaiter) Close() error {
 	w.closeOnce.Do(func() {
 		w.lifeMu.Lock()
+		if w.closed {
+			w.lifeMu.Unlock()
+			w.finalizeClose()
+			return
+		}
 		w.closed = true
 		wakeErr := w.wakeLocked()
+		w.closePending = true
+		w.wakeFailed = wakeErr != nil
+		w.closeErr = errors.Join(w.closeErr, wakeErr)
 		w.lifeMu.Unlock()
 
 		if wakeErr != nil {
@@ -167,25 +217,42 @@ func (w *kqueueWaiter) Close() error {
 			// when no wait owns the descriptor; otherwise retain the kqueue and
 			// report the wake defect rather than risking descriptor reuse.
 			if w.waitMu.TryLock() {
-				var closeErr error
-				if err := w.system.close(w.kq); err != nil {
-					closeErr = fmt.Errorf("close kqueue: %w", err)
-				}
+				w.finalizeClose()
 				w.waitMu.Unlock()
-				w.closeErr = errors.Join(wakeErr, closeErr)
-				return
 			}
-			w.closeErr = wakeErr
 			return
 		}
 
 		w.waitMu.Lock()
-		defer w.waitMu.Unlock()
+		w.finalizeClose()
+		w.waitMu.Unlock()
+	})
+	w.lifeMu.Lock()
+	defer w.lifeMu.Unlock()
+	return w.closeErr
+}
+
+func (w *kqueueWaiter) finalizePendingClose() {
+	w.lifeMu.Lock()
+	pending := w.closePending
+	w.lifeMu.Unlock()
+	if !pending {
+		return
+	}
+	w.waitMu.Lock()
+	w.finalizeClose()
+	w.waitMu.Unlock()
+}
+
+func (w *kqueueWaiter) finalizeClose() {
+	w.fdClose.Do(func() {
 		var closeErr error
 		if err := w.system.close(w.kq); err != nil {
 			closeErr = fmt.Errorf("close kqueue: %w", err)
 		}
-		w.closeErr = errors.Join(wakeErr, closeErr)
+		w.lifeMu.Lock()
+		w.closePending = false
+		w.closeErr = errors.Join(w.closeErr, closeErr)
+		w.lifeMu.Unlock()
 	})
-	return w.closeErr
 }

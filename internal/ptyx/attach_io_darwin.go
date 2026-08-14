@@ -265,6 +265,15 @@ func newTerminalWriter(terminal *os.File, ioSystem attachIOSyscalls, kqueueSyste
 func (w *TerminalWriter) Write(ctx context.Context, value []byte) (int, error) {
 	operation, finish := w.descriptor.operationContext(ctx)
 	defer finish()
+	if len(value) == 0 {
+		if err := operation.Err(); err != nil {
+			return 0, err
+		}
+		if err := w.descriptor.available(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
 	written := 0
 	for written < len(value) {
 		if err := operation.Err(); err != nil {
