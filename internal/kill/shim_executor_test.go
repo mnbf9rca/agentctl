@@ -344,7 +344,7 @@ func TestShimExecutorRetainsFleetRecordWhenFailedExactIDRemovalCannotProvePresen
 
 func killFleetRecord(t *testing.T, roles []config.RoleConfig) fleet.ShimFleetRecord {
 	t.Helper()
-	record, err := fleet.NewShimFleetRecord("fleet", "/repo", config.FleetConfig{Roles: roles})
+	record, err := fleet.NewShimFleetRecord("fleet", "/repo", fleet.PresentationTmux, config.FleetConfig{Roles: roles})
 	if err != nil {
 		t.Fatalf("NewShimFleetRecord() error = %v", err)
 	}

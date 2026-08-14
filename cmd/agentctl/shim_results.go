@@ -278,6 +278,11 @@ func renderStartToken(token *shim.StartToken) string {
 }
 
 func shimRelaunchError(stderr io.Writer, sessionName, role string, err error) int {
+	var detached *fleet.ShimDetachedRelaunchUnsupportedError
+	if errors.As(err, &detached) {
+		fmt.Fprintf(stderr, "agentctl: refusing to relaunch role %q in session %q; durable fleet presentation is detached and this build cannot recreate a detached role (detached-relaunch-unsupported)\n", detached.Role, detached.Session)
+		return exitUnsafe
+	}
 	var refusal *fleet.ShimRelaunchRefusalError
 	if errors.As(err, &refusal) {
 		return shimObservationResult(stderr, "relaunch", sessionName, role, refusal.Observation)

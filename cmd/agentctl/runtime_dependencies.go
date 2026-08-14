@@ -166,6 +166,7 @@ func (e productionForegroundExecutor) Execute(ctx context.Context, sessionName s
 			Session: sessionName, Role: role.Name, Harness: string(role.Harness),
 			HarnessOptions: harnessOptions(role), Environment: e.environment(), InitialSize: initialSize,
 			OperatorInput: input, OperatorOutput: output, OuterTerminal: e.stdin, OuterState: outerState,
+			OperatorMode: shim.OperatorForeground,
 		},
 	})
 	restoreErr := errors.Join(output.Restore(), input.Restore())

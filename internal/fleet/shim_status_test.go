@@ -13,7 +13,7 @@ func TestShimStatusFleetReaderAdaptsDurableRosterWithoutChangingProvenance(t *te
 	t.Parallel()
 
 	record := ShimFleetRecord{
-		Version: 1, Session: "fleet", Directory: "/work", Roster: []string{"planner"},
+		Version: 1, Session: "fleet", Directory: "/work", Presentation: PresentationTmux, Roster: []string{"planner"},
 		Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude", Model: "fable", Effort: "max"}},
 	}
 	reader := NewShimStatusFleetReader(shimStatusFleetRecordsFake{record: record})

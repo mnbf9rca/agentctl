@@ -210,6 +210,17 @@ func (e *ShimRelaunchRefusalError) Error() string {
 
 func (e *ShimRelaunchRefusalError) Unwrap() error { return e.Cause }
 
+// ShimDetachedRelaunchUnsupportedError is a transitional fail-closed refusal.
+// This build can persist and run detached fleets but cannot yet recreate one.
+type ShimDetachedRelaunchUnsupportedError struct {
+	Session string
+	Role    string
+}
+
+func (e *ShimDetachedRelaunchUnsupportedError) Error() string {
+	return "durable fleet presentation is detached; this build cannot recreate a detached role"
+}
+
 // ShimRelaunchResult reports the created presentation only as optional UI
 // facts; readiness came from the shim runtime response.
 type ShimRelaunchResult struct {
@@ -269,6 +280,9 @@ func (r ShimRelauncher) Relaunch(ctx context.Context, session string, request Re
 	stored, ok := record.Roles[request.Role]
 	if !ok {
 		return ShimRelaunchResult{}, &UnknownRoleError{Role: request.Role, Roster: joinShimRoster(record.Roster)}
+	}
+	if record.Presentation == PresentationDetached {
+		return ShimRelaunchResult{}, &ShimDetachedRelaunchUnsupportedError{Session: session, Role: request.Role}
 	}
 	observation, err := r.inspector.Inspect(ctx, session, request.Role)
 	if err != nil {

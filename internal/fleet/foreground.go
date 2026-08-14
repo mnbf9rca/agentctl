@@ -172,7 +172,7 @@ func (r ShimForegroundRunner) prepareFleetRecord(request ShimForegroundRequest) 
 	if !errors.Is(err, os.ErrNotExist) {
 		return ShimFleetRecord{}, false, false, err
 	}
-	record, err = NewShimFleetRecord(request.Session, request.Directory, config.FleetConfig{Roles: []config.RoleConfig{request.Role}})
+	record, err = NewShimFleetRecord(request.Session, request.Directory, PresentationDetached, config.FleetConfig{Roles: []config.RoleConfig{request.Role}})
 	if err != nil {
 		return ShimFleetRecord{}, false, false, err
 	}

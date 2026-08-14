@@ -19,26 +19,29 @@ func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t
 	t.Parallel()
 
 	for _, test := range []struct {
-		name       string
-		existing   *ShimFleetRecord
-		role       config.RoleConfig
-		wantEvents []string
-		wantRoster []string
+		name             string
+		existing         *ShimFleetRecord
+		role             config.RoleConfig
+		wantEvents       []string
+		wantRoster       []string
+		wantPresentation Presentation
 	}{
 		{
-			name:       "new fleet record precedes role ownership",
-			role:       config.RoleConfig{Name: "planner", Harness: config.HarnessClaude},
-			wantEvents: []string{"read", "create", "server", "observe"},
-			wantRoster: []string{"planner"},
+			name:             "new fleet record precedes role ownership",
+			role:             config.RoleConfig{Name: "planner", Harness: config.HarnessClaude},
+			wantEvents:       []string{"read", "create", "server", "observe"},
+			wantRoster:       []string{"planner"},
+			wantPresentation: PresentationDetached,
 		},
 		{
 			name: "new role extends only after ready observation",
-			existing: &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{
+			existing: &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Presentation: PresentationTmux, Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{
 				"planner": {Harness: "claude"},
 			}},
-			role:       config.RoleConfig{Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol", Effort: "high"},
-			wantEvents: []string{"read", "inspect", "server", "observe", "extend"},
-			wantRoster: []string{"planner", "coder"},
+			role:             config.RoleConfig{Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol", Effort: "high"},
+			wantEvents:       []string{"read", "inspect", "server", "observe", "extend"},
+			wantRoster:       []string{"planner", "coder"},
+			wantPresentation: PresentationTmux,
 		},
 	} {
 		test := test
@@ -77,6 +80,9 @@ func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t
 			if got := records.current.Roster; !reflect.DeepEqual(got, test.wantRoster) {
 				t.Fatalf("roster = %#v, want %#v", got, test.wantRoster)
 			}
+			if got := records.current.Presentation; got != test.wantPresentation {
+				t.Fatalf("presentation = %q, want %q", got, test.wantPresentation)
+			}
 		})
 	}
 }
@@ -85,7 +91,7 @@ func TestShimForegroundRunnerStopsOwnedRoleWhenFleetExtensionConflicts(t *testin
 	t.Parallel()
 
 	events := &foregroundEvents{}
-	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
+	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Presentation: PresentationTmux, Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
 	records := &fakeForegroundRecords{events: events, existing: existing, extendErr: &ShimFleetMutationConflictError{Session: "fleet", Cause: "changed"}}
 	server := &fakeForegroundServer{events: events, release: make(chan struct{})}
 	lifecycle := fakeForegroundLifecycle{events: events, stop: true, release: server.release}
@@ -107,7 +113,7 @@ func TestShimForegroundRunnerRetainsReadyRoleOnUncertainFleetCommit(t *testing.T
 	t.Parallel()
 
 	events := &foregroundEvents{}
-	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
+	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/work", Presentation: PresentationTmux, Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
 	records := &fakeForegroundRecords{events: events, existing: existing, extendErr: &shim.RecordCommitUncertainError{Err: errors.New("sync failed")}}
 	server := &fakeForegroundServer{events: events, release: make(chan struct{})}
 	lifecycle := fakeForegroundLifecycle{events: events, stop: true, release: server.release}
@@ -141,7 +147,7 @@ func TestShimForegroundRunnerRefusesDirectoryDisagreementBeforeRoleStartOrFleetM
 	t.Parallel()
 
 	events := &foregroundEvents{}
-	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/stored", Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
+	existing := &ShimFleetRecord{Version: 1, Session: "fleet", Directory: "/stored", Presentation: PresentationTmux, Roster: []string{"planner"}, Roles: map[string]ShimFleetRoleRecord{"planner": {Harness: "claude"}}}
 	records := &fakeForegroundRecords{events: events, existing: existing}
 	runner := NewShimForegroundRunner(&fakeForegroundServer{events: events, release: make(chan struct{})}, fakeForegroundLifecycle{events: events}, records, fakeForegroundInspector{events: events}, ShimLaunchDependencies{
 		LookPath: func(name string) (string, error) { return "/bin/" + name, nil }, Executable: func() (string, error) { return "/bin/agentctl", nil },

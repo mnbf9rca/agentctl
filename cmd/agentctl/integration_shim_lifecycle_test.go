@@ -355,7 +355,7 @@ func TestIntegrationPublicCommandsConsultRuntimeAnchorBeforeReportingDivergentSt
 func TestIntegrationPublicAttachRefusesAbsentPresentationForDurableFleet(t *testing.T) {
 	fixture := newIntegrationFixtureWithoutServer(t)
 	_, records, _, _ := fixture.shimStack(t)
-	record, err := fleet.NewShimFleetRecord("no-ui", fixture.captureDir, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
+	record, err := fleet.NewShimFleetRecord("no-ui", fixture.captureDir, fleet.PresentationTmux, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
 	if err != nil {
 		t.Fatalf("NewShimFleetRecord() error = %v", err)
 	}
@@ -379,7 +379,7 @@ func TestIntegrationReleaseCandidateStatusReportsUnanchoredDurableRecord(t *test
 	}
 	fixture := newIntegrationFixtureWithoutServer(t)
 	namespace, records, _, _ := fixture.shimStack(t)
-	record, err := fleet.NewShimFleetRecord("unanchored", fixture.captureDir, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
+	record, err := fleet.NewShimFleetRecord("unanchored", fixture.captureDir, fleet.PresentationTmux, config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}}})
 	if err != nil {
 		t.Fatal(err)
 	}
