@@ -13,6 +13,7 @@ import (
 
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/harness"
+	"github.com/mnbf9rca/agentctl/internal/ptyx"
 	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
@@ -100,6 +101,87 @@ func TestHiddenShimRefusesFleetRecordBeforeTouchingTerminal(t *testing.T) {
 	}
 	if reader.session != "fleet" || !strings.Contains(stderr.String(), "durable fleet record missing") {
 		t.Fatalf("Run() reader session/output = %q/%q, want selected fleet and durable refusal", reader.session, stderr.String())
+	}
+}
+
+// This catches detached hidden-shim startup observing /dev/null or supplying
+// operator endpoints instead of reaching the resident attach-listener path.
+func TestHiddenShimDetachedStartsWithoutTerminalEndpoints(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	stateRoot := t.TempDir()
+	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", runtimeRoot)
+	t.Setenv("AGENTCTL_STATE_ROOT", stateRoot)
+	reader := &hiddenShimFleetRecordReaderFake{record: fleet.ShimFleetRecord{Presentation: fleet.PresentationDetached}}
+	terminalObserved := false
+	var received shim.RunRequest
+	command := productionHiddenShimCommand{
+		environment: func() []string { return nil },
+		openFleetRecords: func(string) (hiddenShimFleetRecordReader, func() error, error) {
+			return reader, func() error { return nil }, nil
+		},
+		observeTerminal: func(*os.File) (ptyx.TerminalState, error) {
+			terminalObserved = true
+			return ptyx.TerminalState{}, errors.New("terminal must not be observed for detached mode")
+		},
+		runServer: func(_ context.Context, _ *shim.Namespace, request shim.RunRequest) error {
+			received = request
+			return nil
+		},
+	}
+	var stderr strings.Builder
+	if got := command.Run(context.Background(), []string{"--session", "fleet", "--role", "planner", "--harness", "claude"}, nil, &stderr); got != exitOK {
+		t.Fatalf("Run() exit = %d stderr=%q, want %d", got, stderr.String(), exitOK)
+	}
+	if terminalObserved {
+		t.Fatal("Run() observed a terminal for detached mode")
+	}
+	if received.OperatorMode != shim.OperatorDetached || received.OperatorInput != nil || received.OperatorOutput != nil {
+		t.Fatalf("RunRequest = %#v, want detached mode with nil operator endpoints", received)
+	}
+}
+
+// This catches accidentally applying the detached terminal bypass to tmux,
+// whose pane remains the direct terminal relay.
+func TestHiddenShimTmuxStillObservesTerminalBeforeServerStart(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	stateRoot := t.TempDir()
+	if err := os.Chmod(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTCTL_RUNTIME_ROOT", runtimeRoot)
+	t.Setenv("AGENTCTL_STATE_ROOT", stateRoot)
+	reader := &hiddenShimFleetRecordReaderFake{record: fleet.ShimFleetRecord{Presentation: fleet.PresentationTmux}}
+	observed := false
+	terminalErr := errors.New("tmux terminal observation failed")
+	command := productionHiddenShimCommand{
+		environment: func() []string { return nil },
+		openFleetRecords: func(string) (hiddenShimFleetRecordReader, func() error, error) {
+			return reader, func() error { return nil }, nil
+		},
+		observeTerminal: func(*os.File) (ptyx.TerminalState, error) {
+			observed = true
+			return ptyx.TerminalState{}, terminalErr
+		},
+		runServer: func(context.Context, *shim.Namespace, shim.RunRequest) error {
+			t.Fatal("Run() started tmux server before terminal observation")
+			return nil
+		},
+	}
+	var stderr strings.Builder
+	if got := command.Run(context.Background(), []string{"--session", "fleet", "--role", "planner", "--harness", "claude"}, nil, &stderr); got != exitUnclassified {
+		t.Fatalf("Run() exit = %d stderr=%q, want %d", got, stderr.String(), exitUnclassified)
+	}
+	if !observed || !strings.Contains(stderr.String(), terminalErr.Error()) {
+		t.Fatalf("Run() terminal observed/output = %t/%q, want true and tmux terminal failure", observed, stderr.String())
 	}
 }
 

@@ -75,6 +75,8 @@ type productionHiddenShimCommand struct {
 	stdout           *os.File
 	environment      func() []string
 	openFleetRecords func(string) (hiddenShimFleetRecordReader, func() error, error)
+	observeTerminal  func(*os.File) (ptyx.TerminalState, error)
+	runServer        func(context.Context, *shim.Namespace, shim.RunRequest) error
 }
 
 // hiddenShimFleetRecordReader keeps mode selection dependent only on the
@@ -92,6 +94,12 @@ func newProductionHiddenShimCommand() hiddenShimCommand {
 				return nil, nil, err
 			}
 			return records, records.Close, nil
+		},
+		observeTerminal: func(file *os.File) (ptyx.TerminalState, error) {
+			return ptyx.NewTerminal().Observe(file)
+		},
+		runServer: func(ctx context.Context, namespace *shim.Namespace, request shim.RunRequest) error {
+			return shim.NewServer(namespace).Run(ctx, request)
 		},
 	}
 }
@@ -118,31 +126,45 @@ func (c productionHiddenShimCommand) Run(ctx context.Context, arguments []string
 	if readErr != nil || closeErr != nil {
 		return hiddenShimFailure(stderr, options, errors.Join(readErr, closeErr))
 	}
-	terminal := ptyx.NewTerminal()
-	outerState, err := terminal.Observe(c.stdin)
-	if err != nil {
-		return hiddenShimFailure(stderr, options, err)
+	if c.runServer == nil {
+		return hiddenShimFailure(stderr, options, errors.New("hidden shim command has no server runner"))
 	}
-	initialSize, err := outerState.WindowSize()
-	if err != nil {
-		return hiddenShimFailure(stderr, options, err)
-	}
-	input, err := ptyx.NewFileEndpoint(c.stdin)
-	if err != nil {
-		return hiddenShimFailure(stderr, options, err)
-	}
-	output, err := ptyx.NewFileEndpoint(c.stdout)
-	if err != nil {
-		return hiddenShimFailure(stderr, options, errors.Join(err, input.Restore()))
-	}
-	runErr := shim.NewServer(namespace).Run(ctx, shim.RunRequest{
+	request := shim.RunRequest{
 		Session: options.session, Role: options.role, Harness: options.harness,
-		HarnessOptions: options.harnessOptions, Environment: c.environment(), InitialSize: initialSize,
-		OperatorInput: input, OperatorOutput: output,
-		OuterTerminal: c.stdin, OuterState: outerState,
+		HarnessOptions: options.harnessOptions, Environment: c.environment(),
 		OperatorMode: operatorMode,
-	})
-	runErr = errors.Join(runErr, output.Restore(), input.Restore())
+	}
+	if operatorMode != shim.OperatorDetached {
+		if c.observeTerminal == nil {
+			return hiddenShimFailure(stderr, options, errors.New("hidden shim command has no terminal observer"))
+		}
+		outerState, err := c.observeTerminal(c.stdin)
+		if err != nil {
+			return hiddenShimFailure(stderr, options, err)
+		}
+		initialSize, err := outerState.WindowSize()
+		if err != nil {
+			return hiddenShimFailure(stderr, options, err)
+		}
+		input, err := ptyx.NewFileEndpoint(c.stdin)
+		if err != nil {
+			return hiddenShimFailure(stderr, options, err)
+		}
+		output, err := ptyx.NewFileEndpoint(c.stdout)
+		if err != nil {
+			return hiddenShimFailure(stderr, options, errors.Join(err, input.Restore()))
+		}
+		request.InitialSize = initialSize
+		request.OperatorInput, request.OperatorOutput = input, output
+		request.OuterTerminal, request.OuterState = c.stdin, outerState
+		runErr := c.runServer(ctx, namespace, request)
+		runErr = errors.Join(runErr, output.Restore(), input.Restore())
+		if runErr != nil {
+			return hiddenShimFailure(stderr, options, runErr)
+		}
+		return exitOK
+	}
+	runErr := c.runServer(ctx, namespace, request)
 	if runErr != nil {
 		return hiddenShimFailure(stderr, options, runErr)
 	}
