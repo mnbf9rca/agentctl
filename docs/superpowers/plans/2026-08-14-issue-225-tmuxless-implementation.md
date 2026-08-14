@@ -46,7 +46,7 @@ PR labels below are sequencing labels, not assigned GitHub numbers.
 | PR 4 | Internal detached spawn/launch/relaunch and conditional preflight; current CLI passes tmux explicitly, with no new flags, schema, hints, or docs | PR 3 | `internal/fleet`, `internal/preflight`, minimal compile-safe launch seam in `cmd/agentctl` |
 | PR 5 | Atomic public cutover: launch flags/default/schema/hints, per-role attach, run-template role selection, skill, README, SECURITY, and all owning guards | PR 4 | `internal/launchtemplate`, `internal/attach`, public `cmd/agentctl`, embedded schema/skill, integration tests, `README.md`, `SECURITY.md` |
 | PR 6 | Release verifier, explicit human checklist legs, draft-note injection/publication gate, and artifact checks | PR 5 | `hack/`, `.github/workflows/release.yml`, release-note source, `docs/release-checklist.md`, release snapshots |
-| Release tail | Rebuilt 0.5.0 source promotion PR and fresh operator verification | PR 6 merged and current `main` | `VERSION`, verification evidence, promotion PR and release artifacts |
+| Release tail | Rebuilt 0.5.0 source-preparation PR into `main`, then a separate `main`→`release` promotion PR | PR 6 merged and current `main` | `VERSION`, fresh verification evidence, promotion PR, and release artifacts |
 
 ```text
 current main ──┬──> PR 1A ──┐
@@ -338,6 +338,8 @@ type roleInputWriter interface {
 - Modify: `internal/fleet/shim_test.go`
 - Modify: `internal/fleet/shim_relaunch.go`
 - Modify: `internal/fleet/shim_relaunch_test.go`
+- Modify: `internal/fleet/foreground.go`
+- Modify: `internal/fleet/foreground_test.go`
 - Modify: `internal/preflight/preflight.go`
 - Modify: `internal/preflight/preflight_test.go`
 - Modify: `internal/preflight/shim.go`
@@ -400,7 +402,7 @@ type DetachedShimStarter interface {
 
 - [ ] **Step 7: Add the preflight-order guard and capture RED/GREEN**
 
-  In `internal/preflight` and `internal/fleet` tests, assert the exact per-mode ordering named by §15.11.10 before any spawn/presentation call, then implement the preflight-local boolean/options seam without importing fleet. Add source guards proving detached spawn cannot call a shell or tmux and that `shimWindowCommand` remains the sole shell-composition site.
+  In `internal/preflight` and `internal/fleet` tests, assert the exact per-mode ordering named by §15.11.10 before any spawn/presentation call, then implement the preflight-local boolean/options seam without importing fleet. Update the foreground caller in `internal/fleet/foreground.go` to pass `requireTmux=false`, and add a focused `internal/fleet/foreground_test.go` assertion proving foreground preflight does not require or look up tmux. Add source guards proving detached spawn cannot call a shell or tmux and that `shimWindowCommand` remains the sole shell-composition site.
 
 - [ ] **Step 8: Verify and publish PR 4**
 
@@ -554,21 +556,13 @@ type DiagnosticSink interface {
 
 **Prerequisite:** PR 6 and every prior product PR are merged; `main` is current and all source gates pass.
 
-- [ ] **Step 1: Start a fresh promotion worktree from current `main`**
+- [ ] **Step 1: Prepare, verify, review, and merge the source-preparation PR into `main`**
 
-  Reuse the mechanical lessons from parked promotion commit `aed15be`, but do not rebase or promote its stale artifacts. Create the release branch from the final feature commit, apply the issue's release version, regenerate required snapshots/artifacts with the repository-pinned toolchain, and inspect every generated diff.
+  Start a fresh worktree and topic branch from current `main`; reuse only the mechanical lessons from parked promotion commit `aed15be`, never its stale commits, CI, evidence, or artifacts. Apply the issue's release version in `VERSION`, regenerate required snapshots and artifacts with the repository-pinned toolchain, inspect every generated diff, verify that the version selects `docs/releases/0.5.0.md`, and run `hack/release-notes.sh` in verification mode against a draft-body fixture. A release verifier/operator other than the source-preparation author reruns `hack/release-verify.sh`, performs every explicit checklist terminal/attach/repaint/resize/signal/restoration leg, records `go version -m` for built and extracted artifacts, verifies upstream license inclusion, and captures commands, hashes, host/tool versions, exit statuses, and cleanup results. Commit `VERSION` and the fresh evidence together, push signed commits, open a source-preparation PR targeting `main`, wait for its own CI, obtain its own reviewer gate, and leave its merge to the planner or maintainer. Do not begin promotion until that PR is merged and the resulting `main` commit is current.
 
-- [ ] **Step 2: Write the two mandatory release-note obligations**
+- [ ] **Step 2: Review and merge the separate `main`→`release` promotion PR**
 
-  Verify the promotion version selects `docs/releases/0.5.0.md`, and run `hack/release-notes.sh` in verification mode against a fixture of the draft body. The workflow, not a post-publication edit, performs the real injection and re-fetch verification while the release is still draft.
-
-- [ ] **Step 3: Run a fresh full operator verification**
-
-  A release verifier/operator other than the promotion author reruns `hack/release-verify.sh` from the rebuilt branch, performs every explicit checklist terminal/attach/repaint/resize/signal/restoration leg, records `go version -m` for build and extracted artifacts, verifies upstream license inclusion, and captures commands, hashes, host/tool versions, exit statuses, and cleanup results. Commit that evidence to `main` before the promotion PR is eligible to merge and trigger the release-branch push.
-
-- [ ] **Step 4: Publish promotion through the normal reviewed path**
-
-  Commit the source promotion changes (`VERSION` plus fresh verification evidence), push them, and open the promotion PR with the named pre-trigger human evidence. Wait for its own CI and form check, obtain reviewer release, and leave merge/publish to the planner or maintainer. After merge triggers `.github/workflows/release.yml`, confirm the draft-note injection/verification step passed before the undraft step. Do not reuse CI or artifacts from the parked branch.
+  The protected `release` branch already exists: do not create or recreate it. From the verified source-preparation commit now merged on `main`, open a distinct promotion PR with head `main` and base `release`, and name the committed pre-trigger human-evidence location in its promotion form. Wait for this PR's own CI and form check, obtain a separate reviewer gate, and leave merge/publish to the planner or maintainer. Its merge—not the source-preparation PR—triggers `.github/workflows/release.yml`; confirm the workflow injects and re-fetch-verifies the two mandatory release-note obligations while the GitHub release is still draft before the undraft step succeeds.
 
 ## Completion checklist
 
