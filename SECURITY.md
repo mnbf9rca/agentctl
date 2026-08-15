@@ -17,7 +17,7 @@
 - **A caller-named file becoming a trusted input.** `launch --from-template` verifies the descriptor, accepts only a regular file, bounds input without truncating it, and subjects template values to exactly the validation flag values receive (spec §7).
 - **Overwriting files in your home directory.** Skill installation writes only its two declared directories, replacing each entry rather than writing through it, and refuses any target it cannot prove it wrote unless `--force` is explicit (spec §16).
 - **A compromised dependency reaching a release.** The module graph is standard-library-first and small, a pinned vulnerability scanner runs in CI, Dependabot watches modules and Actions, and archive verification refuses a release missing a required upstream license.
-- **Release verification handling your real credentials.** The verifier runs against an isolated temporary home and its own tmux server, copies or links a credential only after you approve that exact item, and never prints credential contents.
+- **Release verification handling temporary state.** The three-confirmation live smoke uses the operator's already-authenticated harnesses without copying or linking credentials. Its temporary AMQ configuration is removed only after agentctl status proves the owned fleet absent; exhaustive Task 8 checks use isolated roots and no live harness credentials.
 
 ### Out of scope
 
@@ -39,9 +39,8 @@
 7. **Environment staleness.** tmux windows inherit the tmux server's environment, which may predate the current shell. Credentials or configuration exported after the server started may not reach agents. Documented behavior; not solved by agentctl.
 8. **Template symlinks are followed.** Anyone who can plant a symlink where you point `--from-template` can plant the file itself, so this adds no capability — but the target, not the link, is what is read.
 9. **Presentation cleanup can race tmux.** Only an exact observation that a presentation is gone permits removing the fleet record. "Gone" and "removed" remain different facts.
-10. **Consented credential access is real access.** Approving the verifier's Keychains link lets its probe agents reach your login keychain for that run; approving the file copy places that credential in the temporary home. Both are removed at teardown, and declining either offers an isolated sign-in instead.
-11. **Fleets without a shim record are not adopted.** A fleet started by the older tmux-metadata lifecycle leaves nothing agentctl can read, so it is neither recognized nor migrated; stop it with the binary that started it. Compatibility is decided by the recorded schema and the wire protocol version, never by binary identity — a different build speaking the same versions operates the same fleet normally.
-12. **Direct viewing is bounded, not replayable or lossless at every viewer speed.** Detached shims discard output while no viewer is present; a viewer that cannot keep up is evicted rather than throttling the role, and output is not replayed on re-attach (spec §15.11).
+10. **Fleets without a shim record are not adopted.** A fleet started by the older tmux-metadata lifecycle leaves nothing agentctl can read, so it is neither recognized nor migrated; stop it with the binary that started it. Compatibility is decided by the recorded schema and the wire protocol version, never by binary identity — a different build speaking the same versions operates the same fleet normally.
+11. **Direct viewing is bounded, not replayable or lossless at every viewer speed.** Detached shims discard output while no viewer is present; a viewer that cannot keep up is evicted rather than throttling the role, and output is not replayed on re-attach (spec §15.11).
 
 ## File and socket permissions
 

@@ -3,9 +3,9 @@
 ## Prerequisites
 
 - Start at the repository root. The worktree must be clean; release evidence must come from a clean checkout.
-- Use macOS and iTerm2. Install `make`, Go, `tmux`, `claude`, `codex`, `amq`, and
-  the `install(1)` utility.
-- Be ready to sign in to Claude Code and Codex if the verifier asks.
+- Use macOS. Install `make`, Go, `tmux`, `claude`, `codex`, and `amq`.
+- Have two additional terminal windows or tabs available for the harness+role
+  viewers. The verifier names each viewer and prints its exact attach command.
 
 ## Commands
 
@@ -21,23 +21,42 @@ follow the numbered prompts it prints.
 
 ## Human-only steps
 
-1. Follow the verifier's prompts. Answer `y` only after making the observation
-   it names. Answer `n` at the first mismatch; delivery output alone is not
-   evidence that a harness action executed.
-2. When the run ends, record the verdict. Record a pass only when the command
+The live walkthrough has exactly three human confirmations. Each appears in a
+bounded `OPERATOR ACTION` / `OPERATOR CHECKPOINT` block and identifies the
+viewer by harness and role, never by a terminal-window number:
+
+1. Confirm the Claude role `a` viewer and Codex role `b` viewer each show the
+   named live harness.
+2. After the verifier proves the original Claude role `a` child absent,
+   relaunches it, and observes different runtime identities, confirm the
+   reattached Claude role `a` viewer shows the fresh replacement harness.
+3. Close the Claude role `a` and Codex role `b` viewers at the terminal
+   boundary, then confirm the viewer terminals are closed. A clean viewer
+   disconnect means closing the viewer's terminal window or tab, or otherwise
+   closing its PTY at the terminal boundary; typed `Ctrl-C` reaches the harness
+   and can interrupt it. The verifier, not the operator, checks that both roles
+   remain running.
+
+Answer `y` only after making the named observation and `n` at the first
+mismatch. The verifier performs all command execution, PID comparison, status
+checking, cleanup, skill/content checks, and other objective evidence capture.
+
+When the run ends, record the verdict. Record a pass only when the command
    exits 0 and prints `ALL VERIFIED — evidence appended`; otherwise record a
    failure and preserve the evidence.
-3. After the fleet promotes the release, open the `Release` workflow's
+
+After the fleet promotes the release, open the `Release` workflow's
    `notary-check` log. Confirm it printed `notarization accepted`.
    `notarization still pending; re-check manually` also exits 0 and is not
    acceptance.
 
-## 0.5.0 pre-promotion evidence
+## Verifier-recorded 0.5.0 pre-promotion evidence
 
-Run these observations against the rebuilt candidate. Record the command,
-candidate commit, terminal/host details, result, and the committed evidence
-location in `docs/release-verification-notes.md` before opening the promotion
-PR.
+The verifier and its Task 8 automation record these observations against the
+rebuilt candidate. They record the command, candidate commit, terminal/host
+details, result, and committed evidence location in
+`docs/release-verification-notes.md` before the promotion PR. Do not repeat
+them manually during the three-confirmation live smoke.
 
 1. **Detached launch in an ordinary terminal** — record that the default launch
    completed without a tmux presentation and that its role remained running

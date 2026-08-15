@@ -15,13 +15,14 @@ Usage:
   hack/release-verify.sh --shim-version-matrix CURRENT_BINARY ARTIFACT_DIR
   hack/release-verify.sh --task8 CURRENT_BINARY ARTIFACT_DIR
 
-Runs preflight and the release contract probes. By default it
-then guides a live verification through ./bin/agentctl launch, attach, clear,
-compact, relaunch, kill, status, and a separate skill-discovery fleet. With
---non-interactive each live checkpoint reads y/n from stdin while retaining all
-prompts and expected observations. With --measure it runs hack/verify-injection.sh in
-measure mode. Both paths finish with automated cleanup checks and results
-rendering.
+Runs preflight and the release contract probes. By default it then guides a
+three-confirmation live smoke through detached launch, explicit role attach,
+script-proven relaunch, viewer closure, status, and teardown. Exhaustive fixed
+payload, skill, attach-protocol, and status-semantics coverage belongs to the
+automated Task 8 path. With --non-interactive each live checkpoint reads y/n
+from stdin while retaining all prompts and expected observations. With
+--measure it runs hack/verify-injection.sh in measure mode. Both paths finish
+with automated cleanup checks and results rendering.
 
 --render-results prints a results-history markdown block to stdout, given
 a VERSIONS_FILE (agentctl_version=/tmux_version=/claude_version=/
@@ -106,20 +107,20 @@ part_header() { printf '\n=== Part %s — %s ===\n' "$1" "$2"; }
 step_start() { printf '\n[%s] %s\n' "$1" "$2"; }
 step_pass() { printf '[PASS %s] %s\n' "$1" "$2"; }
 step_fail() { printf '[FAIL %s] %s\n' "$1" "$2" >&2; }
-action_pass() { printf '[ACTION PASS %s] %s\n' "$1" "$2"; }
-action_fail() { printf '[ACTION FAIL %s] %s\n' "$1" "$2" >&2; }
 
 checkpoint() {
   local checkpoint_id=$1
   local checkpoint_name=$2
   local expected_output=$3
   local prompt=$4
-  printf '\n[CHECKPOINT %s] %s\n' "$checkpoint_id" "$checkpoint_name"
-  printf 'Expected output:\n> %s\n' "$expected_output"
+  printf '\n===== OPERATOR CHECKPOINT %s: %s =====\n' "$checkpoint_id" "$checkpoint_name"
+  printf 'Expected observation:\n> %s\n' "$expected_output"
   if ask "$prompt"; then
+    printf '===== END OPERATOR CHECKPOINT %s =====\n' "$checkpoint_id"
     printf '[CHECKPOINT PASS %s] operator confirmed: %s\n' "$checkpoint_id" "$checkpoint_name"
     return 0
   fi
+  printf '===== END OPERATOR CHECKPOINT %s =====\n' "$checkpoint_id"
   if [ "$ASK_RESULT" = n ]; then
     FAILED_CHECKPOINT_ID=$checkpoint_id
     FAILED_CHECKPOINT_RESULT=refused
@@ -263,248 +264,11 @@ part_b_teardown() {
   return 1
 }
 
-PART_C_ROOT=''
-PART_C_TOP=''
-PART_C_REAL_TMUX=''
-PART_C_SOCKET=''
-PART_C_ORIGINAL_HOME=''
-PART_C_ORIGINAL_PATH=''
-PART_C_ORIGINAL_RUNTIME_ROOT=''
-PART_C_ORIGINAL_RUNTIME_ROOT_SET=0
-PART_C_HOME=''
-PART_C_PROJECT=''
-PART_C_PROJECT_REAL=''
-PART_C_BIN=''
-PART_C_RUNTIME_ROOT=''
-PART_C_REAL_SECURITY=''
-PART_C_SESSION_OWNED=0
-PART_C_SOCKET_ARMED=0
-PART_C_ACTIVE=0
-PART_C_AUTH_MODE=''
-PART_C_CLAUDE_AUTH_MODE=''
-PART_C_KEYCHAIN_SOURCE=''
-PART_C_KEYCHAIN_LINK=''
-PART_C_KEYCHAIN_LINK_OWNED=0
-
-# Empirical macOS probes: codex-cli 0.146.1 was authenticated
-# with the operator HOME, unauthenticated with an empty HOME, and authenticated
-# with only .codex/auth.json copied into that empty HOME. On 2026-08-08, Claude
-# Code 2.1.226 authenticated from a fresh HOME containing only an exact symlink
-# from its Library/Keychains path to the operator's Library/Keychains directory.
-# On 2026-08-10, that link plus a synthesized .claude.json containing only
-# hasCompletedOnboarding=true started Claude without requiring re-authentication.
-part_c_has_seedable_auth() {
-  [ -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ]
-}
-
-part_c_print_seedable_auth() {
-  [ ! -f "$PART_C_ORIGINAL_HOME/.codex/auth.json" ] || printf '  ~/.codex/auth.json\n'
-}
-
-part_c_seed_auth() {
-  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
-  install -m 0600 "$PART_C_ORIGINAL_HOME/.codex/auth.json" "$PART_C_HOME/.codex/auth.json" 2>/dev/null
-}
-
-part_c_seed_codex_trust() {
-  install -d -m 0700 "$PART_C_HOME/.codex" 2>/dev/null || return 1
-  (
-    umask 077
-    printf '[projects."%s"]\ntrust_level = "trusted"\n' "$PART_C_PROJECT_REAL" >"$PART_C_HOME/.codex/config.toml"
-  )
-}
-
-part_c_has_keychain_source() {
-  [ -d "$PART_C_KEYCHAIN_SOURCE" ]
-}
-
-part_c_link_keychains() {
-  install -d -m 0700 "$PART_C_HOME/Library" 2>/dev/null || return 1
-  if ! ln -s "$PART_C_KEYCHAIN_SOURCE" "$PART_C_KEYCHAIN_LINK"; then
-    return 1
-  fi
-  PART_C_KEYCHAIN_LINK_OWNED=1
-  [ -L "$PART_C_KEYCHAIN_LINK" ]
-}
-
-part_c_seed_claude_onboarding() {
-  (
-    umask 077
-    printf '%s\n' '{"hasCompletedOnboarding":true}' >"$PART_C_HOME/.claude.json"
-  )
-}
-
-part_c_create_isolated_keychain() {
-  PART_C_REAL_SECURITY=$(command -v security) || return 1
-  install -d -m 0700 "$PART_C_HOME/Library/Keychains" 2>/dev/null || return 1
-  HOME="$PART_C_HOME" "$PART_C_REAL_SECURITY" create-keychain -p '' "$PART_C_HOME/Library/Keychains/login.keychain-db"
-}
-
-part_c_kill_session() {
-  (
-    cd "$PART_C_PROJECT" || exit 1
-    HOME="$PART_C_HOME" \
-      PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH" \
-      AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT" \
-      "$PART_C_TOP/bin/agentctl" kill --session skillverify
-  )
-}
-
-part_c_retry_kill_after_socket() {
-  local attempt=1
-  while [ "$attempt" -le 6 ]; do
-    if part_c_kill_session; then
-      return 0
-    fi
-    if [ "$attempt" -lt 6 ]; then
-      sleep 1
-    fi
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-part_c_named_socket_absent() {
-  local output=$1
-  case "$output" in
-    *$'\n'*) return 1 ;;
-    'no server running') return 0 ;;
-    "no server running on "*"/$PART_C_SOCKET") return 0 ;;
-    "error connecting to "*"/$PART_C_SOCKET (No such file or directory)") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-part_c_teardown() {
-  local teardown_status=0
-  local socket_output
-  local socket_status=0
-  if [ "$PART_C_ACTIVE" -eq 0 ]; then
-    return 0
-  fi
-  if [ "$PART_C_SESSION_OWNED" -eq 1 ]; then
-    if part_c_kill_session; then
-      printf 'PART C CLEANUP PASS (skillverify killed)\n'
-      PART_C_SESSION_OWNED=0
-    else
-      printf 'PART C CLEANUP FAIL (skillverify kill)\n' >&2
-      teardown_status=1
-    fi
-  fi
-  if [ "$PART_C_SOCKET_ARMED" -eq 1 ]; then
-    socket_output=$("$PART_C_REAL_TMUX" -L "$PART_C_SOCKET" kill-server 2>&1) || socket_status=$?
-    if [ "$socket_status" -eq 0 ]; then
-      printf 'PART C CLEANUP PASS (named tmux socket killed)\n'
-      PART_C_SOCKET_ARMED=0
-    elif part_c_named_socket_absent "$socket_output"; then
-      # Accept only tmux's complete single-line response for this internally
-      # named socket when it was armed but no server was ever created.
-      printf 'PART C CLEANUP OBSERVED (named tmux socket already absent)\n'
-      PART_C_SOCKET_ARMED=0
-      PART_C_SESSION_OWNED=0
-    else
-      printf 'PART C CLEANUP FAIL (named tmux socket kill-server exited %s): %s\n' "$socket_status" "$socket_output" >&2
-      teardown_status=1
-    fi
-  fi
-  if [ "$PART_C_SESSION_OWNED" -eq 1 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
-    if part_c_retry_kill_after_socket; then
-      printf 'PART C CLEANUP PASS (skillverify kill retry after socket removal)\n'
-      PART_C_SESSION_OWNED=0
-      teardown_status=0
-    else
-      printf 'PART C CLEANUP FAIL (skillverify kill retry after socket removal)\n' >&2
-      teardown_status=1
-    fi
-  fi
-  if [ -n "$PART_C_TOP" ]; then
-    if cd "$PART_C_TOP"; then
-      printf 'PART C CLEANUP PASS (cwd restored)\n'
-    else
-      printf 'PART C CLEANUP FAIL (restore cwd)\n' >&2
-      teardown_status=1
-    fi
-  fi
-  if [ -n "$PART_C_ORIGINAL_HOME" ]; then
-    export HOME="$PART_C_ORIGINAL_HOME"
-  fi
-  if [ -n "$PART_C_ORIGINAL_PATH" ]; then
-    export PATH="$PART_C_ORIGINAL_PATH"
-  fi
-  if [ "$PART_C_ORIGINAL_RUNTIME_ROOT_SET" -eq 1 ]; then
-    export AGENTCTL_RUNTIME_ROOT="$PART_C_ORIGINAL_RUNTIME_ROOT"
-  else
-    unset AGENTCTL_RUNTIME_ROOT
-  fi
-  printf 'PART C CLEANUP PASS (HOME, PATH, and runtime root restored)\n'
-  if [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ]; then
-    if [ -L "$PART_C_KEYCHAIN_LINK" ]; then
-      # Keep this exactly non-recursive and slash-free: rm -rf link/ follows the symlink and destroys the operator's Keychains target.
-      if rm -f -- "$PART_C_KEYCHAIN_LINK" && [ ! -e "$PART_C_KEYCHAIN_LINK" ] && [ ! -L "$PART_C_KEYCHAIN_LINK" ]; then
-        printf 'PART C CLEANUP PASS (temporary Keychains symlink removed)\n'
-        PART_C_KEYCHAIN_LINK_OWNED=0
-      else
-        printf 'PART C CLEANUP FAIL (remove temporary Keychains symlink %s)\n' "$PART_C_KEYCHAIN_LINK" >&2
-        teardown_status=1
-      fi
-    elif [ ! -e "$PART_C_KEYCHAIN_LINK" ]; then
-      printf 'PART C CLEANUP OBSERVED (temporary Keychains symlink already absent)\n'
-      PART_C_KEYCHAIN_LINK_OWNED=0
-    else
-      printf 'PART C CLEANUP FAIL (owned Keychains path is no longer a symlink: %s)\n' "$PART_C_KEYCHAIN_LINK" >&2
-      teardown_status=1
-    fi
-  elif [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 1 ]; then
-    printf 'PART C CLEANUP OBSERVED (temporary Keychains symlink retained until fleet and socket cleanup completes)\n'
-  fi
-  if [ -n "$PART_C_ROOT" ] && [ -n "$PART_C_HOME" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ]; then
-    if [ -e "$PART_C_HOME" ]; then
-      if rm -rf -- "$PART_C_HOME" && [ ! -e "$PART_C_HOME" ]; then
-        printf 'PART C CLEANUP PASS (temporary credential HOME removed)\n'
-      else
-        printf 'PART C CLEANUP FAIL (remove temporary credential HOME %s)\n' "$PART_C_HOME" >&2
-        teardown_status=1
-      fi
-    else
-      printf 'PART C CLEANUP OBSERVED (temporary credential HOME already absent)\n'
-    fi
-  elif [ -n "$PART_C_ROOT" ]; then
-    printf 'PART C CLEANUP OBSERVED (temporary credential HOME retained for owned-resource cleanup retry)\n'
-  fi
-  if [ -n "$PART_C_ROOT" ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ]; then
-    if rm -rf -- "$PART_C_ROOT"; then
-      printf 'PART C CLEANUP PASS (temporary root removed)\n'
-      PART_C_ROOT=''
-    else
-      printf 'PART C CLEANUP FAIL (remove temporary root %s)\n' "$PART_C_ROOT" >&2
-      teardown_status=1
-    fi
-  elif [ -n "$PART_C_ROOT" ]; then
-    printf 'PART C CLEANUP OBSERVED (temporary root retained for owned-resource cleanup retry)\n'
-  fi
-  if [ "$teardown_status" -eq 0 ] && [ "$PART_C_SESSION_OWNED" -eq 0 ] && [ "$PART_C_SOCKET_ARMED" -eq 0 ] && [ "$PART_C_KEYCHAIN_LINK_OWNED" -eq 0 ] && [ -z "$PART_C_ROOT" ]; then
-    PART_C_ACTIVE=0
-  fi
-  return "$teardown_status"
-}
-
-part_c_abort() {
-  local reason=$1
-  if ! part_c_teardown; then
-    die "$reason; Part C cleanup failed"
-  fi
-  die "$reason"
-}
-
 cleanup_exit_trap() {
   local original_status=$?
   local cleanup_status=0
   local final_status
   trap - EXIT
-  if ! part_c_teardown; then
-    printf 'release-verify: Part C cleanup failed during exit\n' >&2
-    cleanup_status=1
-  fi
   if ! part_b_teardown; then
     printf 'release-verify: Part B cleanup failed during exit\n' >&2
     cleanup_status=1
@@ -659,6 +423,7 @@ render_results() {
     part_b_detach_attestation=$(field part_b_detach_attestation "$metadata")
     part_b_presentation=$(field part_b_presentation "$metadata")
     part_b_session=$(field part_b_session "$metadata")
+    live_human_checkpoint_schema=$(field live_human_checkpoint_schema "$metadata")
     if [ -n "$part_a_result" ]; then
       [ -n "$part_b_detach_attestation" ] || die 'live metadata new schema is missing part_b_detach_attestation'
       printf -- '- Part A: %s\n' "$part_a_result"
@@ -666,7 +431,9 @@ render_results() {
       if [ -n "$part_b_session" ]; then
         printf -- '- Part B session: `%s`\n' "$part_b_session"
       fi
-      printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
+      if [ "$live_human_checkpoint_schema" != three-observation-v1 ]; then
+        printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
+      fi
       part_b_precheck_observation=$(field part_b_precheck_observation "$metadata")
       if [ -n "$part_b_precheck_observation" ]; then
         part_b_keeper_session=$(field part_b_keeper_session "$metadata")
@@ -677,47 +444,43 @@ render_results() {
     fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
     if [ -n "$part_a_result" ]; then
-      if [ "$part_b_presentation" = detached ]; then
-        printf -- '- Checkpoint B.C1 explicit role attachments: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      if [ "$live_human_checkpoint_schema" = three-observation-v1 ]; then
+        printf -- '- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+        printf -- '- Checkpoint B.C2 fresh replacement Claude role a surface: %s; operator confirmed: %s\n' \
+          "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+        printf -- '- Checkpoint B.C3 role viewer terminals closed: operator confirmed: %s; script observed both roles still running\n' "$part_b_detach_attestation"
       else
-        printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
-      fi
-      printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
-      printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
-      printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
-      printf -- '- Checkpoint B.C9 relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
-        "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
-      if [ "$part_b_presentation" = detached ]; then
-        printf -- '- Checkpoint B.C10 viewer terminals closed: operator confirmed: %s\n' "$part_b_detach_attestation"
-      else
-        printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
-      fi
-      if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
-        part_c_auth_mode=$(field part_c_auth_mode "$metadata")
-        if [ -n "$part_c_auth_mode" ]; then
-          case "$part_c_auth_mode" in
-            codex-seeded|manual) ;;
-            *) die 'live metadata has invalid part_c_auth_mode' ;;
-          esac
-          part_c_claude_auth_mode=$(field part_c_claude_auth_mode "$metadata")
-          if [ -n "$part_c_claude_auth_mode" ]; then
-            case "$part_c_claude_auth_mode" in
-              keychain-linked|isolated-keychain) ;;
-              *) die 'live metadata has invalid part_c_claude_auth_mode' ;;
-            esac
-          fi
-          part_c_auth_attestation=$(field part_c_auth_attestation "$metadata")
-          [ -n "$part_c_auth_attestation" ] || die 'live metadata is missing part_c_auth_attestation'
-          if [ -n "$part_c_claude_auth_mode" ]; then
-            printf -- '- Checkpoint C.C1 authentication (%s, %s): operator confirmed: %s\n' "$part_c_claude_auth_mode" "$part_c_auth_mode" "$part_c_auth_attestation"
-          else
-            printf -- '- Checkpoint C.C1 authentication (%s): operator confirmed: %s\n' "$part_c_auth_mode" "$part_c_auth_attestation"
-          fi
-          printf -- '- Checkpoint C.C2 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
-          printf -- '- Checkpoint C.C3 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+        if [ "$part_b_presentation" = detached ]; then
+          printf -- '- Checkpoint B.C1 explicit role attachments: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
         else
-          printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
-          printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+          printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+        fi
+        printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
+        printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
+        printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
+        printf -- '- Checkpoint B.C9 relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
+          "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
+        if [ "$part_b_presentation" = detached ]; then
+          printf -- '- Checkpoint B.C10 viewer terminals closed: operator confirmed: %s\n' "$part_b_detach_attestation"
+        else
+          printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
+        fi
+        if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
+          part_c_auth_mode=$(field part_c_auth_mode "$metadata")
+          if [ -n "$part_c_auth_mode" ]; then
+            part_c_claude_auth_mode=$(field part_c_claude_auth_mode "$metadata")
+            part_c_auth_attestation=$(field part_c_auth_attestation "$metadata")
+            if [ -n "$part_c_claude_auth_mode" ]; then
+              printf -- '- Checkpoint C.C1 authentication (%s, %s): operator confirmed: %s\n' "$part_c_claude_auth_mode" "$part_c_auth_mode" "$part_c_auth_attestation"
+            else
+              printf -- '- Checkpoint C.C1 authentication (%s): operator confirmed: %s\n' "$part_c_auth_mode" "$part_c_auth_attestation"
+            fi
+            printf -- '- Checkpoint C.C2 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+            printf -- '- Checkpoint C.C3 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+          else
+            printf -- '- Checkpoint C.C1 skill inventory: operator confirmed: %s\n' "$(field part_c_skill_attestation "$metadata")"
+            printf -- '- Checkpoint C.C2 status meaning: operator confirmed: %s\n' "$(field part_c_meaning_attestation "$metadata")"
+          fi
         fi
       fi
     else
@@ -1264,7 +1027,7 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-for cmd_name in tmux claude codex amq install; do
+for cmd_name in tmux claude codex amq; do
   command -v "$cmd_name" >/dev/null 2>&1 || die "required command not found: $cmd_name"
 done
 
@@ -1428,9 +1191,6 @@ else
   LIVE_SESSION="relverify_$evidence_token"
   LIVE_STATUS=0
   ATTACH_ATTESTATION=''
-  CLAUDE_CLEAR_ATTESTATION=''
-  CODEX_CLEAR_ATTESTATION=''
-  COMPACT_ATTESTATION=''
   RELAUNCH_ATTESTATION=''
   PART_B_DETACH_ATTESTATION=''
   RELAUNCH_CHECK=FAIL
@@ -1474,106 +1234,24 @@ else
   PART_B_SESSION_OWNED=1
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    cat <<'EOF'
-
-Part B verifies the default detached presentation with three terminal windows.
-Leave this verifier running in Window 1. Open Window 2 for role a and Window 3
-for role b, run the explicit commands below, and keep both viewers open through
-the delivery checks. Return to Window 1 to answer each numbered checkpoint.
-EOF
-    echo 'Attach role a from Window 2 with:'
+    printf '\n===== OPERATOR ACTION B.A1: open the live role viewers =====\n'
+    echo 'Keep this script running in the verifier terminal.'
+    echo 'In a separate terminal for the Claude role a viewer, run:'
     printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
-    echo 'Attach role b from Window 3 with:'
+    echo 'In another terminal for the Codex role b viewer, run:'
     printf '  ./bin/agentctl attach --session %s b\n' "$LIVE_SESSION"
+    echo 'Keep both role viewers open and return to the verifier terminal.'
+    printf '===== END OPERATOR ACTION B.A1 =====\n'
     attach_expected=$(cat <<'EOF'
-Window 2 shows the claude role a surface, and Window 3 shows the codex role b
-surface. Each command owns only its current terminal viewer; the detached roles
-continue running independently of those viewers.
+The Claude role a viewer shows a ready Claude harness, and the Codex role b
+viewer shows a ready Codex harness. The detached roles continue running
+independently of those viewers.
 EOF
 )
-    if checkpoint B.C1 'detached role attachments' "$attach_expected" 'Are Window 2 and Window 3 attached to roles a and b respectively?'; then
+    if checkpoint B.C1 'live role surfaces' "$attach_expected" 'Do the Claude role a viewer and Codex role b viewer each show the named ready harness?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
     else
       ATTACH_ATTESTATION=$ASK_ANSWER
-      LIVE_STATUS=1
-    fi
-  fi
-
-  if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo
-    echo 'In the Window 2 role a viewer, type junk into the input box; do NOT press Enter.'
-    if checkpoint B.C2 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
-      echo 'Running:'
-      printf '  ./bin/agentctl clear --session %s a\n' "$LIVE_SESSION"
-      if ./bin/agentctl clear --session "$LIVE_SESSION" a; then
-        echo 'Claude clear delivery result printed above.'
-        action_pass B.3 'claude clear delivery command completed; observed outcome pending checkpoint B.C3'
-        if checkpoint B.C3 'claude clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For claude, was junk visibly cleared, /clear executed, and the conversation reset?'; then
-          CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
-        else
-          CLAUDE_CLEAR_ATTESTATION=$ASK_ANSWER
-          LIVE_STATUS=1
-        fi
-      else
-        echo 'LIVE VERIFY FAIL (claude clear delivery failed)'
-        action_fail B.3 'claude clear delivery command failed'
-        LIVE_STATUS=1
-      fi
-    else
-      LIVE_STATUS=1
-    fi
-  fi
-
-  if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo
-    echo 'In the Window 3 role b viewer, type junk into the input box; do NOT press Enter.'
-    if checkpoint B.C4 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
-      echo 'Running:'
-      printf '  ./bin/agentctl clear --session %s b\n' "$LIVE_SESSION"
-      if ./bin/agentctl clear --session "$LIVE_SESSION" b; then
-        echo 'Codex clear delivery result printed above.'
-        action_pass B.4 'codex clear delivery command completed; observed outcome pending checkpoint B.C5'
-        if checkpoint B.C5 'codex clear delivery' 'junk cleared, /clear executed, and the conversation reset.' 'For codex, was junk visibly cleared, /clear executed, and the conversation reset?'; then
-          CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
-        else
-          CODEX_CLEAR_ATTESTATION=$ASK_ANSWER
-          LIVE_STATUS=1
-        fi
-      else
-        echo 'LIVE VERIFY FAIL (codex clear delivery failed)'
-        action_fail B.4 'codex clear delivery command failed'
-        LIVE_STATUS=1
-      fi
-    else
-      LIVE_STATUS=1
-    fi
-  fi
-
-  if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo
-    echo 'Before the compact spot check, create compactable context in the Window 2 role a viewer:'
-    echo 'type "Reply with FIRST READY and one sentence about this repository." and press Enter.'
-    echo "Wait for Claude's complete response, then submit this second message:"
-    echo '"Reply with SECOND READY and one different sentence about testing this repository."'
-    echo "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
-    if checkpoint B.C6 'claude compact setup' "Claude's two responses are complete, and junk is visible in the claude input without being submitted." 'Are both Claude responses complete and the junk ready for the compact spot check?'; then
-      echo 'Running:'
-      printf '  ./bin/agentctl compact --session %s a\n' "$LIVE_SESSION"
-      if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
-        echo 'Claude compact delivery result printed above.'
-        action_pass B.5 'claude compact delivery command completed; observed outcome pending checkpoint B.C7'
-        if checkpoint B.C7 'claude compact delivery' 'junk cleared, /compact executed, and the conversation compacted.' 'For claude, was junk visibly cleared, /compact executed, and the conversation compacted?'; then
-          COMPACT_ATTESTATION=$ASK_ANSWER
-        else
-          COMPACT_ATTESTATION=$ASK_ANSWER
-          LIVE_STATUS=1
-        fi
-      else
-        echo 'LIVE VERIFY FAIL (claude compact delivery failed)'
-        action_fail B.5 'claude compact delivery command failed'
-        LIVE_STATUS=1
-      fi
-    else
       LIVE_STATUS=1
     fi
   fi
@@ -1587,18 +1265,13 @@ EOF
     else
       original_shim_pid=$ROLE_SHIM_PID
       original_child_pid=$ROLE_CHILD_PID
-      echo 'In the Window 2 role a viewer, type junk into the input box again; do NOT press Enter.'
-      if checkpoint B.C8 'relaunch setup' 'junk is visible in the role a input without being submitted.' 'Is the role a junk ready for the relaunch process-discontinuity check?'; then
-        echo 'Running exact-PID shim termination setup:'
-        printf '  kill -HUP %s  # role a shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
-        if ! kill -HUP "$original_shim_pid"; then
-          echo "RELAUNCH FAIL (could not signal role a shim PID $original_shim_pid)"
-          LIVE_STATUS=1
-        else
-          step_pass B.6 'exact-PID role shim termination completed'
-        fi
-      else
+      echo 'Running exact-PID shim termination setup:'
+      printf '  kill -HUP %s  # role a shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
+      if ! kill -HUP "$original_shim_pid"; then
+        echo "RELAUNCH FAIL (could not signal role a shim PID $original_shim_pid)"
         LIVE_STATUS=1
+      else
+        step_pass B.2 'exact-PID role a shim termination completed'
       fi
     fi
   fi
@@ -1608,7 +1281,7 @@ EOF
     printf '  kill -0 %s  # wait for recorded role a child absence\n' "$original_child_pid"
     if wait_process_absent "$original_child_pid"; then
       echo 'RELAUNCH PASS (recorded role a child no longer responds to signal 0)'
-      step_pass B.7 'recorded role a child absence observed'
+      step_pass B.3 'recorded role a child absence observed'
     else
       echo "RELAUNCH FAIL (recorded role a child PID $original_child_pid still responds to signal 0)"
       LIVE_STATUS=1
@@ -1621,7 +1294,7 @@ EOF
     if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.output" 2>&1; then
       cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH PASS (role a relaunched through the ESRCH-gated command)'
-      step_pass B.8 'ESRCH-gated relaunch command completed'
+      step_pass B.4 'ESRCH-gated relaunch command completed'
     else
       cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH FAIL (agentctl relaunch failed)'
@@ -1648,29 +1321,29 @@ EOF
       else
         echo 'RELAUNCH PASS (replacement role a runtime identities observed)'
         printf 'RELAUNCH IDENTITIES (shim %s child %s)\n' "$replacement_shim_pid" "$replacement_child_pid"
-        step_pass B.9 'replacement role runtime identities differ from the terminated role'
+        step_pass B.5 'replacement role runtime identities differ from the terminated role'
       fi
     fi
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo
-    printf '%s\n' 'The original Window 2 role a viewer ended when its recorded shim was'
-    printf '%s\n' 'terminated. From its returned shell, attach to the replacement role a with:'
+    printf '\n===== OPERATOR ACTION B.A2: attach the replacement Claude role a viewer =====\n'
+    printf '%s\n' 'The original Claude role a viewer ended when the script terminated its recorded shim.'
+    printf '%s\n' 'In that viewer terminal, attach to replacement role a with:'
     printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
-    printf '%s\n' 'Keep the Window 3 role b viewer open.'
+    printf '%s\n' 'Keep the Codex role b viewer open, then return to the verifier terminal.'
+    printf '===== END OPERATOR ACTION B.A2 =====\n'
     relaunch_prompt=$(cat <<'EOF'
-One of the fleet's harnesses was terminated, and agentctl relaunched it from
-the fleet's stored configuration. The replacement viewer shows a fresh harness
-whose model and effort carry over; its conversation does not, so the junk you
-typed is gone.
+The script observed the original role a child become absent, agentctl relaunched
+role a from the fleet's stored configuration, and the replacement runtime has
+different shim and child identities.
 
-Do you see a fresh, ready claude input surface with no trace of that junk?
+Does the Claude role a viewer show the fresh, ready replacement role a harness?
 EOF
 )
-    if checkpoint B.C9 'live delivery and relaunch' 'the reattached replacement role a surface is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
+    if checkpoint B.C2 'fresh replacement role surface' 'The Claude role a viewer shows the fresh, ready replacement role a harness.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
-      RELAUNCH_CHECK='PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed)'
+      RELAUNCH_CHECK='PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached)'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -1678,22 +1351,19 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    cat <<'EOF'
-
-Close the Window 2 and Window 3 viewer terminals. Close each viewer by closing
-its terminal window or tab, or by otherwise closing its PTY at the terminal
-boundary. Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the
-harness and can interrupt it. Closing a detached viewer does not stop its role.
-Return to Window 1 and confirm the numbered checkpoint below; the verifier will
-then observe both role records before fleet teardown.
-EOF
-    if checkpoint B.C10 'detached viewers closed' 'Window 2 and Window 3 were closed without sending a role-stopping command.' 'Are both detached viewer terminals closed?'; then
+    printf '\n===== OPERATOR ACTION B.A3: close both role viewers =====\n'
+    printf '%s\n' 'Close the Claude role a viewer and Codex role b viewer by closing its terminal window or tab,'
+    printf '%s\n' 'or by otherwise closing its PTY at the terminal boundary.'
+    printf '%s\n' 'Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the harness and can interrupt it.'
+    printf '%s\n' 'Closing a detached viewer does not stop its role. Return to the verifier terminal afterward.'
+    printf '===== END OPERATOR ACTION B.A3 =====\n'
+    if checkpoint B.C3 'role viewer terminals closed' 'The Claude role a viewer and Codex role b viewer terminal windows or tabs are closed.' 'Are the Claude role a viewer and Codex role b viewer terminals closed?'; then
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER
       echo 'Running:'
       printf '  ./bin/agentctl status --session %s\n' "$LIVE_SESSION"
       if assert_roles_running "$LIVE_SESSION" "$ARTIFACT_DIR/viewer-close.status" "$ARTIFACT_DIR/viewer-close.stderr" a b; then
         echo 'VIEWER CLOSE PASS (roles a and b remain running after their viewers closed)'
-        step_pass B.10 'detached roles remain running after viewer close'
+        step_pass B.6 'detached roles remain running after viewer close'
       else
         echo 'VIEWER CLOSE FAIL (one or more detached roles are not running)'
         LIVE_STATUS=1
@@ -1731,7 +1401,7 @@ EOF
 
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
-    step_pass B.11 "detached $LIVE_SESSION teardown checks completed"
+    step_pass B.7 "detached $LIVE_SESSION teardown checks completed"
   else
     LIVE_STATUS=1
   fi
@@ -1743,7 +1413,7 @@ EOF
   PART_A_RESULT='PASS — automated probes and isolation checks completed'
   PART_B_RESULT='FAIL — Part B did not complete'
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    PART_B_RESULT='PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10'
+    PART_B_RESULT='PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close'
   elif [ "$FAILED_CHECKPOINT_RESULT" = refused ]; then
     case "$FAILED_CHECKPOINT_ID" in
       B.C*) PART_B_RESULT="FAIL — operator refused checkpoint $FAILED_CHECKPOINT_ID" ;;
@@ -1753,275 +1423,10 @@ EOF
       B.C*) PART_B_RESULT="FAIL — checkpoint input failed at $FAILED_CHECKPOINT_ID" ;;
     esac
   fi
-  PART_C_RESULT='FAIL — not run'
-  PART_C_AUTH_ATTESTATION=''
-  PART_C_SKILL_ATTESTATION=''
-  PART_C_MEANING_ATTESTATION=''
-
-  if [ "$LIVE_STATUS" -eq 0 ]; then
-    part_header C 'Live skill discovery and meaning'
-    PART_C_TOP=$TOP
-    PART_C_ROOT=$(mktemp -d /tmp/agentctl-skill-verify.XXXXXX) || die 'could not create Part C temporary root'
-    PART_C_ACTIVE=1
-    PART_C_ORIGINAL_HOME=$HOME
-    PART_C_ORIGINAL_PATH=$PATH
-    if [ "${AGENTCTL_RUNTIME_ROOT+x}" = x ]; then
-      PART_C_ORIGINAL_RUNTIME_ROOT=$AGENTCTL_RUNTIME_ROOT
-      PART_C_ORIGINAL_RUNTIME_ROOT_SET=1
-    fi
-    PART_C_SOCKET="agentctl-skill-verify-$$"
-    PART_C_REAL_TMUX=$(command -v tmux) || {
-      part_c_abort 'could not resolve tmux for Part C'
-    }
-    PART_C_SOCKET_ARMED=1
-    PART_C_HOME="$PART_C_ROOT/home"
-    PART_C_PROJECT="$PART_C_ROOT/project"
-    PART_C_BIN="$PART_C_ROOT/bin"
-    PART_C_RUNTIME_ROOT="$PART_C_ROOT/runtime"
-    PART_C_KEYCHAIN_SOURCE="$PART_C_ORIGINAL_HOME/Library/Keychains"
-    PART_C_KEYCHAIN_LINK="$PART_C_HOME/Library/Keychains"
-
-    step_start C.1 'create isolated temporary HOME, project, and tmux shim'
-    install -d -m 0700 "$PART_C_HOME" || {
-      part_c_abort 'could not create Part C temporary HOME'
-    }
-    install -d -m 0700 "$PART_C_HOME/Library/Application Support" || {
-      part_c_abort 'could not create Part C user-config root'
-    }
-    install -d -m 0755 "$PART_C_PROJECT" "$PART_C_BIN" || {
-      part_c_abort 'could not create Part C directories'
-    }
-    install -d -m 0700 "$PART_C_RUNTIME_ROOT" || {
-      part_c_abort 'could not create Part C runtime root'
-    }
-    PART_C_PROJECT_REAL=$(cd "$PART_C_PROJECT" && pwd -P) || {
-      part_c_abort 'could not resolve Part C project path'
-    }
-    if ! part_c_seed_codex_trust; then
-      part_c_abort 'could not seed deterministic Codex trust for the Part C fixture project'
-    fi
-    printf '#!/usr/bin/env bash\nexec %q -L %q "$@"\n' "$PART_C_REAL_TMUX" "$PART_C_SOCKET" >"$PART_C_BIN/tmux"
-    chmod 0755 "$PART_C_BIN/tmux"
-    step_pass C.1 'isolated Part C filesystem and deterministic Codex project trust are active'
-
-    step_start C.2 'choose authentication path for the isolated HOME'
-    if part_c_has_seedable_auth; then
-      printf 'Part C can seed codex authentication from this empirically proven file:\n'
-      part_c_print_seedable_auth
-      if ask 'Copy only this Codex file into the temporary Part C HOME?'; then
-        if ! part_c_seed_auth; then
-          step_fail C.2 'authentication file copy failed'
-          part_c_abort 'Part C authentication seeding failed'
-        fi
-        PART_C_AUTH_MODE=codex-seeded
-        step_pass C.2 'operator consented and the proven Codex authentication file was copied'
-      else
-        case "$ASK_RESULT" in
-          n) PART_C_AUTH_MODE=manual ;;
-          *)
-            step_fail C.2 'authentication selection input failed'
-            part_c_abort 'Part C authentication selection input failed'
-            ;;
-        esac
-      fi
-    else
-      printf 'No proven Codex authentication file was found in the real HOME.\n'
-      PART_C_AUTH_MODE=manual
-    fi
-
-    part_c_keychain_offered=0
-    if part_c_has_keychain_source; then
-      part_c_keychain_offered=1
-      printf 'Claude Code 2.1.226 can authenticate through this exact symlink:\n'
-      printf '  %s -> %s\n' "$PART_C_KEYCHAIN_SOURCE" "$PART_C_KEYCHAIN_LINK"
-      printf "Both probe harnesses can reach the operator's login keychain through this link; per-item ACLs still apply.\n"
-      printf 'No Claude credential is copied into the temporary HOME.\n'
-      printf 'Part C will synthesize this minimal Claude onboarding configuration:\n'
-      printf '  %s\n' "$PART_C_HOME/.claude.json"
-      printf "It contains onboarding state only, not credentials, and does not copy the operator's Claude configuration.\n"
-      if ask "Create exactly this Claude Keychains symlink and synthesized onboarding configuration: $PART_C_KEYCHAIN_SOURCE -> $PART_C_KEYCHAIN_LINK?"; then
-        if ! part_c_link_keychains; then
-          step_fail C.2 'Claude Keychains link creation failed'
-          part_c_abort 'Part C Claude Keychains link creation failed'
-        fi
-        if ! part_c_seed_claude_onboarding; then
-          step_fail C.2 'Claude onboarding configuration seeding failed'
-          part_c_abort 'Part C Claude onboarding configuration seeding failed'
-        fi
-        PART_C_CLAUDE_AUTH_MODE=keychain-linked
-        step_pass C.2 'operator consented and the exact Claude Keychains symlink plus synthesized onboarding configuration were created'
-      else
-        case "$ASK_RESULT" in
-          n) PART_C_CLAUDE_AUTH_MODE=isolated-keychain ;;
-          *)
-            step_fail C.2 'Claude authentication selection input failed'
-            part_c_abort 'Part C Claude authentication selection input failed'
-            ;;
-        esac
-      fi
-    else
-      printf 'No operator Library/Keychains directory was found for the exact Claude symlink.\n'
-      PART_C_CLAUDE_AUTH_MODE=isolated-keychain
-    fi
-
-    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
-      printf 'The fallback creates an isolated empty login keychain under the temporary HOME.\n'
-      printf 'A fresh Claude token will be minted into the isolated temporary keychain.\n'
-      if ask 'Continue with guided Claude sign-in using an isolated empty login keychain instead?'; then
-        if ! part_c_create_isolated_keychain; then
-          step_fail C.2 'isolated login keychain creation failed'
-          part_c_abort 'Part C isolated login keychain creation failed'
-        fi
-        step_pass C.2 'operator chose guided Claude sign-in with an isolated empty login keychain'
-      else
-        case "$ASK_RESULT" in
-          n)
-            if [ "$part_c_keychain_offered" -eq 1 ]; then
-              step_fail C.2 'operator declined both Claude authentication paths'
-              part_c_abort 'operator declined Claude keychain link and isolated-keychain guided sign-in'
-            fi
-            step_fail C.2 'operator declined isolated-keychain guided sign-in'
-            part_c_abort 'operator declined isolated-keychain guided sign-in'
-            ;;
-          *)
-            step_fail C.2 'isolated-keychain sign-in selection input failed'
-            part_c_abort 'Part C isolated-keychain sign-in selection input failed'
-            ;;
-        esac
-      fi
-    fi
-
-    export HOME="$PART_C_HOME"
-    export PATH="$PART_C_BIN:$PART_C_ORIGINAL_PATH"
-    export AGENTCTL_RUNTIME_ROOT="$PART_C_RUNTIME_ROOT"
-    cd "$PART_C_PROJECT"
-
-    step_start C.3 'initialize isolated AMQ and install the release-candidate skill'
-    if ! amq coop init --agents a,b,user; then
-      step_fail C.3 'AMQ initialization failed'
-      part_c_abort 'Part C AMQ initialization failed'
-    fi
-    if ! "$PART_C_TOP/bin/agentctl" skill install; then
-      step_fail C.3 'skill installation failed'
-      part_c_abort 'Part C skill installation failed'
-    fi
-    step_pass C.3 'AMQ initialized and both skill directories installed'
-
-    step_start C.4 'launch and attach the named-socket skill fleet'
-    if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT" --tmux; then
-      step_fail C.4 'skill fleet launch failed'
-      part_c_abort 'Part C skill fleet launch failed'
-    fi
-    PART_C_SESSION_OWNED=1
-    cat <<EOF
-The verifier will attach this Window 1 to the isolated skill fleet now. It runs:
-  $PART_C_TOP/bin/agentctl attach --session skillverify
-
-While attached, use these concrete actions:
-
-EOF
-    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ] && [ "$PART_C_AUTH_MODE" = manual ]; then
-      cat <<'EOF'
-While attached, complete these authentication steps before checking skills:
-
-1. In the Claude Code tab, complete onboarding and sign in until a ready prompt appears. This mints a fresh token into the isolated temporary keychain.
-2. In the codex tab, complete sign-in until a ready prompt appears.
-
-EOF
-    elif [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
-      cat <<'EOF'
-While attached, complete these authentication steps before checking skills:
-
-The proven Codex auth.json was copied with your consent.
-In the Claude Code tab, complete onboarding and sign in until a ready prompt appears. This
-mints a fresh token into the isolated temporary keychain. In the codex tab, wait
-for the authenticated ready prompt; do not enter credentials.
-
-EOF
-    elif [ "$PART_C_AUTH_MODE" = manual ]; then
-      cat <<'EOF'
-The Claude Keychains symlink and synthesized onboarding configuration were created
-with your consent. Claude Code should start without requiring re-authentication.
-In the codex tab, complete sign-in until a ready prompt appears.
-
-EOF
-    else
-      cat <<'EOF'
-The proven Codex auth.json, Claude Keychains symlink, and synthesized onboarding
-configuration were created with your consent. Neither harness should require
-re-authentication; do not enter credentials.
-
-EOF
-    fi
-    cat <<'EOF'
-After both harnesses are ready:
-
-1. In the Claude Code tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
-2. In the codex tab, type /skills and press Enter. Then find agentctl in the displayed skill inventory and press esc to close it.
-
-Then ask each harness exactly:
-
-  What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?
-
-Expected meaning: `kill(pid, 0)` returned `EPERM`; that claims neither child
-absence nor ownership. It does not authorize relaunch because only
-`stale-record` or `missing` can authorize relaunch.
-
-After both observations, press esc to detach cleanly; do not use uppercase X.
-Wait for the post-detach session-state report before continuing.
-EOF
-    if ! env -u TMUX -u TMUX_PANE TERM_PROGRAM=iTerm.app "$PART_C_TOP/bin/agentctl" attach --session skillverify; then
-      step_fail C.4 'skill fleet attach failed'
-      part_c_abort 'Part C attach guidance failed'
-    fi
-    step_pass C.4 'named-socket skill fleet launched and attach guidance completed'
-
-    if [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ] && [ "$PART_C_AUTH_MODE" = manual ]; then
-      auth_expected='both harnesses completed manual sign-in and reached ready prompts.'
-      auth_prompt='Did both harnesses complete manual sign-in and reach ready prompts?'
-    elif [ "$PART_C_CLAUDE_AUTH_MODE" = isolated-keychain ]; then
-      auth_expected='Claude Code minted a fresh token through guided sign-in, and codex reached an authenticated ready prompt from the seeded auth.json.'
-      auth_prompt='Did Claude Code mint a fresh token through guided sign-in and did codex authenticate from the seeded auth.json?'
-    elif [ "$PART_C_AUTH_MODE" = manual ]; then
-      auth_expected='Claude Code started authenticated through the consented Keychains symlink, and codex completed manual sign-in.'
-      auth_prompt='Did Claude Code start authenticated through the consented Keychains symlink and did codex complete manual sign-in?'
-    else
-      auth_expected='both harnesses started without requiring re-authentication.'
-      auth_prompt='Did both harnesses start without requiring re-authentication?'
-    fi
-    if checkpoint C.C1 'harness authentication ready' "$auth_expected" "$auth_prompt"; then
-      PART_C_AUTH_ATTESTATION=$ASK_ANSWER
-    else
-      PART_C_AUTH_ATTESTATION=$ASK_ANSWER
-      part_c_abort 'Part C authentication checkpoint failed'
-    fi
-
-    if checkpoint C.C2 'harness lists the agentctl skill' 'Claude Code /skills and codex /skills each list agentctl.' 'Do both harness inventories list the agentctl skill?'; then
-      PART_C_SKILL_ATTESTATION=$ASK_ANSWER
-    else
-      PART_C_SKILL_ATTESTATION=$ASK_ANSWER
-      part_c_abort 'Part C skill inventory checkpoint failed'
-    fi
-
-    meaning_expected='present-not-ours means kill(pid, 0) returned EPERM; that claims neither child absence nor ownership, and it does not authorize relaunch because only stale-record or missing can authorize relaunch.'
-    if checkpoint C.C3 'probe answer matches references/status-states.md' "$meaning_expected" 'Do both answers match references/status-states.md for present-not-ours and its refusal to authorize relaunch?'; then
-      PART_C_MEANING_ATTESTATION=$ASK_ANSWER
-    else
-      PART_C_MEANING_ATTESTATION=$ASK_ANSWER
-      part_c_abort 'Part C status-state checkpoint failed'
-    fi
-
-    step_start C.5 'tear down named-socket fleet and temporary skill root'
-    if ! part_c_teardown; then
-      die 'Part C teardown failed'
-    fi
-    step_pass C.5 'Part C resources removed and environment restored'
-    PART_C_RESULT='PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3'
-  fi
-
   {
     printf 'date_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'mode=verify-live\n'
+    printf 'live_human_checkpoint_schema=three-observation-v1\n'
     printf 'harness=both\n'
     printf 'probes=all four completed, no surviving throwaway server\n'
 
@@ -2030,28 +1435,17 @@ EOF
     printf 'part_b_presentation=detached\n'
     printf 'part_b_session=%s\n' "$LIVE_SESSION"
     printf 'part_b_amq_mode=%s\n' "$PART_B_AMQ_MODE"
-    printf 'part_c_result=%s\n' "$PART_C_RESULT"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
-    printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
-    printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"
-    printf 'compact_attestation=%s\n' "$COMPACT_ATTESTATION"
     printf 'relaunch_check=%s\n' "$RELAUNCH_CHECK"
     printf 'relaunch_attestation=%s\n' "$RELAUNCH_ATTESTATION"
     printf 'part_b_detach_attestation=%s\n' "$PART_B_DETACH_ATTESTATION"
-    printf 'part_c_auth_mode=%s\n' "$PART_C_AUTH_MODE"
-    printf 'part_c_claude_auth_mode=%s\n' "$PART_C_CLAUDE_AUTH_MODE"
-    printf 'part_c_auth_attestation=%s\n' "$PART_C_AUTH_ATTESTATION"
-    printf 'part_c_skill_attestation=%s\n' "$PART_C_SKILL_ATTESTATION"
-    printf 'part_c_meaning_attestation=%s\n' "$PART_C_MEANING_ATTESTATION"
     printf 'teardown_status_exit=%s\n' "$TEARDOWN_STATUS_EXIT"
     printf 'teardown_check=%s\n' "$TEARDOWN_CHECK"
   } >"$ARTIFACT_DIR/metadata.txt"
 
-  # The live clear/compact commands traverse agentctl's fail-closed
-  # @agentctl_process exact-match validation before delivering a literal
-  # payload and Enter. That checks pane identity on every delivery, so the
-  # results.tsv process_check remains rig-artifact tooling, not a weaker
-  # duplicate in the default live path.
+  # Task 8 owns exhaustive fixed-payload, skill, attach-protocol, and status
+  # semantics coverage. The default live path intentionally keeps only the
+  # three observations that require human eyes.
   if [ "$LIVE_STATUS" -ne 0 ]; then
     die 'live release verification failed; teardown attempted'
   fi
