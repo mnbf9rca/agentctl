@@ -1656,6 +1656,15 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 			t.Fatalf("output missing operator guidance %q:\n%s", want, output)
 		}
 	}
+	operatorGuidance := strings.Join(strings.Fields(output), " ")
+	for _, want := range []string{
+		"Close each viewer by closing its terminal window or tab, or by otherwise closing its PTY at the terminal boundary",
+		"Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the harness and can interrupt it",
+	} {
+		if !strings.Contains(operatorGuidance, want) {
+			t.Fatalf("output missing safe viewer-close guidance %q:\n%s", want, output)
+		}
+	}
 	for _, want := range []string{
 		"[ACTION PASS B.3] claude clear delivery command completed; observed outcome pending checkpoint B.C3",
 		"[ACTION PASS B.4] codex clear delivery command completed; observed outcome pending checkpoint B.C5",

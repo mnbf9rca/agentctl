@@ -1680,9 +1680,12 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     cat <<'EOF'
 
-Close the Window 2 and Window 3 viewer terminals. Closing a detached viewer does
-not stop its role. Return to Window 1 and confirm the numbered checkpoint below;
-the verifier will then observe both role records before fleet teardown.
+Close the Window 2 and Window 3 viewer terminals. Close each viewer by closing
+its terminal window or tab, or by otherwise closing its PTY at the terminal
+boundary. Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the
+harness and can interrupt it. Closing a detached viewer does not stop its role.
+Return to Window 1 and confirm the numbered checkpoint below; the verifier will
+then observe both role records before fleet teardown.
 EOF
     if checkpoint B.C10 'detached viewers closed' 'Window 2 and Window 3 were closed without sending a role-stopping command.' 'Are both detached viewer terminals closed?'; then
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER

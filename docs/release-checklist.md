@@ -44,7 +44,10 @@ PR.
    after the terminal returned to the shell.
 2. **Per-role attach, repaint, verbatim input, and clean disconnect/re-attach**
    — record the role, observed repaint, exact input observation, disconnect,
-   and successful replacement viewer. Record the one-viewer refusal separately.
+   and successful replacement viewer. A clean viewer disconnect means closing
+   the viewer's terminal window or tab, or otherwise closing its PTY at the
+   terminal boundary; typed `Ctrl-C` reaches the harness and can interrupt it.
+   Record the one-viewer refusal separately.
 3. **SIGWINCH resize observation** — record the terminal dimensions before and
    after resize and the role-side observation of the changed dimensions.
 4. **handled/ignored/blocked signal and terminal restoration** — separately
