@@ -36,6 +36,31 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-15
+
+- agentctl: `agentctl 25764cb`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.LjdUVE/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10
+- Part B session: `relverify_ljduve`
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 explicit role attachments: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 viewer terminals closed: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
 ### 2026-08-12
 
 - agentctl: `agentctl 21cfecf`
