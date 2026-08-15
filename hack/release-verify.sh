@@ -1905,7 +1905,7 @@ EOF
     step_pass C.3 'AMQ initialized and both skill directories installed'
 
     step_start C.4 'launch and attach the named-socket skill fleet'
-    if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT"; then
+    if ! "$PART_C_TOP/bin/agentctl" launch --session skillverify --roles a:claude,b:codex --dir "$PART_C_PROJECT" --tmux; then
       step_fail C.4 'skill fleet launch failed'
       part_c_abort 'Part C skill fleet launch failed'
     fi

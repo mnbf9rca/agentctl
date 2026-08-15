@@ -101,3 +101,14 @@ AMQ config/root and reports cleanup failure. Partial initialization is cleaned;
 substituted or unexpected paths are retained and reported rather than deleted.
 This is release-fixture setup through AMQ's public CLI, not an AMQ product
 change.
+
+The first signed run to complete Part B then reached a separate Part C
+presentation mismatch. Part C deliberately demonstrates a tabbed, named-socket
+skill fleet and its instructions require one bare attach to that tmux
+presentation. After detached became the product default, its launch omitted the
+now-required opt-in and correctly produced a detached fleet, so the bare attach
+failed. Part C now passes the public `--tmux` flag explicitly while Part B
+remains detached end to end. This preserves the two different, intentional
+release claims instead of weakening either one. The failed run evidence at
+`/tmp/agentctl-release-verify.jsTZeT` remains preserved read-only; it also proves
+the Task 7 Part B initialization and cleanup behavior passed live.

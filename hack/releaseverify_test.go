@@ -817,6 +817,10 @@ case "$1" in
     ;;
   launch)
     if [ "$3" = skillverify ]; then
+	  if [ "${AGENTCTL_TEST_REQUIRE_PART_C_TMUX_PRESENTATION:-0}" = 1 ] && [ "${!#}" != --tmux ]; then
+	    echo 'Part C skillverify launch omitted explicit --tmux presentation' >&2
+	    exit 2
+	  fi
       if [ "${AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT:-0}" = 1 ] && [ ! -d "$HOME/Library/Application Support" ]; then
         echo 'missing Part C Library/Application Support' >&2
         exit 2
@@ -1405,7 +1409,7 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"kill --session relverify",
 		"status --session relverify",
 		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project"),
+		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project") + " --tmux",
 		"attach --session skillverify",
 		"kill --session skillverify",
 	}
@@ -1931,7 +1935,7 @@ func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testin
 	wantPathPrefix := filepath.Join(partCRoot, "bin") + string(os.PathListSeparator)
 	wantCommands := []string{
 		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + wantProject,
+		"launch --session skillverify --roles a:claude,b:codex --dir " + wantProject + " --tmux",
 		"attach --session skillverify",
 		"kill --session skillverify",
 	}
@@ -1950,6 +1954,19 @@ func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testin
 		if fields[2] == os.Getenv("HOME") || !strings.HasPrefix(fields[3], wantPathPrefix) {
 			t.Fatalf("Part C agentctl boundary could reach the real HOME or unshimmed tmux context: %q", record)
 		}
+	}
+}
+
+func TestLiveVerificationOptsPartCSkillFleetIntoTmuxPresentation(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_TMUX_PRESENTATION=1")
+	if err != nil {
+		t.Fatalf("Part C did not explicitly opt its tabbed skill fleet into tmux presentation: %v\n%s", err, output)
+	}
+	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
+	want := "launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(filepath.Dir(skillHome), "project") + " --tmux"
+	if calls := strings.Join(fixture.calls(t), "\n"); !strings.Contains(calls, want) {
+		t.Fatalf("Part C launch omitted exact explicit tmux argv %q:\n%s", want, calls)
 	}
 }
 
@@ -2367,7 +2384,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 		"kill --session relverify",
 		"status --session relverify",
 		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project"),
+		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project") + " --tmux",
 		"attach --session skillverify",
 		"kill --session skillverify",
 	}

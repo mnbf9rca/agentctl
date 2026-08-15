@@ -184,3 +184,33 @@ fixture to Task 8's executed transcripts.
 - [x] Complete focused, full Go, vet, race, real-tmux integration, ShellCheck,
   lint, govulncheck, GoReleaser snapshot, archive, and binary-smoke gates.
 - [ ] Sign the focused follow-up and rerun the exact complete live walkthrough.
+
+### Task 8: Restore Part C's intentional tmux presentation
+
+**Files:**
+
+- Modify: `hack/release-verify.sh`
+- Modify: `hack/releaseverify_test.go`
+- Modify: detached relaunch design notes
+
+**Interfaces:**
+
+- Consumes: the public `agentctl launch --tmux` opt-in and the existing
+  Part C named-socket tmux shim.
+- Preserves: Part B's detached default and Part C's distinct tabbed skill
+  discovery walkthrough.
+
+- [x] Preserve `/tmp/agentctl-release-verify.jsTZeT` after Part A and Part B
+  passed and Part C's bare attach factually refused a detached fleet.
+- [x] Capture RED with a fixture that requires Part C's launch argv to end in
+  the explicit `--tmux` element.
+- [x] Add only the Part C presentation opt-in and update the exact argv and
+  isolated-environment assertions.
+- [x] Mutate away `--tmux`, require the focused guard to fail, then restore
+  focused GREEN plus ShellCheck, Bash syntax, and diff checks.
+- [x] Complete independent review with no Critical, Important, or Minor
+  findings.
+- [x] Complete focused, full Go, vet, race, real-tmux integration, ShellCheck,
+  lint, govulncheck, GoReleaser snapshot, archive, and binary-smoke gates.
+- [ ] Sign the focused follow-up and complete the live walkthrough before
+  handing the exact commit to build1.
