@@ -135,6 +135,91 @@ checkpoint() {
 PART_B_TOP=''
 PART_B_SESSION=''
 PART_B_SESSION_OWNED=0
+PART_B_LAUNCH_ATTEMPTED=0
+PART_B_SESSION_ABSENT_OBSERVED=0
+PART_B_AMQ_MODE='existing'
+PART_B_AMQ_CONFIG=''
+PART_B_AMQ_ROOT=''
+PART_B_AMQ_CONFIG_ID=''
+PART_B_AMQ_ROOT_ID=''
+PART_B_AMQ_CONFIG_OWNED=0
+PART_B_AMQ_ROOT_OWNED=0
+
+part_b_amq_prepare() {
+  local config_id
+  local init_status=0
+  local root_id
+  PART_B_AMQ_CONFIG="$PART_B_TOP/.amqrc"
+  PART_B_AMQ_ROOT="$EVIDENCE_DIR/part-b-amq"
+  if [ -e "$PART_B_AMQ_CONFIG" ] || [ -L "$PART_B_AMQ_CONFIG" ]; then
+    PART_B_AMQ_MODE=existing
+    return 0
+  fi
+  if [ -e "$PART_B_AMQ_ROOT" ] || [ -L "$PART_B_AMQ_ROOT" ]; then
+    printf 'PART B AMQ INIT FAIL (temporary root already exists: %s)\n' "$PART_B_AMQ_ROOT" >&2
+    return 1
+  fi
+  amq coop init --root "$PART_B_AMQ_ROOT" --agents a,b,user --no-gitignore || init_status=$?
+  if [ -f "$PART_B_AMQ_CONFIG" ] && [ ! -L "$PART_B_AMQ_CONFIG" ]; then
+    config_id=$(stat -f '%d:%i' "$PART_B_AMQ_CONFIG") || return 1
+    PART_B_AMQ_CONFIG_ID=$config_id
+    PART_B_AMQ_CONFIG_OWNED=1
+  fi
+  if [ -d "$PART_B_AMQ_ROOT" ] && [ ! -L "$PART_B_AMQ_ROOT" ]; then
+    root_id=$(stat -f '%d:%i' "$PART_B_AMQ_ROOT") || return 1
+    PART_B_AMQ_ROOT_ID=$root_id
+    PART_B_AMQ_ROOT_OWNED=1
+  fi
+  if [ "$init_status" -ne 0 ]; then
+    printf 'PART B AMQ INIT FAIL (amq coop init exited %s)\n' "$init_status" >&2
+    return 1
+  fi
+  if [ "$PART_B_AMQ_CONFIG_OWNED" -ne 1 ] || [ "$PART_B_AMQ_ROOT_OWNED" -ne 1 ]; then
+    printf 'PART B AMQ INIT FAIL (owned config or root has an unexpected file type)\n' >&2
+    return 1
+  fi
+  PART_B_AMQ_MODE=temporary
+  printf 'PART B AMQ INIT PASS (temporary config and root are owned by this verifier run)\n'
+}
+
+part_b_amq_teardown() {
+  local current_id
+  local teardown_status=0
+  if [ "$PART_B_AMQ_CONFIG_OWNED" -eq 0 ] && [ "$PART_B_AMQ_ROOT_OWNED" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$PART_B_LAUNCH_ATTEMPTED" -eq 1 ] && [ "$PART_B_SESSION_ABSENT_OBSERVED" -ne 1 ]; then
+    printf 'PART B AMQ CLEANUP FAIL (temporary config/root retained because fleet absence was not observed)\n' >&2
+    return 1
+  fi
+  if [ "$PART_B_AMQ_CONFIG_OWNED" -eq 1 ]; then
+    current_id=$(stat -f '%d:%i' "$PART_B_AMQ_CONFIG" 2>/dev/null) || current_id=''
+    if [ "$current_id" != "$PART_B_AMQ_CONFIG_ID" ]; then
+      printf 'PART B AMQ CLEANUP FAIL (temporary config identity changed: %s)\n' "$PART_B_AMQ_CONFIG" >&2
+      teardown_status=1
+    elif rm -f -- "$PART_B_AMQ_CONFIG" && [ ! -e "$PART_B_AMQ_CONFIG" ] && [ ! -L "$PART_B_AMQ_CONFIG" ]; then
+      PART_B_AMQ_CONFIG_OWNED=0
+      printf 'PART B AMQ CLEANUP PASS (temporary .amqrc removed)\n'
+    else
+      printf 'PART B AMQ CLEANUP FAIL (remove temporary config %s)\n' "$PART_B_AMQ_CONFIG" >&2
+      teardown_status=1
+    fi
+  fi
+  if [ "$PART_B_AMQ_ROOT_OWNED" -eq 1 ]; then
+    current_id=$(stat -f '%d:%i' "$PART_B_AMQ_ROOT" 2>/dev/null) || current_id=''
+    if [ "$current_id" != "$PART_B_AMQ_ROOT_ID" ]; then
+      printf 'PART B AMQ CLEANUP FAIL (temporary root identity changed: %s)\n' "$PART_B_AMQ_ROOT" >&2
+      teardown_status=1
+    elif rm -rf -- "$PART_B_AMQ_ROOT" && [ ! -e "$PART_B_AMQ_ROOT" ] && [ ! -L "$PART_B_AMQ_ROOT" ]; then
+      PART_B_AMQ_ROOT_OWNED=0
+      printf 'PART B AMQ CLEANUP PASS (temporary root removed)\n'
+    else
+      printf 'PART B AMQ CLEANUP FAIL (remove temporary root %s)\n' "$PART_B_AMQ_ROOT" >&2
+      teardown_status=1
+    fi
+  fi
+  return "$teardown_status"
+}
 
 part_b_retry_kill() {
   local attempt=1
@@ -422,6 +507,19 @@ cleanup_exit_trap() {
   fi
   if ! part_b_teardown; then
     printf 'release-verify: Part B cleanup failed during exit\n' >&2
+    cleanup_status=1
+  fi
+  if [ "$PART_B_LAUNCH_ATTEMPTED" -eq 1 ] && [ "$PART_B_SESSION_ABSENT_OBSERVED" -ne 1 ]; then
+    if session_absent "$PART_B_SESSION" "$ARTIFACT_DIR/exit-teardown.stdout" "$ARTIFACT_DIR/exit-teardown.stderr"; then
+      PART_B_SESSION_ABSENT_OBSERVED=1
+      printf 'PART B ABSENCE OBSERVATION PASS (agentctl status exit %s proves %s is absent during exit)\n' "$STATUS_EXIT" "$PART_B_SESSION"
+    else
+      printf 'PART B ABSENCE OBSERVATION FAIL (could not prove %s absent during exit; status exit %s)\n' "$PART_B_SESSION" "$STATUS_EXIT" >&2
+      cleanup_status=1
+    fi
+  fi
+  if ! part_b_amq_teardown; then
+    printf 'release-verify: Part B AMQ cleanup failed during exit\n' >&2
     cleanup_status=1
   fi
   final_status=$original_status
@@ -1343,8 +1441,15 @@ else
   TEARDOWN_STDOUT="$ARTIFACT_DIR/teardown.stdout"
   TEARDOWN_STDERR="$ARTIFACT_DIR/teardown.stderr"
 
+  PART_B_TOP=$TOP
+  PART_B_SESSION=$LIVE_SESSION
+  trap cleanup_exit_trap EXIT
+  if ! part_b_amq_prepare; then
+    die 'could not prepare the Part B AMQ coordination root'
+  fi
+
   if session_absent "$LIVE_SESSION" "$PRECHECK_STDOUT" "$PRECHECK_STDERR"; then
-    :
+    PART_B_SESSION_ABSENT_OBSERVED=1
   else
     absence_status=$?
     if [ "$absence_status" -eq 1 ]; then
@@ -1357,6 +1462,8 @@ else
   step_start B.1 'launch release-candidate fleet'
   echo 'Running:'
   printf '  ./bin/agentctl launch --session %s --roles a:claude,b:codex --efforts b:high\n' "$LIVE_SESSION"
+  PART_B_LAUNCH_ATTEMPTED=1
+  PART_B_SESSION_ABSENT_OBSERVED=0
   if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex --efforts b:high; then
     die 'live release verification launch failed'
   fi
@@ -1364,10 +1471,7 @@ else
 
   # This run owns LIVE_SESSION only after launch succeeds. Keep teardown armed
   # across every later command and attestation; explicit teardown disarms it.
-  PART_B_TOP=$TOP
-  PART_B_SESSION=$LIVE_SESSION
   PART_B_SESSION_OWNED=1
-  trap cleanup_exit_trap EXIT
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     cat <<'EOF'
@@ -1608,6 +1712,7 @@ EOF
   fi
 
   if session_absent "$LIVE_SESSION" "$TEARDOWN_STDOUT" "$TEARDOWN_STDERR"; then
+    PART_B_SESSION_ABSENT_OBSERVED=1
     TEARDOWN_STATUS_EXIT=$STATUS_EXIT
     printf 'TEARDOWN PASS (agentctl status exit %s proves %s is absent)\n' "$TEARDOWN_STATUS_EXIT" "$LIVE_SESSION"
   else
@@ -1625,6 +1730,10 @@ EOF
     TEARDOWN_CHECK=PASS
     step_pass B.11 "detached $LIVE_SESSION teardown checks completed"
   else
+    LIVE_STATUS=1
+  fi
+  if ! part_b_amq_teardown; then
+    TEARDOWN_CHECK=FAIL
     LIVE_STATUS=1
   fi
 
@@ -1917,6 +2026,7 @@ EOF
     printf 'part_b_result=%s\n' "$PART_B_RESULT"
     printf 'part_b_presentation=detached\n'
     printf 'part_b_session=%s\n' "$LIVE_SESSION"
+    printf 'part_b_amq_mode=%s\n' "$PART_B_AMQ_MODE"
     printf 'part_c_result=%s\n' "$PART_C_RESULT"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"

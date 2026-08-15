@@ -149,3 +149,38 @@ fixture to Task 8's executed transcripts.
   to fail with the reproduced wake-owner diagnostic, then restore GREEN.
 - [ ] Repeat full gates, create a signed follow-up commit, and rerun the entire
   real walkthrough before independent verification.
+
+### Task 7: Pre-initialize detached AMQ coordination found by the signed live run
+
+**Files:**
+
+- Modify: `hack/release-verify.sh`
+- Modify: `hack/releaseverify_test.go`
+- Modify: detached relaunch design notes
+
+**Interfaces:**
+
+- Consumes: `amq coop init`, the random evidence root, and the existing Part B
+  exit trap.
+- Protects: unattended detached harness startup from interactive AMQ
+  auto-initialization.
+
+- [x] Preserve `/tmp/agentctl-release-verify.9JEJ5T` and reproduce the failure
+  with a fresh unique session.
+- [x] Prove in real iTerm controls that direct AMQ coop and exact detached
+  agentctl launch succeed after explicit initialization.
+- [x] Capture RED when launch requires a prepared `.amqrc` and none exists.
+- [x] Initialize a temporary AMQ root when `.amqrc` is absent; preserve an
+  existing config byte-for-byte.
+- [x] Arm cleanup before initialization, identity-pin owned paths, and cover
+  successful cleanup plus partial-init failure cleanup.
+- [x] Capture RED for successful kill followed by indeterminate status in both
+  normal teardown and the unexpected-exit trap; retain AMQ artifacts until a
+  distinct status observation proves absence.
+- [x] Mutate away the absence gate and require both cleanup-order regressions to
+  fail, then restore focused GREEN.
+- [x] Complete independent re-review with no remaining Critical, Important, or
+  Minor findings.
+- [x] Complete focused, full Go, vet, race, real-tmux integration, ShellCheck,
+  lint, govulncheck, GoReleaser snapshot, archive, and binary-smoke gates.
+- [ ] Sign the focused follow-up and rerun the exact complete live walkthrough.

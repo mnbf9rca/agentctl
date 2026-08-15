@@ -864,6 +864,12 @@ case "$1" in
       echo 'launched skillverify'
       exit 0
     fi
+    if [ "${AGENTCTL_TEST_REQUIRE_PART_B_AMQ_INIT:-0}" = 1 ]; then
+      expected_amq_root="$(cat "$AGENTCTL_TEST_EVIDENCE_DIR_LOG")/part-b-amq"
+      [ -f .amqrc ] || { echo 'Part B temporary .amqrc is missing' >&2; exit 2; }
+      grep -Fq "\"root\": \"$expected_amq_root\"" .amqrc || { echo 'Part B temporary .amqrc has the wrong root' >&2; exit 2; }
+      [ -d "$expected_amq_root" ] || { echo 'Part B temporary AMQ root is missing' >&2; exit 2; }
+    fi
     if [ "${AGENTCTL_TEST_STALE_AMQ_RELVERIFY:-0}" = 1 ] && [ "$3" = relverify ]; then
       echo 'capture final coop wake owner: wake owner boot id is required' >&2
       exit 8
@@ -1091,7 +1097,16 @@ exec /bin/rm "$@"
 	amq := `#!/usr/bin/env bash
 set -u
 printf '%s|%s|%s|%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AMQ_LOG"
-[ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --agents ] && [ "$4" = a,b,user ] || exit 64
+if [ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --root ] && [ "$5" = --agents ] && [ "$6" = a,b,user ] && [ "$7" = --no-gitignore ] && [ "$#" -eq 7 ]; then
+  mkdir -p "$4/meta"
+  printf '{\n  "root": "%s"\n}\n' "$4" >.amqrc
+  printf '{"agents":["a","b","user"]}\n' >"$4/meta/config.json"
+  if [ "${AGENTCTL_TEST_PART_B_AMQ_INIT_FAIL_AFTER_CREATE:-0}" = 1 ]; then
+    exit 17
+  fi
+  exit 0
+fi
+[ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --agents ] && [ "$4" = a,b,user ] && [ "$#" -eq 4 ] || exit 64
 `
 	writeTestFile(t, filepath.Join(dir, "stubs/amq"), []byte(amq), 0o755)
 	mktemp := `#!/usr/bin/env bash
@@ -1890,8 +1905,8 @@ func TestLiveVerificationPartCRefusesConsentAndManualSignIn(t *testing.T) {
 			t.Fatalf("Part C work began after both auth paths were refused:\n%s", strings.Join(fixture.calls(t), "\n"))
 		}
 	}
-	if _, statErr := os.Stat(fixture.amqLog); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("AMQ initialization ran after both auth paths were refused: %v", statErr)
+	if amqCalls := readTestFile(t, fixture.amqLog); strings.Contains(amqCalls, "coop init --agents a,b,user|") {
+		t.Fatalf("Part C AMQ initialization ran after both auth paths were refused:\n%s", amqCalls)
 	}
 	if !strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") || strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
 		t.Fatalf("real tmux connect-ENOENT was not accepted as named-socket absence:\n%s", output)
@@ -2030,9 +2045,17 @@ func TestLiveVerificationPartCRejectCleansOnlyNamedResources(t *testing.T) {
 			t.Fatalf("bare/default-socket kill-server invoked:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
 		}
 	}
-	amqRecord := strings.TrimSpace(readTestFile(t, fixture.amqLog))
-	if !strings.Contains(amqRecord, "coop init --agents a,b,user|") || strings.Contains(amqRecord, "|"+fixture.dir+"|"+originalHome+"|"+originalPath) {
-		t.Fatalf("Part C did not use isolated cwd/HOME/PATH: %q", amqRecord)
+	var partCAMQRecord string
+	for _, record := range strings.Split(strings.TrimSpace(readTestFile(t, fixture.amqLog)), "\n") {
+		if strings.HasPrefix(record, "coop init --agents a,b,user|") {
+			if partCAMQRecord != "" {
+				t.Fatalf("Part C initialized AMQ more than once: %q and %q", partCAMQRecord, record)
+			}
+			partCAMQRecord = record
+		}
+	}
+	if partCAMQRecord == "" || strings.Contains(partCAMQRecord, "|"+fixture.dir+"|"+originalHome+"|"+originalPath) {
+		t.Fatalf("Part C did not use isolated cwd/HOME/PATH: %q", partCAMQRecord)
 	}
 	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
 	if _, statErr := os.Stat(skillHome); !errors.Is(statErr, os.ErrNotExist) {
@@ -2458,6 +2481,73 @@ func TestLiveVerificationUsesRunUniqueSessionOutsideStaleAMQRelverify(t *testing
 	}
 }
 
+func TestLiveVerificationOwnsTemporaryAMQConfigBeforeDetachedLaunchAndRestoresCheckout(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_B_AMQ_INIT=1")
+	if err != nil {
+		t.Fatalf("live verifier did not initialize AMQ before detached launch: %v\n%s", err, output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	if _, statErr := os.Lstat(filepath.Join(fixture.dir, ".amqrc")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary Part B .amqrc survived verification: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(evidenceRoot, "part-b-amq")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary Part B AMQ root survived verification: %v", statErr)
+	}
+	amqCalls := strings.Split(strings.TrimSpace(readTestFile(t, fixture.amqLog)), "\n")
+	if len(amqCalls) < 2 || !strings.HasPrefix(amqCalls[0], "coop init --root "+evidenceRoot+"/part-b-amq --agents a,b,user --no-gitignore|") {
+		t.Fatalf("first AMQ call was not the owned Part B initialization: %q", amqCalls)
+	}
+}
+
+func TestLiveVerificationPreservesPreexistingAMQConfig(t *testing.T) {
+	fixture := newLiveFixture(t)
+	writeTestFile(t, filepath.Join(fixture.dir, ".git", "info", "exclude"), []byte(".amqrc\n"), 0o644)
+	existingRoot := filepath.Join(t.TempDir(), "operator-amq")
+	if err := os.Mkdir(existingRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "{\n  \"root\": \"" + existingRoot + "\"\n}\n"
+	writeTestFile(t, filepath.Join(fixture.dir, ".amqrc"), []byte(config), 0o600)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	if err != nil {
+		t.Fatalf("live verifier failed with an existing AMQ config: %v\n%s", err, output)
+	}
+	if got := readTestFile(t, filepath.Join(fixture.dir, ".amqrc")); got != config {
+		t.Fatalf("preexisting .amqrc changed: got %q want %q", got, config)
+	}
+	metadata := readTestFile(t, filepath.Join(strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog)), "verify-live", "metadata.txt"))
+	if !strings.Contains(metadata, "part_b_amq_mode=existing\n") {
+		t.Fatalf("metadata did not record existing AMQ mode:\n%s", metadata)
+	}
+	if strings.Contains(readTestFile(t, fixture.amqLog), "part-b-amq") {
+		t.Fatal("verifier initialized a temporary Part B root despite an existing .amqrc")
+	}
+}
+
+func TestLiveVerificationCleansPartialAMQInitializationFailure(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, "", "AGENTCTL_TEST_PART_B_AMQ_INIT_FAIL_AFTER_CREATE=1")
+	if err == nil {
+		t.Fatalf("live verifier accepted a partial AMQ initialization failure:\n%s", output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	for _, path := range []string{filepath.Join(fixture.dir, ".amqrc"), filepath.Join(evidenceRoot, "part-b-amq")} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("partial AMQ initialization artifact survived at %s: %v", path, statErr)
+		}
+	}
+	for _, want := range []string{
+		"PART B AMQ INIT FAIL (amq coop init exited 17)",
+		"PART B AMQ CLEANUP PASS (temporary .amqrc removed)",
+		"PART B AMQ CLEANUP PASS (temporary root removed)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("partial AMQ failure output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 // This catches a later status checkpoint overwriting the evidence that proves
 // what the verifier observed earlier in the same run.
 func TestLiveVerificationPreservesDistinctStatusEvidenceAtEveryCheckpoint(t *testing.T) {
@@ -2631,6 +2721,45 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 	output, err := fixture.run(t, strings.Repeat("y\n", 12), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure")
 	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (agentctl status") {
 		t.Fatalf("unexpected status failure was not rejected: err=%v\n%s", err, output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+	for _, path := range []string{filepath.Join(fixture.dir, ".amqrc"), filepath.Join(evidenceRoot, "part-b-amq")} {
+		if _, statErr := os.Lstat(path); statErr != nil {
+			t.Fatalf("AMQ artifact was removed without observed fleet absence at %s: %v", path, statErr)
+		}
+	}
+	if !strings.Contains(output, "PART B AMQ CLEANUP FAIL (temporary config/root retained because fleet absence was not observed)") {
+		t.Fatalf("output did not report retained AMQ artifacts after uncertain status:\n%s", output)
+	}
+}
+
+func TestLiveVerificationUnexpectedExitRetainsAMQArtifactsWithoutObservedAbsence(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, "",
+		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+		"AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6",
+		"AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure",
+	)
+	if err == nil {
+		t.Fatalf("unexpected Part B exit returned success without observed fleet absence:\n%s", output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+	for _, path := range []string{filepath.Join(fixture.dir, ".amqrc"), filepath.Join(evidenceRoot, "part-b-amq")} {
+		if _, statErr := os.Lstat(path); statErr != nil {
+			t.Fatalf("exit trap removed AMQ artifact without observed fleet absence at %s: %v", path, statErr)
+		}
+	}
+	for _, want := range []string{
+		"simulated unexpected Part B exit",
+		"PART B CLEANUP PASS",
+		"PART B ABSENCE OBSERVATION FAIL",
+		"PART B AMQ CLEANUP FAIL (temporary config/root retained because fleet absence was not observed)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 

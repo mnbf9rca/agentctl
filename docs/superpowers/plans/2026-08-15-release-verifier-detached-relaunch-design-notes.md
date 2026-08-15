@@ -81,3 +81,23 @@ command and expected output, and is recorded as `part_b_session` in evidence.
 This avoids coupling agentctl release tooling to AMQ's private on-disk layout
 and avoids deleting or reusing unrelated coordination state. The failed live
 artifact at `/tmp/agentctl-release-verify.qFePqt` remains preserved read-only.
+
+The next signed live run proved the unique name was necessary but insufficient.
+Its fresh `relverify_9jej5t` launch still failed before B.C1 because the fresh
+worktree had no `.amqrc`; unattended `amq coop exec` attempted interactive
+auto-initialization inside the detached child PTY and exited before the harness
+became ready. The preserved evidence is
+`/tmp/agentctl-release-verify.9JEJ5T`.
+
+Part B now uses an existing operator `.amqrc` without changing it, or creates a
+temporary verifier-owned `.amqrc` whose absolute AMQ root is inside the random
+evidence root. Cleanup is armed before initialization, records filesystem
+identities for both owned artifacts, and removes them only after the fleet is
+observed absent. A successful `agentctl kill` is not absence evidence: normal
+teardown and the exit trap each require a subsequent `agentctl status` result
+that factually proves the run-unique durable fleet is missing. If that
+observation is running or indeterminate, the verifier retains the temporary
+AMQ config/root and reports cleanup failure. Partial initialization is cleaned;
+substituted or unexpected paths are retained and reported rather than deleted.
+This is release-fixture setup through AMQ's public CLI, not an AMQ product
+change.
