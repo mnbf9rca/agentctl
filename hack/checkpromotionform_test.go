@@ -45,6 +45,12 @@ func initFormRepo(t *testing.T, version string, tags []string) string {
 	if err := os.WriteFile(filepath.Join(dir, "VERSION"), []byte(version+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "release-verification-notes.md"), []byte("# committed evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	run("git", "add", "-A")
 	run("git", "commit", "-q", "-m", "init")
 	for _, tag := range tags {
@@ -75,11 +81,27 @@ const templateBody = `## Release promotion: main -> release
 - [%s] **Checklist not required.** No changes in checklist-covered areas since
   the last release.
 
+When **Checklist run.** is checked, complete all four fields below.
+
+- [%s] **Detached launch passed.** The ordinary-terminal detached-launch leg
+  passed and is recorded in the evidence location below.
+- [%s] **Per-role attach passed.** The attach/repaint/verbatim-input and clean
+  disconnect/re-attach legs passed and are recorded below.
+- [%s] **Signal and terminal restoration passed.** Every required
+  handled/ignored/blocked signal and terminal-restoration leg passed and is
+  recorded below.
+
+Evidence location: %s
+
 Version: %s
 `
 
 func body(runBox, skipBox, version string) string {
-	return fmt.Sprintf(templateBody, runBox, skipBox, version)
+	return bodyWithEvidence(runBox, skipBox, "x", "x", "x", "docs/release-verification-notes.md", version)
+}
+
+func bodyWithEvidence(runBox, skipBox, detachedBox, attachBox, signalBox, evidence, version string) string {
+	return fmt.Sprintf(templateBody, runBox, skipBox, detachedBox, attachBox, signalBox, evidence, version)
 }
 
 func TestCheckPromotionForm_NeitherBoxTicked(t *testing.T) {
@@ -162,13 +184,163 @@ func TestCheckPromotionForm_MissingCheckboxLines(t *testing.T) {
 
 func TestCheckPromotionForm_PassesWithOneBoxAndMatchingVersion(t *testing.T) {
 	dir := initFormRepo(t, "0.1.0", nil)
-	out, err := runFormCheck(t, dir, body("x", " ", "0.1.0"))
+	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", "docs/release-verification-notes.md", "0.1.0"))
 	if err != nil {
 		t.Fatalf("expected success, got failure: %v\n%s", err, out)
 	}
 	out2, err2 := runFormCheck(t, dir, body(" ", "x", "0.1.0"))
 	if err2 != nil {
 		t.Fatalf("expected success with the other box ticked, got failure: %v\n%s", err2, out2)
+	}
+}
+
+// This catches a checklist-required promotion that claims the generic
+// ceremony ran but omits the committed evidence location or any required
+// detached/attach/signal affirmation.
+func TestCheckPromotionForm_ChecklistRunRequiresTmuxlessEvidenceAffirmations(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", " ", " ", " ", "", "0.1.0"))
+	if err == nil {
+		t.Fatalf("checklist-required promotion without tmuxless evidence passed:\n%s", out)
+	}
+	if !strings.Contains(out, "Evidence location") {
+		t.Fatalf("missing evidence location failure = %q", out)
+	}
+}
+
+func TestCheckPromotionForm_ChecklistRunRequiresEveryTmuxlessLeg(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	for _, test := range []struct {
+		name     string
+		detached string
+		attach   string
+		signal   string
+		want     string
+	}{
+		{"detached", " ", "x", "x", "Detached launch passed"},
+		{"attach", "x", " ", "x", "Per-role attach passed"},
+		{"signal", "x", "x", " ", "Signal and terminal restoration passed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", test.detached, test.attach, test.signal, "docs/release-verification-notes.md", "0.1.0"))
+			if err == nil || !strings.Contains(out, test.want) {
+				t.Fatalf("missing %s affirmation err=%v output=%q", test.name, err, out)
+			}
+		})
+	}
+}
+
+func TestCheckPromotionForm_ChecklistRunRequiresCommittedCleanRelativeEvidence(t *testing.T) {
+	dir := initFormRepo(t, "0.1.0", nil)
+	for _, test := range []struct {
+		name     string
+		evidence string
+		want     string
+	}{
+		{"invented", "docs/invented.md", "must be the committed repository-relative path"},
+		{"absolute", "/tmp/evidence.md", "must be the committed repository-relative path"},
+		{"traversal", "docs/../outside.md", "must be the committed repository-relative path"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := runFormCheck(t, dir, bodyWithEvidence("x", " ", "x", "x", "x", test.evidence, "0.1.0"))
+			if err == nil || !strings.Contains(out, test.want) {
+				t.Fatalf("evidence %q err=%v output=%q", test.evidence, err, out)
+			}
+		})
+	}
+	const evidence = "docs/release-verification-notes.md"
+	stagedDir := initFormRepo(t, "0.1.0", nil)
+	remove := exec.Command("git", "rm", "-q", "--", evidence)
+	remove.Dir = stagedDir
+	if out, err := remove.CombinedOutput(); err != nil {
+		t.Fatalf("git rm committed evidence: %v\n%s", err, out)
+	}
+	remove = exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "remove evidence")
+	remove.Dir = stagedDir
+	if out, err := remove.CombinedOutput(); err != nil {
+		t.Fatalf("git commit evidence removal: %v\n%s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(stagedDir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagedDir, evidence), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "add", evidence)
+	cmd.Dir = stagedDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add staged evidence: %v\n%s", err, out)
+	}
+	out, err := runFormCheck(t, stagedDir, body("x", " ", "0.1.0"))
+	if err == nil || !strings.Contains(out, "not committed at HEAD") {
+		t.Fatalf("staged evidence err=%v output=%q", err, out)
+	}
+}
+
+// This catches an evidence path that names a tracked tree or symlink instead
+// of the single committed regular release-verification record.
+func TestCheckPromotionForm_ChecklistEvidenceMustBePinnedRegularFileAtHEAD(t *testing.T) {
+	const evidence = "docs/release-verification-notes.md"
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "directory",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(dir, evidence), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, evidence, "inside.md"), []byte("not evidence\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				commitFormFiles(t, dir, evidence)
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "docs", "other.md"), []byte("not evidence\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("other.md", filepath.Join(dir, evidence)); err != nil {
+					t.Fatal(err)
+				}
+				commitFormFiles(t, dir, evidence, "docs/other.md")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := initFormRepo(t, "0.1.0", nil)
+			test.setup(t, dir)
+			out, err := runFormCheck(t, dir, body("x", " ", "0.1.0"))
+			if err == nil || !strings.Contains(out, "regular file") {
+				t.Fatalf("%s evidence err=%v output=%q", test.name, err, out)
+			}
+		})
+	}
+}
+
+func commitFormFiles(t *testing.T, dir string, paths ...string) {
+	t.Helper()
+	arguments := append([]string{"add", "-A", "--"}, paths...)
+	command := exec.Command("git", arguments...)
+	command.Dir = dir
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git add evidence fixture: %v\n%s", err, out)
+	}
+	command = exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture evidence")
+	command.Dir = dir
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git commit evidence fixture: %v\n%s", err, out)
 	}
 }
 

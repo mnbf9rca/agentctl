@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ const (
 	integrationTMUXSocketEnv = "AGENTCTL_INTEGRATION_TMUX_SOCKET"
 	integrationTMUXTmpEnv    = "AGENTCTL_INTEGRATION_TMUX_TMPDIR"
 	integrationProjectEnv    = "AGENTCTL_INTEGRATION_PROJECT_DIR"
+	integrationRepaintEnv    = "AGENTCTL_INTEGRATION_REPAINT"
 )
 
 type integrationResult struct {
@@ -444,6 +446,16 @@ func integrationMarkerMain() {
 		os.Exit(91)
 	}
 	defer file.Close()
+	if os.Getenv(integrationRepaintEnv) == "1" {
+		repaintSignals := make(chan os.Signal, 1)
+		signal.Notify(repaintSignals, syscall.SIGWINCH)
+		defer signal.Stop(repaintSignals)
+		repaintStop := make(chan struct{})
+		defer close(repaintStop)
+		go func() {
+			serveIntegrationRepaintSignals(repaintStop, repaintSignals, integrationMarkerRepaint)
+		}()
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -460,6 +472,71 @@ func integrationMarkerMain() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(94)
 	}
+}
+
+// This catches a one-shot SIGWINCH observer that consumes an early detached
+// signal whose terminal-size probe fails, then misses the later attached size.
+func TestIntegrationMarkerRepaintRetriesAfterEarlyProbeFailure(t *testing.T) {
+	signals := make(chan os.Signal, 2)
+	stop := make(chan struct{})
+	defer close(stop)
+	completed := make(chan struct{})
+	calls := 0
+	go func() {
+		serveIntegrationRepaintSignals(stop, signals, func(string) error {
+			calls++
+			if calls == 1 {
+				return errors.New("early detached terminal has no observed size")
+			}
+			return nil
+		})
+		close(completed)
+	}()
+	signals <- syscall.SIGWINCH
+	signals <- syscall.SIGWINCH
+	select {
+	case <-completed:
+		if calls != 2 {
+			t.Fatalf("resize probes = %d, want first failed probe then second successful probe", calls)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resize signal loop did not complete after successful second probe")
+	}
+}
+
+// serveIntegrationRepaintSignals owns only the test-marker signal lifecycle.
+// The marker must stop it before exit so an idle detached stub has no leaked
+// signal observer.
+func serveIntegrationRepaintSignals(stop <-chan struct{}, signals <-chan os.Signal, repaint func(string) error) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-signals:
+			// A detached candidate can receive SIGWINCH before the attach terminal
+			// is usable. Only a successful size observation is a repaint fact.
+			if repaint("resize") == nil {
+				return
+			}
+		}
+	}
+}
+
+func integrationMarkerRepaint(input string) error {
+	size := exec.Command("/bin/stty", "size")
+	size.Stdin = os.Stdin
+	observed, err := size.Output()
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(string(observed))
+	if len(fields) != 2 {
+		return fmt.Errorf("integration repaint stub: malformed stty size %q", observed)
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "candidate repaint rows=%s cols=%s input=%s\n", fields[0], fields[1], input); err != nil {
+		return err
+	}
+	return nil
 }
 
 func newIntegrationFixture(t *testing.T) *integrationFixture {

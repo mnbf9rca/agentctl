@@ -103,6 +103,161 @@ func TestTask8RejectsNonemptyEvidenceDirectoryBeforeRunningCandidate(t *testing.
 	}
 }
 
+// This catches the release walkthrough dropping one of the tmuxless candidate
+// transcript legs or ceasing to route those legs through CURRENT_BINARY and
+// Task-8-owned roots. It runs the real script with only toolchain boundaries
+// faked, and asserts the executed go-test argv and environment.
+func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) {
+	fixture := newTask8TranscriptFixture(t)
+	output, err := fixture.run(t)
+	if err != nil {
+		t.Fatalf("Task 8 transcript fixture failed: %v\n%s", err, output)
+	}
+	log := readTestFile(t, fixture.goLog)
+	wantCandidate := "candidate=" + fixture.candidate
+	for _, want := range []string{
+		"test -tags integration ./cmd/agentctl -count=1 -v -run TestIntegration(",
+		"DetachedRoleAttachReleasesOnSignalAndReadmits",
+		"ShimPresentationLayoutDoesNotChangeRuntimeIdentityOrDelivery",
+		"ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence",
+		"ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF",
+		"ShimSIGKILLLeavesApprovedRecordStateAndConcurrentRelaunchStartsOneChild",
+		"ShimKillObservesChildExitBeforePresentationAndFleetCleanup",
+		"test ./internal/attach ./internal/shim -count=1 -v -run Test(",
+		"ViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame",
+		"AttachServerChildExitMapsExactTailUndeliveredFinal",
+		"AttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals",
+		"ServerRunDetachedServesAttachAndControlBeforeCleanExit",
+		wantCandidate,
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Task 8 executed transcript log omits %q:\n%s", want, log)
+		}
+	}
+	var integrationLine string
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if strings.Contains(line, "argv=test -tags integration ./cmd/agentctl") {
+			integrationLine = line
+			break
+		}
+	}
+	if integrationLine == "" || !strings.Contains(integrationLine, "project=/tmp/a8.") || !strings.Contains(integrationLine, "owned=/tmp/a8.") {
+		t.Fatalf("candidate integration did not receive Task-8-owned project and integration roots:\n%s", log)
+	}
+	integrationTranscript := readTestFile(t, filepath.Join(fixture.root, "evidence", "integration.log"))
+	if !strings.Contains(integrationTranscript, "candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation") {
+		t.Fatalf("candidate integration transcript omits the sentinel-preservation result:\n%s", integrationTranscript)
+	}
+	if !strings.Contains(integrationTranscript, "candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer") {
+		t.Fatalf("candidate integration transcript omits the repaint/VEOF/replacement result:\n%s", integrationTranscript)
+	}
+	if got := strings.TrimSpace(readTestFile(t, fixture.matrixLog)); got != "root=/tmp" {
+		t.Fatalf("version matrix root = %q, want short isolated /tmp parent", got)
+	}
+}
+
+type task8TranscriptFixture struct {
+	root, project, candidate, goLog, matrixLog string
+}
+
+func newTask8TranscriptFixture(t *testing.T) task8TranscriptFixture {
+	t.Helper()
+	root := t.TempDir()
+	for _, path := range []string{"hack", "skills/agentctl", "stubs", "bin"} {
+		if err := os.MkdirAll(filepath.Join(root, path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script, err := os.ReadFile("release-verify.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, "hack/release-verify.sh"), script, 0o755)
+	writeTestFile(t, filepath.Join(root, "hack/verify-release-archives.sh"), []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755)
+	writeTestFile(t, filepath.Join(root, ".goreleaser.yaml"), []byte("project_name: agentctl\n"), 0o644)
+	candidate := filepath.Join(root, "bin/agentctl")
+	writeTestFile(t, candidate, []byte(`#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  version) echo 'agentctl vfixture' ;;
+  --help) printf '  run \n' ;;
+  relaunch) printf 'ESRCH-backed stale durable child record\n' ;;
+  skill) mkdir -p "$HOME/.claude/skills/agentctl" "$HOME/.agents/skills/agentctl" ;;
+esac
+`), 0o755)
+	goLog := filepath.Join(root, "go.log")
+	matrixLog := filepath.Join(root, "matrix.log")
+	writeTestFile(t, filepath.Join(root, "stubs/go"), []byte(`#!/usr/bin/env bash
+set -eu
+printf 'cwd=%s|argv=%s|candidate=%s|project=%s|owned=%s\n' "$PWD" "$*" "${AGENTCTL_INTEGRATION_RELEASE_CANDIDATE:-}" "${AGENTCTL_INTEGRATION_PROJECT_DIR:-}" "${AGENTCTL_INTEGRATION_OWNED_ROOT:-}" >>"$AGENTCTL_TASK8_GO_LOG"
+if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateCrashRelaunchAndKillUseObservedAbsence* ]]; then
+  printf '%s\n' 'candidate-routed crash/relaunch/kill preserved the private-socket sentinel presentation'
+fi
+if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF* ]]; then
+  printf '%s\n' 'candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer'
+fi
+if [ "${1:-}" = version ] && [ "${2:-}" = -m ]; then
+  printf 'golang.org/x/sys v0.47.0\nvcs.revision=%s\nvcs.modified=false\n' "$(git rev-parse HEAD)"
+elif [ "${1:-}" = build ]; then
+  out=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then out=$2; shift 2; continue; fi
+    shift
+  done
+  cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+  sweep) exit 0 ;;
+  matrix)
+    printf 'root=%s\n' "${AGENTCTL_SHIM_VERSION_OWNED_ROOT:-}" >"$AGENTCTL_TASK8_MATRIX_LOG"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --artifact-dir ]; then mkdir -p "$2"; printf 'ok\n' >"$2/results.tsv"; printf 'ok\n' >"$2/metadata.txt"; exit 0; fi
+      shift
+    done
+    ;;
+esac
+exit 0
+SCRIPT
+  chmod 755 "$out"
+elif [ "${1:-}" = version ]; then
+  echo 'go version gofixture darwin/arm64'
+fi
+`), 0o755)
+	writeTestFile(t, filepath.Join(root, "stubs/goreleaser"), []byte(`#!/usr/bin/env bash
+set -eu
+config=''
+while [ "$#" -gt 0 ]; do [ "$1" = --config ] && { config=$2; shift 2; continue; }; shift; done
+dist=$(sed -n 's/^dist: "\(.*\)"$/\1/p' "$config")
+mkdir -p "$dist"
+: >"$dist/fixture.tar.gz"
+`), 0o755)
+	writeTestFile(t, filepath.Join(root, "stubs/tmux"), []byte("#!/usr/bin/env bash\necho 'tmux 3.7b'\n"), 0o755)
+	writeTestFile(t, filepath.Join(root, "stubs/sw_vers"), []byte("#!/usr/bin/env bash\necho fixture\n"), 0o755)
+	runCommand(t, root, "git", "init", "-q")
+	runCommand(t, root, "git", "add", ".")
+	runCommand(t, root, "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+	canonicalCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task8TranscriptFixture{root: root, project: filepath.Join(root, "task8", "project"), candidate: canonicalCandidate, goLog: goLog, matrixLog: matrixLog}
+}
+
+func (fixture task8TranscriptFixture) run(t *testing.T) (string, error) {
+	t.Helper()
+	evidence := filepath.Join(fixture.root, "evidence")
+	command := exec.Command("bash", "hack/release-verify.sh", "--task8", fixture.candidate, evidence)
+	command.Dir = fixture.root
+	command.Env = append(os.Environ(),
+		"AGENTCTL_TASK8_GO_LOG="+fixture.goLog,
+		"AGENTCTL_TASK8_MATRIX_LOG="+fixture.matrixLog,
+		"PATH="+filepath.Join(fixture.root, "stubs")+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
 func TestTask8SignalsPreserveFailureAndCleanExactlyOnceAtEveryPhase(t *testing.T) {
 	current, err := os.Executable()
 	if err != nil {

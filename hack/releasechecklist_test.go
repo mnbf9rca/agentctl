@@ -39,3 +39,28 @@ func TestReleaseChecklistKeepsMechanicalStepsInVerifier(t *testing.T) {
 		}
 	}
 }
+
+// This catches a promotion checklist that records a generic pass while omitting
+// one of the human terminal observations or the §15.9 artifact evidence.
+func TestReleaseChecklistNamesEachTmuxlessPromotionEvidenceField(t *testing.T) {
+	contents, err := os.ReadFile("../docs/release-checklist.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Detached launch in an ordinary terminal",
+		"Per-role attach, repaint, verbatim input, and clean disconnect/re-attach",
+		"SIGWINCH resize observation",
+		"handled/ignored/blocked signal and terminal restoration",
+		"go version -m",
+		"golang.org/x/sys v0.47.0",
+		"built Darwin binary",
+		"extracted Darwin binary",
+		"LICENSES/golang.org/x/sys/LICENSE",
+		"docs/release-verification-notes.md",
+	} {
+		if !strings.Contains(string(contents), want) {
+			t.Fatalf("release checklist omits required evidence field %q", want)
+		}
+	}
+}

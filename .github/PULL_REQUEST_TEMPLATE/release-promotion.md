@@ -9,4 +9,16 @@ formula update). Check exactly one box; the claim below ships with the release.
 - [ ] **Checklist not required.** No changes in checklist-covered areas since
   the last release.
 
+When **Checklist run.** is checked, complete all four fields below.
+
+- [ ] **Detached launch passed.** The ordinary-terminal detached-launch leg
+  passed and is recorded in the evidence location below.
+- [ ] **Per-role attach passed.** The attach/repaint/verbatim-input and clean
+  disconnect/re-attach legs passed and are recorded below.
+- [ ] **Signal and terminal restoration passed.** Every required
+  handled/ignored/blocked signal and terminal-restoration leg passed and is
+  recorded below.
+
+Evidence location: <!-- committed path on main, e.g. docs/release-verification-notes.md -->
+
 Version: <!-- output of hack/next-version.sh, e.g. 0.1.2 -->
