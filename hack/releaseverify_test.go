@@ -128,6 +128,7 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 		"AttachServerChildExitMapsExactTailUndeliveredFinal",
 		"AttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals",
 		"ServerRunDetachedServesAttachAndControlBeforeCleanExit",
+		"test ./hack -count=1 -v -run ^TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach$",
 		wantCandidate,
 	} {
 		if !strings.Contains(log, want) {
@@ -150,6 +151,10 @@ func TestTask8VerifierRunsTmuxlessCandidateTranscriptInOwnedRoots(t *testing.T) 
 	}
 	if !strings.Contains(integrationTranscript, "candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer") {
 		t.Fatalf("candidate integration transcript omits the repaint/VEOF/replacement result:\n%s", integrationTranscript)
+	}
+	defaultLiveTranscript := readTestFile(t, filepath.Join(fixture.root, "evidence", "default-live-verifier.log"))
+	if !strings.Contains(defaultLiveTranscript, "full-default verifier used detached runtime records and explicit role attach") {
+		t.Fatalf("Task 8 default-live transcript omits the detached verifier result:\n%s", defaultLiveTranscript)
 	}
 	if got := strings.TrimSpace(readTestFile(t, fixture.matrixLog)); got != "root=/tmp" {
 		t.Fatalf("version matrix root = %q, want short isolated /tmp parent", got)
@@ -195,6 +200,9 @@ if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateCrashRelaunchAndKillUseObs
 fi
 if [ "${1:-}" = test ] && [[ "$*" == *ReleaseCandidateAttachRepaintsAndReadmitsAfterCleanViewerEOF* ]]; then
   printf '%s\n' 'candidate-routed attach repainted output, released the viewer on VEOF, and admitted a replacement viewer'
+fi
+if [ "${1:-}" = test ] && [[ "$*" == *TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach* ]]; then
+  printf '%s\n' 'full-default verifier used detached runtime records and explicit role attach'
 fi
 if [ "${1:-}" = version ] && [ "${2:-}" = -m ]; then
   printf 'golang.org/x/sys v0.47.0\nvcs.revision=%s\nvcs.modified=false\n' "$(git rev-parse HEAD)"
@@ -764,11 +772,19 @@ case "$1" in
       echo 'relverify exists'
       exit 0
     fi
-    if [ -e "$AGENTCTL_TEST_OWNED" ]; then
-      echo 'SESSION ROLE HARNESS MODEL EFFORT CONFIDENCE SHIM CHILD PRESENTATION STATE FACTS'
-      if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
-        if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-          echo 'relverify a claude default default anchored 301 302 present running -'
+	if [ -e "$AGENTCTL_TEST_OWNED" ]; then
+		if [ -e "$AGENTCTL_TEST_RELAUNCHED" ] && [ "${AGENTCTL_TEST_RELAUNCH_STATUS_FAIL:-0}" = 1 ]; then
+		  echo 'agentctl: replacement runtime observation failed' >&2
+		  exit 6
+		fi
+		echo 'SESSION ROLE HARNESS MODEL EFFORT CONFIDENCE SHIM CHILD PRESENTATION STATE FACTS'
+		if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
+			if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
+				if [ "${AGENTCTL_TEST_REUSE_ORIGINAL_RUNTIME:-0}" = 1 ]; then
+				  echo "relverify a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
+				else
+				  echo 'relverify a claude default default anchored 301 302 present running -'
+				fi
         elif kill -0 "$AGENTCTL_TEST_SHIM_PID" 2>/dev/null; then
           echo "relverify a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
         else
@@ -858,7 +874,11 @@ case "$1" in
     echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
     ;;
   attach)
-    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
+	if [ "$3" = relverify ] && [ "$#" -eq 3 ]; then
+	  echo 'agentctl: detached session "relverify" requires an explicit role: a, b' >&2
+	  exit 2
+	fi
+	if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
       echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-} TMUX=${TMUX:-} TMUX_PANE=${TMUX_PANE:-}" >&2
       exit 2
     fi
@@ -1261,8 +1281,10 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"=== Part A — Automated release checks ===",
 		"[PASS A.",
 		"=== Part B — Live release-candidate delivery ===",
-		"The Command Menu belongs to iTerm2.",
-		"advisory read failure; omission is not a release failure",
+		"Part B verifies the default detached presentation",
+		"./bin/agentctl attach --session relverify a",
+		"./bin/agentctl attach --session relverify b",
+		"VIEWER CLOSE PASS (roles a and b remain running after their viewers closed)",
 		"Expected output:",
 		"operator confirmed:",
 		"=== Part C — Live skill discovery and meaning ===",
@@ -1298,8 +1320,8 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"- Part A:",
 		"- Part B:",
 		"- Part C:",
-		"- Checkpoint B.C1 attach narration: operator confirmed: y",
-		"- Checkpoint B.C10 detach: operator confirmed: y",
+		"- Checkpoint B.C1 explicit role attachments: operator confirmed: y",
+		"- Checkpoint B.C10 viewer terminals closed: operator confirmed: y",
 		"- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y",
 		"- Checkpoint C.C2 skill inventory: operator confirmed: y",
 		"- Checkpoint C.C3 status meaning: operator confirmed: y",
@@ -1317,6 +1339,7 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"compact --session relverify a",
 		"status --session relverify",
 		"relaunch --session relverify a",
+		"status --session relverify",
 		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
@@ -1553,11 +1576,11 @@ func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testin
 		}
 	}
 	for _, want := range []string{
-		"leave this verifier running in Window 1",
-		"press Command-N to open a second iTerm2 window",
-		"Keep the Window 2 attachment open",
-		"return to Window 1 to answer each numbered checkpoint",
-		"Return to Window 2, press esc to detach cleanly; do not use uppercase X",
+		"Leave this verifier running in Window 1",
+		"Open Window 2 for role a and Window 3",
+		"keep both viewers open through",
+		"Return to Window 1 to answer each numbered checkpoint",
+		"Close the Window 2 and Window 3 viewer terminals",
 		"The verifier will attach this Window 1 to the isolated skill fleet now.",
 		"While attached, use these concrete actions:",
 		"In the Claude Code tab, type /skills",
@@ -1593,7 +1616,7 @@ func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
-	seed := "Before the compact spot check, create compactable context in the claude tab:"
+	seed := "Before the compact spot check, create compactable context in the Window 2 role a viewer:"
 	firstPrompt := "Reply with FIRST READY and one sentence about this repository."
 	firstWait := "Wait for Claude's complete response, then submit this second message:"
 	secondPrompt := "Reply with SECOND READY and one different sentence about testing this repository."
@@ -2231,18 +2254,18 @@ func TestLiveVerificationDoesNotCallRefusalOnCheckpointEOF(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationRejectsAttachNarrationAndTearsDown(t *testing.T) {
+func TestLiveVerificationRejectsDetachedRoleAttachmentsAndTearsDown(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, "n\n")
 	if err == nil {
-		t.Fatalf("release verification accepted attach-narration refusal:\n%s", output)
+		t.Fatalf("release verification accepted detached-role-attachment refusal:\n%s", output)
 	}
-	if !strings.Contains(output, "[CHECKPOINT FAIL B.C1] operator refused checkpoint: attach narration") {
-		t.Fatalf("output missing attach-narration refusal:\n%s", output)
+	if !strings.Contains(output, "[CHECKPOINT FAIL B.C1] operator refused checkpoint: detached role attachments") {
+		t.Fatalf("output missing detached-role-attachment refusal:\n%s", output)
 	}
 	calls := strings.Join(fixture.calls(t), "\n")
 	if !strings.Contains(calls, "kill --session relverify") || strings.Contains(calls, "clear --session relverify") || strings.Contains(calls, "compact --session relverify") || strings.Contains(calls, "relaunch --session relverify") {
-		t.Fatalf("Part B commands continued after attach-narration refusal:\n%s", calls)
+		t.Fatalf("Part B commands continued after detached-role-attachment refusal:\n%s", calls)
 	}
 }
 
@@ -2255,7 +2278,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 	for _, want := range []string{
 		"RELAUNCH PASS (role a relaunched through the ESRCH-gated command)",
 		`agentctl: relaunched role "a" in session "relverify"; the shim is ready`,
-		"RELAUNCH PASS (role a restored to running)",
+		"RELAUNCH PASS (replacement role a runtime identities observed)",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -2271,6 +2294,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 		"status --session relverify",
 		"relaunch --session relverify a",
 		"status --session relverify",
+		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
 		"skill install",
@@ -2281,12 +2305,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 	if got := fixture.calls(t); strings.Join(got, "\n") != strings.Join(wantAgentctl, "\n") {
 		t.Fatalf("agentctl calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantAgentctl, "\n"))
 	}
-	wantTmux := []string{
-		"-V",
-		"list-sessions -F #{session_id}\t#{session_name}",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
-		"list-windows -t $4 -F #{window_id}\t#{pane_id}\t#{window_name}",
-	}
+	wantTmux := []string{"-V"}
 	gotTmux := fixture.tmuxCalls(t)
 	if len(gotTmux) != len(wantTmux)+1 || strings.Join(gotTmux[:len(wantTmux)], "\n") != strings.Join(wantTmux, "\n") || !strings.HasPrefix(gotTmux[len(wantTmux)], "-L agentctl-skill-verify-") || !strings.HasSuffix(gotTmux[len(wantTmux)], " kill-server") {
 		t.Fatalf("tmux calls:\n%s\nwant:\n%s", strings.Join(gotTmux, "\n"), strings.Join(wantTmux, "\n"))
@@ -2296,8 +2315,8 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"- Checkpoint B.C9 relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y",
-		"- Teardown status: exit 3 (session absent; other tmux sessions remained)",
+		"- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y",
+		"- Teardown status: exit 3 (detached durable fleet absent)",
 	} {
 		if !strings.Contains(string(notes), want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
@@ -2305,24 +2324,85 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 	}
 }
 
-func TestLiveVerificationResolvesShimRoleWindowByExactWindowName(t *testing.T) {
+// This catches the default live walkthrough drifting back to the tmux-only
+// presentation after launch has created a detached fleet. The script itself
+// runs; the fixture controls only its agentctl, tmux, and process boundaries.
+func TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
-		t.Fatalf("release verification failed: %v\n%s", err, output)
+		t.Fatalf("detached live verification failed: %v\n%s", err, output)
 	}
-	var roleResolutionCall string
-	for _, call := range fixture.tmuxCalls(t) {
-		if strings.HasPrefix(call, "list-windows -t $4 -F ") {
-			roleResolutionCall = call
-			break
+	for _, want := range []string{
+		"./bin/agentctl attach --session relverify a",
+		"./bin/agentctl attach --session relverify b",
+		"RELAUNCH PASS (replacement role a runtime identities observed)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("detached live output omits %q:\n%s", want, output)
 		}
 	}
-	if roleResolutionCall == "" {
-		t.Fatalf("tmux calls omit exact-session role-window resolution:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
+	if got := strings.Count(output, "./bin/agentctl attach --session relverify a"); got < 2 {
+		t.Fatalf("role a attach guidance occurred %d times, want initial attach and post-relaunch reattach:\n%s", got, output)
 	}
-	if !strings.Contains(roleResolutionCall, "#{window_name}") || strings.Contains(roleResolutionCall, "#{@agentctl_role}") {
-		t.Fatalf("role-window resolution uses stale metadata instead of the exact window name: %q", roleResolutionCall)
+	partB := strings.SplitN(output, "=== Part C —", 2)[0]
+	for _, stale := range []string{"Command Menu", "pane ID", "press esc to detach"} {
+		if strings.Contains(partB, stale) {
+			t.Fatalf("detached Part B output retains tmux-era claim %q:\n%s", stale, partB)
+		}
+	}
+	for _, call := range fixture.tmuxCalls(t) {
+		if call == "list-sessions" || strings.HasPrefix(call, "list-sessions ") || call == "list-windows" || strings.HasPrefix(call, "list-windows ") {
+			t.Fatalf("detached Part B resolved fleet identity through tmux: %q", call)
+		}
+	}
+	t.Log("full-default verifier used detached runtime records and explicit role attach")
+}
+
+// This catches a later status checkpoint overwriting the evidence that proves
+// what the verifier observed earlier in the same run.
+func TestLiveVerificationPreservesDistinctStatusEvidenceAtEveryCheckpoint(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15),
+		"AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=3",
+		`AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: session "relverify" has no durable fleet configuration`,
+	)
+	if err != nil {
+		t.Fatalf("live verification failed: %v\n%s", err, output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	artifactDir := filepath.Join(evidenceRoot, "verify-live")
+	checks := map[string]string{
+		"precheck.stderr":        `agentctl: session "relverify" not found`,
+		"relaunch-before.status": "relverify a claude default default anchored",
+		"relaunch-after.status":  "relverify a claude default default anchored 301 302",
+		"viewer-close.status":    "relverify b codex default high anchored",
+		"teardown.stderr":        `agentctl: session "relverify" has no durable fleet configuration`,
+	}
+	for name, want := range checks {
+		body, readErr := os.ReadFile(filepath.Join(artifactDir, name))
+		if readErr != nil {
+			t.Fatalf("read %s: %v", name, readErr)
+		}
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("%s = %q, want observation containing %q", name, body, want)
+		}
+	}
+}
+
+func TestLiveVerificationPreservesFailedReplacementStatusDiagnosticBeforeTeardown(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_RELAUNCH_STATUS_FAIL=1")
+	if err == nil {
+		t.Fatalf("live verification accepted failed replacement status observation:\n%s", output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	artifactDir := filepath.Join(evidenceRoot, "verify-live")
+	if got := readTestFile(t, filepath.Join(artifactDir, "relaunch-after.stderr")); !strings.Contains(got, "replacement runtime observation failed") {
+		t.Fatalf("relaunch-after.stderr = %q, want replacement observation diagnostic", got)
+	}
+	if got := readTestFile(t, filepath.Join(artifactDir, "teardown.stderr")); !strings.Contains(got, `session "relverify" not found`) {
+		t.Fatalf("teardown.stderr = %q, want independent teardown observation", got)
 	}
 }
 
@@ -2342,24 +2422,25 @@ func TestLiveVerificationWaitsForRecordedClaudeChildAbsenceBeforeOneRelaunch(t *
 	}
 }
 
-func TestLiveVerificationPairsNewPaneWithFreshInputObservation(t *testing.T) {
+func TestLiveVerificationPairsReplacementRuntimeWithFreshInputObservation(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"In the claude tab, type junk into the input box again; do NOT press Enter.",
-		"RELAUNCH PASS (role a pane changed from %5 to %12)",
+		"In the Window 2 role a viewer, type junk into the input box again; do NOT press Enter.",
+		"RELAUNCH PASS (replacement role a runtime identities observed)",
+		"./bin/agentctl attach --session relverify a",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
 	}
 	wantPrompt := `One of the fleet's harnesses was terminated, and agentctl relaunched it from
-the fleet's stored configuration. The new pane is a new process: its harness,
-model and effort carry over; its conversation does not, so the junk you typed
-is gone.
+the fleet's stored configuration. The replacement viewer shows a fresh harness
+whose model and effort carry over; its conversation does not, so the junk you
+typed is gone.
 
 Do you see a fresh, ready claude input surface with no trace of that junk?`
 	if !strings.Contains(output, wantPrompt) {
@@ -2367,14 +2448,14 @@ Do you see a fresh, ready claude input surface with no trace of that junk?`
 	}
 }
 
-func TestLiveVerificationRejectsReusedRelaunchPaneID(t *testing.T) {
+func TestLiveVerificationRejectsReusedRelaunchRuntimeIdentity(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 9), "AGENTCTL_TEST_RELAUNCHED_PANE_ID=%5")
+	output, err := fixture.run(t, strings.Repeat("y\n", 8), "AGENTCTL_TEST_REUSE_ORIGINAL_RUNTIME=1")
 	if err == nil {
-		t.Fatalf("release verification accepted reused pane ID:\n%s", output)
+		t.Fatalf("release verification accepted reused runtime identities:\n%s", output)
 	}
-	if !strings.Contains(output, "RELAUNCH FAIL (recreated role a reused original pane %5)") {
-		t.Fatalf("output missing reused-pane failure:\n%s", output)
+	if !strings.Contains(output, "RELAUNCH FAIL (replacement runtime reused an original identity") {
+		t.Fatalf("output missing reused-runtime failure:\n%s", output)
 	}
 }
 
@@ -2410,10 +2491,7 @@ func TestLiveVerificationRejectsAttestationAndTearsDown(t *testing.T) {
 	if strings.Contains(calls, "clear --session relverify b") || strings.Contains(calls, "compact --session relverify a") {
 		t.Fatalf("flow continued after rejection:\n%s", calls)
 	}
-	for _, want := range []string{
-		"TEARDOWN PASS (agentctl status exit 3 proves relverify is absent)",
-		"TEARDOWN PASS (no relverify tmux process remains)",
-	} {
+	for _, want := range []string{"TEARDOWN PASS (agentctl status exit 3 proves relverify is absent)"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q after rejection:\n%s", want, output)
 		}
@@ -2432,105 +2510,19 @@ func TestLiveVerificationRefusesExistingSessionWithoutKilling(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationCreatesKeeperWhenDefaultServerIsAbsent(t *testing.T) {
+func TestLiveVerificationRefusesTmuxDependentDetachedPrecheckWithoutCreatingKeeper(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_NO_SERVER_PRECHECK=1")
-	if err != nil {
-		t.Fatalf("no-server verification failed: %v\n%s", err, output)
-	}
-	for _, want := range []string{
-		"error connecting to /private/tmp/tmux-501/default (No such file or directory)",
-		"PART B PRECHECK OBSERVED (default tmux server absent: connect ENOENT)",
-		"PART B KEEPER CREATED (wrapper-owned session agentctl-release-verify-keeper-",
-		"PART B KEEPER CLEANUP PASS (wrapper-owned session agentctl-release-verify-keeper-",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing %q:\n%s", want, output)
-		}
-	}
-
-	var createCall, killCall string
-	for _, call := range fixture.tmuxCalls(t) {
-		switch {
-		case strings.HasPrefix(call, "new-session -d -s agentctl-release-verify-keeper-"):
-			createCall = call
-		case strings.HasPrefix(call, "kill-session -t =agentctl-release-verify-keeper-"):
-			killCall = call
-		}
-	}
-	if createCall == "" || !strings.HasSuffix(createCall, " -n keeper -- exec sleep 86400") {
-		t.Fatalf("keeper create call missing or malformed:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
-	}
-	createdName := strings.TrimSuffix(strings.TrimPrefix(createCall, "new-session -d -s "), " -n keeper -- exec sleep 86400")
-	if killCall != "kill-session -t ="+createdName {
-		t.Fatalf("keeper cleanup targeted %q, want exact created session %q", killCall, createdName)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("keeper survived verification: %v", statErr)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); statErr != nil {
-		t.Fatalf("keeper teardown was not observed: %v", statErr)
-	}
-
-	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
-	for _, want := range []string{
-		"- Part B pre-check: default tmux server absent (connect ENOENT)",
-		"- Part B keeper: created and removed wrapper-owned session `" + createdName + "`",
-	} {
-		if !strings.Contains(notes, want) {
-			t.Fatalf("notes missing %q:\n%s", want, notes)
-		}
-	}
-}
-
-func TestLiveVerificationExitTrapRemovesKeeper(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_NO_SERVER_PRECHECK=1",
-		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
-	)
+	output, err := fixture.run(t, "", "AGENTCTL_TEST_NO_SERVER_PRECHECK=1")
 	if err == nil {
-		t.Fatalf("unexpected Part B exit returned success:\n%s", output)
+		t.Fatalf("detached verifier accepted a tmux-dependent status precheck:\n%s", output)
 	}
-	for _, want := range []string{
-		"simulated unexpected Part B exit",
-		"PART B CLEANUP PASS (relverify kill exited 0)",
-		"PART B KEEPER CLEANUP PASS (wrapper-owned session agentctl-release-verify-keeper-",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("trap output missing %q:\n%s", want, output)
-		}
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("keeper survived trapped exit: %v", statErr)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); statErr != nil {
-		t.Fatalf("keeper trap teardown was not observed: %v", statErr)
-	}
-}
-
-func TestLiveVerificationNeverKillsKeeperItDidNotCreate(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_NO_SERVER_PRECHECK=1",
-		"AGENTCTL_TEST_KEEPER_CREATE_CODE=17",
-	)
-	if err == nil {
-		t.Fatalf("keeper creation failure returned success:\n%s", output)
-	}
-	if !strings.Contains(output, "could not create wrapper-owned tmux keeper session agentctl-release-verify-keeper-") {
-		t.Fatalf("keeper creation failure was not reported:\n%s", output)
+	if !strings.Contains(output, "could not prove detached session relverify is absent") {
+		t.Fatalf("detached precheck failure was not reported:\n%s", output)
 	}
 	for _, call := range fixture.tmuxCalls(t) {
-		if strings.HasPrefix(call, "kill-session ") {
-			t.Fatalf("wrapper killed a keeper it did not create: %q", call)
+		if strings.HasPrefix(call, "new-session ") || strings.HasPrefix(call, "kill-session ") {
+			t.Fatalf("detached verifier created or killed a tmux keeper: %q", call)
 		}
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("failed keeper creation left an ownership marker: %v", statErr)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_KEEPER_KILLED")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("failed keeper creation recorded a false teardown: %v", statErr)
 	}
 }
 
@@ -2542,18 +2534,11 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationAcceptsNoServerStatusAsAbsent(t *testing.T) {
+func TestLiveVerificationRejectsTmuxNoServerAsDetachedTeardownEvidence(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6", "AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: tmux list sessions: exit status 1: no server running")
-	if err != nil {
-		t.Fatalf("no-server status was not accepted as absence: %v\n%s", err, output)
-	}
-	notes, readErr := os.ReadFile(filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if !strings.Contains(string(notes), "- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)") {
-		t.Fatalf("notes did not record expected exit 6 outcome:\n%s", notes)
+	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (agentctl status exited 6 unexpectedly)") {
+		t.Fatalf("tmux no-server result was accepted as detached absence: err=%v\n%s", err, output)
 	}
 }
 
@@ -2565,25 +2550,6 @@ func TestLiveVerificationAcceptsMissingDurableFleetAsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(output, "[PASS B.1] release-candidate fleet launched") {
 		t.Fatalf("Part B did not launch after observed fleet absence:\n%s", output)
-	}
-}
-
-func TestLiveVerificationRejectsPgrepFailure(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12), "AGENTCTL_TEST_PGREP_CODE=2")
-	if err == nil || !strings.Contains(output, "TEARDOWN FAIL (pgrep exited 2)") {
-		t.Fatalf("pgrep failure was not rejected: err=%v\n%s", err, output)
-	}
-}
-
-func TestLiveVerificationWaitsForTmuxAttachClientToExit(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_PGREP_CODES=0,1")
-	if err != nil {
-		t.Fatalf("transient tmux survivor was not given time to exit: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "TEARDOWN PASS (no relverify tmux process remains)") {
-		t.Fatalf("output missing teardown pass after transient survivor:\n%s", output)
 	}
 }
 

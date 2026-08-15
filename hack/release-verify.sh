@@ -135,26 +135,6 @@ checkpoint() {
 PART_B_TOP=''
 PART_B_SESSION=''
 PART_B_SESSION_OWNED=0
-PART_B_KEEPER_SESSION=''
-PART_B_KEEPER_OWNED=0
-PART_B_PRECHECK_OBSERVATION=''
-
-# This calls bare tmux; cleanup order must restore Part C's shimmed PATH first.
-part_b_keeper_teardown() {
-  local kill_status=0
-  if [ "$PART_B_KEEPER_OWNED" -eq 0 ]; then
-    return 0
-  fi
-  if tmux kill-session -t "=$PART_B_KEEPER_SESSION"; then
-    printf 'PART B KEEPER CLEANUP PASS (wrapper-owned session %s removed)\n' "$PART_B_KEEPER_SESSION"
-    PART_B_KEEPER_OWNED=0
-    return 0
-  else
-    kill_status=$?
-  fi
-  printf 'PART B KEEPER CLEANUP FAIL (wrapper-owned session %s kill exited %s)\n' "$PART_B_KEEPER_SESSION" "$kill_status" >&2
-  return 1
-}
 
 part_b_retry_kill() {
   local attempt=1
@@ -444,10 +424,6 @@ cleanup_exit_trap() {
     printf 'release-verify: Part B cleanup failed during exit\n' >&2
     cleanup_status=1
   fi
-  if ! part_b_keeper_teardown; then
-    printf 'release-verify: Part B keeper cleanup failed during exit\n' >&2
-    cleanup_status=1
-  fi
   final_status=$original_status
   if [ "$cleanup_status" -ne 0 ]; then
     final_status=1
@@ -475,82 +451,35 @@ session_absent() {
         -e "session \"$session_name\" has no durable fleet configuration" \
         "$stderr_file" || return 2
       ;;
-    6)
-      # Keep the pre-#147 exited-server contract; the keeper path is scoped to connect ENOENT.
-      grep -qF 'no server running' "$stderr_file" || return 2
-      ;;
     *)
       return 2
       ;;
   esac
 }
 
-default_tmux_server_connect_enoent() {
-  local stderr_file=$1
-  # The path is deliberately unconstrained because TMUX_TMPDIR relocates the default socket.
-  grep -Eq '^agentctl: tmux list sessions: exit status 1: error connecting to .+ \(No such file or directory\)$' "$stderr_file"
-}
-
-valid_tmux_id() {
-  local value=$1
-  local prefix=$2
-  local digits
-  [ "${value#?}" != "$value" ] || return 1
-  [ "${value%"${value#?}"}" = "$prefix" ] || return 1
-  digits=${value#?}
-  case "$digits" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-}
-
-LIVE_SESSION_ID=''
-resolve_live_session_id() {
+assert_roles_running() {
   local session_name=$1
-  local format
-  local matches
-  format="#{session_id}$(printf '\t')#{session_name}"
-  matches=$(tmux list-sessions -F "$format") || return 1
-  LIVE_SESSION_ID=$(printf '%s\n' "$matches" | awk -F '\t' -v session="$session_name" '$2 == session { print $1 }')
-  valid_tmux_id "$LIVE_SESSION_ID" '$'
-}
-
-ROLE_WINDOW_ID=''
-ROLE_PANE_ID=''
-resolve_role_window() {
-  local session_id=$1
-  local role=$2
-  local format
-  local records
-  local record
-  local observed_name
-  format="#{window_id}$(printf '\t')#{pane_id}$(printf '\t')#{window_name}"
-  records=$(tmux list-windows -t "$session_id" -F "$format") || return 1
-  record=$(printf '%s\n' "$records" | awk -F '\t' -v role="$role" '$3 == role { print }')
-  [ "$(printf '%s\n' "$record" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
-  IFS=$'\t' read -r ROLE_WINDOW_ID ROLE_PANE_ID observed_name <<<"$record"
-  [ "$observed_name" = "$role" ] || return 1
-  valid_tmux_id "$ROLE_WINDOW_ID" '@' && valid_tmux_id "$ROLE_PANE_ID" '%'
-}
-
-assert_role_state() {
-  local session_name=$1
-  local role=$2
-  local expected=$3
-  local output_file=$4
+  local output_file=$2
+  local error_file=$3
+  local role
   local states
-  if ! ./bin/agentctl status --session "$session_name" >"$output_file"; then
+  shift 3
+  if ! ./bin/agentctl status --session "$session_name" >"$output_file" 2>"$error_file"; then
     cat "$output_file"
+    cat "$error_file" >&2
     return 1
   fi
   cat "$output_file"
-  states=$(awk -v session="$session_name" -v role="$role" -v expected="$expected" '
-    $1 == session && $2 == role {
-      for (field = 3; field <= NF; field++) {
-        if ($field == expected) print $field
+  for role in "$@"; do
+    states=$(awk -v session="$session_name" -v role="$role" '
+      $1 == session && $2 == role {
+        for (field = 3; field <= NF; field++) {
+          if ($field == "running") print $field
+        }
       }
-    }
-  ' "$output_file")
-  [ "$states" = "$expected" ]
+    ' "$output_file")
+    [ "$states" = running ] || return 1
+  done
 }
 
 ROLE_SHIM_PID=''
@@ -559,10 +488,12 @@ resolve_running_role_processes() {
   local session_name=$1
   local role=$2
   local output_file=$3
+  local error_file=$4
   local records
   local record
-  if ! ./bin/agentctl status --session "$session_name" >"$output_file"; then
+  if ! ./bin/agentctl status --session "$session_name" >"$output_file" 2>"$error_file"; then
     cat "$output_file"
+    cat "$error_file" >&2
     return 1
   fi
   cat "$output_file"
@@ -628,6 +559,7 @@ render_results() {
   if [ "$mode" = verify-live ]; then
     part_a_result=$(field part_a_result "$metadata")
     part_b_detach_attestation=$(field part_b_detach_attestation "$metadata")
+    part_b_presentation=$(field part_b_presentation "$metadata")
     if [ -n "$part_a_result" ]; then
       [ -n "$part_b_detach_attestation" ] || die 'live metadata new schema is missing part_b_detach_attestation'
       printf -- '- Part A: %s\n' "$part_a_result"
@@ -643,13 +575,21 @@ render_results() {
     fi
     printf -- '- Probes: %s\n' "$(field probes "$metadata")"
     if [ -n "$part_a_result" ]; then
-      printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      if [ "$part_b_presentation" = detached ]; then
+        printf -- '- Checkpoint B.C1 explicit role attachments: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      else
+        printf -- '- Checkpoint B.C1 attach narration: operator confirmed: %s\n' "$(field attach_attestation "$metadata")"
+      fi
       printf -- '- Checkpoint B.C3 Claude clear outcome: operator confirmed: %s\n' "$(field claude_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C5 Codex clear outcome: operator confirmed: %s\n' "$(field codex_clear_attestation "$metadata")"
       printf -- '- Checkpoint B.C7 Claude compact outcome: operator confirmed: %s\n' "$(field compact_attestation "$metadata")"
       printf -- '- Checkpoint B.C9 relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
-      printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
+      if [ "$part_b_presentation" = detached ]; then
+        printf -- '- Checkpoint B.C10 viewer terminals closed: operator confirmed: %s\n' "$part_b_detach_attestation"
+      else
+        printf -- '- Checkpoint B.C10 detach: operator confirmed: %s\n' "$part_b_detach_attestation"
+      fi
       if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
         part_c_auth_mode=$(field part_c_auth_mode "$metadata")
         if [ -n "$part_c_auth_mode" ]; then
@@ -686,11 +626,16 @@ render_results() {
       printf -- '- Relaunch: %s; fresh claude input with no junk: operator confirmed: %s\n' \
         "$(field relaunch_check "$metadata")" "$(field relaunch_attestation "$metadata")"
     fi
-    case "$(field teardown_status_exit "$metadata")" in
-      3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
-      6) printf -- '- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)\n' ;;
-      *) die 'live metadata has invalid teardown_status_exit' ;;
-    esac
+    if [ "$part_b_presentation" = detached ]; then
+      [ "$(field teardown_status_exit "$metadata")" = 3 ] || die 'detached live metadata has invalid teardown_status_exit'
+      printf -- '- Teardown status: exit 3 (detached durable fleet absent)\n'
+    else
+      case "$(field teardown_status_exit "$metadata")" in
+        3) printf -- '- Teardown status: exit 3 (session absent; other tmux sessions remained)\n' ;;
+        6) printf -- '- Teardown status: exit 6 (session absent; relverify was last and tmux server exited)\n' ;;
+        *) die 'live metadata has invalid teardown_status_exit' ;;
+      esac
+    fi
     printf -- '- Teardown check: %s\n' "$(field teardown_check "$metadata")"
     return
   fi
@@ -1086,6 +1031,11 @@ task8_release_walkthrough() {
   task8_run "$artifact_dir/attach-transcript.log" go test ./internal/attach ./internal/shim -count=1 -v \
     -run 'Test(ViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame|AttachServerChildExitMapsExactTailUndeliveredFinal|AttachServerChildExitMapsZeroAndNonzeroTailUnconfirmedFinals|ServerRunDetachedServesAttachAndControlBeforeCleanExit)' \
     || die 'Task 8 detached attach transcript evidence failed'
+  task8_run "$artifact_dir/default-live-verifier.log" go test ./hack -count=1 -v \
+    -run '^TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach$' \
+    || die 'Task 8 full-default live verifier fixture failed'
+  grep -qF 'full-default verifier used detached runtime records and explicit role attach' "$artifact_dir/default-live-verifier.log" \
+    || die 'Task 8 full-default live verifier fixture did not record detached relaunch evidence'
   task8_phase integration
 
   printf '== Task 8: kernel absence/refusal and raw-token evidence ==\n'
@@ -1379,42 +1329,20 @@ else
   RELAUNCH_CHECK=FAIL
   TEARDOWN_CHECK=FAIL
   TEARDOWN_STATUS_EXIT=''
-  STATUS_STDOUT="$ARTIFACT_DIR/status.stdout"
-  STATUS_STDERR="$ARTIFACT_DIR/status.stderr"
+  PRECHECK_STDOUT="$ARTIFACT_DIR/precheck.stdout"
+  PRECHECK_STDERR="$ARTIFACT_DIR/precheck.stderr"
+  TEARDOWN_STDOUT="$ARTIFACT_DIR/teardown.stdout"
+  TEARDOWN_STDERR="$ARTIFACT_DIR/teardown.stderr"
 
-  if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
+  if session_absent "$LIVE_SESSION" "$PRECHECK_STDOUT" "$PRECHECK_STDERR"; then
     :
   else
     absence_status=$?
     if [ "$absence_status" -eq 1 ]; then
       die "session $LIVE_SESSION already exists; refusing to use or kill it"
     fi
-    if [ "$STATUS_EXIT" -eq 6 ] && default_tmux_server_connect_enoent "$STATUS_STDERR"; then
-      cat "$STATUS_STDERR" >&2
-      PART_B_PRECHECK_OBSERVATION='default tmux server absent (connect ENOENT)'
-      printf 'PART B PRECHECK OBSERVED (default tmux server absent: connect ENOENT)\n'
-      PART_B_KEEPER_SESSION="agentctl-release-verify-keeper-$$"
-      if ! tmux new-session -d -s "$PART_B_KEEPER_SESSION" -n keeper -- 'exec sleep 86400'; then
-        die "could not create wrapper-owned tmux keeper session $PART_B_KEEPER_SESSION"
-      fi
-      PART_B_KEEPER_OWNED=1
-      trap cleanup_exit_trap EXIT
-      printf 'PART B KEEPER CREATED (wrapper-owned session %s keeps the default tmux server available)\n' "$PART_B_KEEPER_SESSION"
-
-      if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
-        :
-      else
-        absence_status=$?
-        if [ "$absence_status" -eq 1 ]; then
-          die "session $LIVE_SESSION appeared after keeper creation; refusing to use or kill it"
-        fi
-        cat "$STATUS_STDERR" >&2
-        die "could not prove session $LIVE_SESSION is absent after keeper creation (status exit $STATUS_EXIT)"
-      fi
-    else
-      cat "$STATUS_STDERR" >&2
-      die "could not prove session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
-    fi
+    cat "$PRECHECK_STDERR" >&2
+    die "could not prove detached session $LIVE_SESSION is absent (status exit $STATUS_EXIT)"
   fi
 
   step_start B.1 'launch release-candidate fleet'
@@ -1435,22 +1363,22 @@ else
   if [ "$LIVE_STATUS" -eq 0 ]; then
     cat <<'EOF'
 
-Part B uses two iTerm2 windows. First, leave this verifier running in Window 1.
-In iTerm2, press Command-N to open a second iTerm2 window (Window 2). Run the
-attach command below in Window 2. Keep the Window 2 attachment open throughout
-the live checks. After each visual observation, return to Window 1 to answer each numbered checkpoint. The verifier will tell you when to detach later.
+Part B verifies the default detached presentation with three terminal windows.
+Leave this verifier running in Window 1. Open Window 2 for role a and Window 3
+for role b, run the explicit commands below, and keep both viewers open through
+the delivery checks. Return to Window 1 to answer each numbered checkpoint.
 EOF
-    echo 'Attach from Window 2 with:'
-    echo '  ./bin/agentctl attach --session relverify'
+    echo 'Attach role a from Window 2 with:'
+    echo '  ./bin/agentctl attach --session relverify a'
+    echo 'Attach role b from Window 3 with:'
+    echo '  ./bin/agentctl attach --session relverify b'
     attach_expected=$(cat <<'EOF'
-agentctl: attaching session "relverify" (2 windows) in iTerm2…
-The Command Menu belongs to iTerm2. The claude and codex tabs are visible.
-The parenthesized two-window count is advisory: if it is omitted, record the
-advisory read failure; omission is not a release failure and agentctl never
-guesses the count.
+Window 2 shows the claude role a surface, and Window 3 shows the codex role b
+surface. Each command owns only its current terminal viewer; the detached roles
+continue running independently of those viewers.
 EOF
 )
-    if checkpoint B.C1 'attach narration' "$attach_expected" 'Is Window 2 attached and showing the claude and codex tabs?'; then
+    if checkpoint B.C1 'detached role attachments' "$attach_expected" 'Are Window 2 and Window 3 attached to roles a and b respectively?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
     else
       ATTACH_ATTESTATION=$ASK_ANSWER
@@ -1460,7 +1388,7 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
-    echo 'In the claude tab, type junk into the input box; do NOT press Enter.'
+    echo 'In the Window 2 role a viewer, type junk into the input box; do NOT press Enter.'
     if checkpoint B.C2 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify a'
@@ -1485,7 +1413,7 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
-    echo 'In the codex tab, type junk into the input box; do NOT press Enter.'
+    echo 'In the Window 3 role b viewer, type junk into the input box; do NOT press Enter.'
     if checkpoint B.C4 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
       echo 'Running:'
       echo '  ./bin/agentctl clear --session relverify b'
@@ -1510,7 +1438,7 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
-    echo 'Before the compact spot check, create compactable context in the claude tab:'
+    echo 'Before the compact spot check, create compactable context in the Window 2 role a viewer:'
     echo 'type "Reply with FIRST READY and one sentence about this repository." and press Enter.'
     echo "Wait for Claude's complete response, then submit this second message:"
     echo '"Reply with SECOND READY and one different sentence about testing this repository."'
@@ -1540,21 +1468,14 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo
     echo '== Relaunch verification =='
-    if ! resolve_live_session_id "$LIVE_SESSION"; then
-      echo 'RELAUNCH FAIL (could not resolve relverify to one exact tmux session ID)'
-      LIVE_STATUS=1
-    elif ! resolve_role_window "$LIVE_SESSION_ID" a; then
-      echo 'RELAUNCH FAIL (could not resolve role a to one exact tmux window and pane ID)'
-      LIVE_STATUS=1
-    elif ! resolve_running_role_processes "$LIVE_SESSION" a "$ARTIFACT_DIR/relaunch-before.status"; then
+    if ! resolve_running_role_processes "$LIVE_SESSION" a "$ARTIFACT_DIR/relaunch-before.status" "$ARTIFACT_DIR/relaunch-before.stderr"; then
       echo 'RELAUNCH FAIL (could not resolve role a to one running shim and child PID)'
       LIVE_STATUS=1
     else
-      original_pane_id=$ROLE_PANE_ID
       original_shim_pid=$ROLE_SHIM_PID
       original_child_pid=$ROLE_CHILD_PID
-      echo 'In the claude tab, type junk into the input box again; do NOT press Enter.'
-    if checkpoint B.C8 'relaunch setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for the relaunch process-discontinuity check?'; then
+      echo 'In the Window 2 role a viewer, type junk into the input box again; do NOT press Enter.'
+      if checkpoint B.C8 'relaunch setup' 'junk is visible in the role a input without being submitted.' 'Is the role a junk ready for the relaunch process-discontinuity check?'; then
         echo 'Running exact-PID shim termination setup:'
         printf '  kill -HUP %s  # role a shim; recorded child %s\n' "$original_shim_pid" "$original_child_pid"
         if ! kill -HUP "$original_shim_pid"; then
@@ -1596,49 +1517,49 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    if ! resolve_role_window "$LIVE_SESSION_ID" a; then
-      echo 'RELAUNCH FAIL (could not resolve the recreated role a window and pane IDs)'
+    expected_relaunch='agentctl: relaunched role "a" in session "relverify"; the shim is ready'
+    actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.output")
+    if [ "$actual_relaunch" != "$expected_relaunch" ]; then
+      printf 'RELAUNCH FAIL (success output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
       LIVE_STATUS=1
-    elif [ "$ROLE_PANE_ID" = "$original_pane_id" ]; then
-      echo "RELAUNCH FAIL (recreated role a reused original pane $original_pane_id)"
+    elif ! resolve_running_role_processes "$LIVE_SESSION" a "$ARTIFACT_DIR/relaunch-after.status" "$ARTIFACT_DIR/relaunch-after.stderr"; then
+      echo 'RELAUNCH FAIL (could not resolve replacement role a to one running shim and child PID)'
       LIVE_STATUS=1
     else
-      printf 'RELAUNCH PASS (role a pane changed from %s to %s)\n' "$original_pane_id" "$ROLE_PANE_ID"
-      step_pass B.9 'replacement pane ID differs from original'
-      expected_relaunch='agentctl: relaunched role "a" in session "relverify"; the shim is ready'
-      actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.output")
-      if [ "$actual_relaunch" != "$expected_relaunch" ]; then
-        printf 'RELAUNCH FAIL (success output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
+      replacement_shim_pid=$ROLE_SHIM_PID
+      replacement_child_pid=$ROLE_CHILD_PID
+      if [ "$replacement_shim_pid" = "$original_shim_pid" ] || [ "$replacement_child_pid" = "$original_child_pid" ]; then
+        printf 'RELAUNCH FAIL (replacement runtime reused an original identity: shim %s->%s child %s->%s)\n' \
+          "$original_shim_pid" "$replacement_shim_pid" "$original_child_pid" "$replacement_child_pid"
         LIVE_STATUS=1
+      else
+        echo 'RELAUNCH PASS (replacement role a runtime identities observed)'
+        printf 'RELAUNCH IDENTITIES (shim %s child %s)\n' "$replacement_shim_pid" "$replacement_child_pid"
+        step_pass B.9 'replacement role runtime identities differ from the terminated role'
       fi
     fi
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    echo 'Running:'
-    echo '  ./bin/agentctl status --session relverify'
-    if assert_role_state "$LIVE_SESSION" a running "$ARTIFACT_DIR/relaunch-running.status"; then
-      echo 'RELAUNCH PASS (role a restored to running)'
-      step_pass B.10 'recreated role is running'
-    else
-      echo 'RELAUNCH FAIL (role a did not return to running)'
-      LIVE_STATUS=1
-    fi
-  fi
+    cat <<'EOF'
 
-  if [ "$LIVE_STATUS" -eq 0 ]; then
+The original Window 2 role a viewer ended when its recorded shim was
+terminated. From its returned shell, attach to the replacement role a with:
+  ./bin/agentctl attach --session relverify a
+Keep the Window 3 role b viewer open.
+EOF
     relaunch_prompt=$(cat <<'EOF'
 One of the fleet's harnesses was terminated, and agentctl relaunched it from
-the fleet's stored configuration. The new pane is a new process: its harness,
-model and effort carry over; its conversation does not, so the junk you typed
-is gone.
+the fleet's stored configuration. The replacement viewer shows a fresh harness
+whose model and effort carry over; its conversation does not, so the junk you
+typed is gone.
 
 Do you see a fresh, ready claude input surface with no trace of that junk?
 EOF
 )
-    if checkpoint B.C9 'live delivery and relaunch' 'the replacement claude pane is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
+    if checkpoint B.C9 'live delivery and relaunch' 'the reattached replacement role a surface is fresh and has no trace of the staged junk.' "$relaunch_prompt"; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
-      RELAUNCH_CHECK='PASS (stored claude/default/default provenance; pane ID changed)'
+      RELAUNCH_CHECK='PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed)'
     else
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -1648,12 +1569,21 @@ EOF
   if [ "$LIVE_STATUS" -eq 0 ]; then
     cat <<'EOF'
 
-Return to Window 2, press esc to detach cleanly; do not use uppercase X. Wait
-for the post-detach session-state report, then return to Window 1 and confirm
-the numbered checkpoint below.
+Close the Window 2 and Window 3 viewer terminals. Closing a detached viewer does
+not stop its role. Return to Window 1 and confirm the numbered checkpoint below;
+the verifier will then observe both role records before fleet teardown.
 EOF
-    if checkpoint B.C10 'Part B attachment detached' 'Window 2 printed the post-detach session-state report and returned to its shell.' 'Did Window 2 detach cleanly and print the post-detach session-state report?'; then
+    if checkpoint B.C10 'detached viewers closed' 'Window 2 and Window 3 were closed without sending a role-stopping command.' 'Are both detached viewer terminals closed?'; then
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER
+      echo 'Running:'
+      echo '  ./bin/agentctl status --session relverify'
+      if assert_roles_running "$LIVE_SESSION" "$ARTIFACT_DIR/viewer-close.status" "$ARTIFACT_DIR/viewer-close.stderr" a b; then
+        echo 'VIEWER CLOSE PASS (roles a and b remain running after their viewers closed)'
+        step_pass B.10 'detached roles remain running after viewer close'
+      else
+        echo 'VIEWER CLOSE FAIL (one or more detached roles are not running)'
+        LIVE_STATUS=1
+      fi
     else
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER
       LIVE_STATUS=1
@@ -1670,7 +1600,7 @@ EOF
     TEARDOWN_STATUS=1
   fi
 
-  if session_absent "$LIVE_SESSION" "$STATUS_STDOUT" "$STATUS_STDERR"; then
+  if session_absent "$LIVE_SESSION" "$TEARDOWN_STDOUT" "$TEARDOWN_STDERR"; then
     TEARDOWN_STATUS_EXIT=$STATUS_EXIT
     printf 'TEARDOWN PASS (agentctl status exit %s proves relverify is absent)\n' "$TEARDOWN_STATUS_EXIT"
   else
@@ -1679,44 +1609,14 @@ EOF
       echo 'TEARDOWN FAIL (agentctl status still finds relverify)'
     else
       printf 'TEARDOWN FAIL (agentctl status exited %s unexpectedly):\n' "$STATUS_EXIT"
-      cat "$STATUS_STDERR"
+      cat "$TEARDOWN_STDERR"
     fi
     TEARDOWN_STATUS=1
   fi
 
-  tmux_settle_retries=6
-  tmux_settle_attempt=0
-  while true; do
-    if surviving_tmux=$(pgrep -fl '[t]mux.*relverify' 2>&1); then
-      pgrep_status=0
-    else
-      pgrep_status=$?
-    fi
-    case "$pgrep_status" in
-      0)
-        if [ "$tmux_settle_attempt" -ge "$tmux_settle_retries" ]; then
-          printf 'TEARDOWN FAIL (relverify tmux process remains):\n%s\n' "$surviving_tmux"
-          TEARDOWN_STATUS=1
-          break
-        fi
-        tmux_settle_attempt=$((tmux_settle_attempt + 1))
-        sleep 0.5
-        ;;
-      1)
-        echo 'TEARDOWN PASS (no relverify tmux process remains)'
-        break
-        ;;
-      *)
-        printf 'TEARDOWN FAIL (pgrep exited %s):\n%s\n' "$pgrep_status" "$surviving_tmux"
-        TEARDOWN_STATUS=1
-        break
-        ;;
-    esac
-  done
-
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
-    step_pass B.12 'relverify teardown checks completed'
+    step_pass B.11 'detached relverify teardown checks completed'
   else
     LIVE_STATUS=1
   fi
@@ -1724,7 +1624,7 @@ EOF
   PART_A_RESULT='PASS — automated probes and isolation checks completed'
   PART_B_RESULT='FAIL — Part B did not complete'
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    PART_B_RESULT='PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10'
+    PART_B_RESULT='PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10'
   elif [ "$FAILED_CHECKPOINT_RESULT" = refused ]; then
     case "$FAILED_CHECKPOINT_ID" in
       B.C*) PART_B_RESULT="FAIL — operator refused checkpoint $FAILED_CHECKPOINT_ID" ;;
@@ -2000,10 +1900,6 @@ EOF
     PART_C_RESULT='PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3'
   fi
 
-  if ! part_b_keeper_teardown; then
-    die 'Part B keeper teardown failed'
-  fi
-
   {
     printf 'date_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'mode=verify-live\n'
@@ -2012,9 +1908,8 @@ EOF
 
     printf 'part_a_result=%s\n' "$PART_A_RESULT"
     printf 'part_b_result=%s\n' "$PART_B_RESULT"
+    printf 'part_b_presentation=detached\n'
     printf 'part_c_result=%s\n' "$PART_C_RESULT"
-    printf 'part_b_precheck_observation=%s\n' "$PART_B_PRECHECK_OBSERVATION"
-    printf 'part_b_keeper_session=%s\n' "$PART_B_KEEPER_SESSION"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"
     printf 'codex_clear_attestation=%s\n' "$CODEX_CLEAR_ATTESTATION"
