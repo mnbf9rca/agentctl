@@ -71,6 +71,57 @@ func TestRenderResultsRejects(t *testing.T) {
 	}
 }
 
+func TestRenderResultsRejectsUnknownLiveSchemaAndAuthenticationModes(t *testing.T) {
+	base, err := os.ReadFile("testdata/release-verify-live-artifact/metadata.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		metadata string
+	}{
+		{
+			name:     "unknown checkpoint schema",
+			metadata: string(base) + "live_human_checkpoint_schema=future-v2\n",
+		},
+		{
+			name: "unknown codex authentication mode",
+			metadata: strings.Replace(
+				string(base),
+				"part_c_auth_mode=codex-seeded",
+				"part_c_auth_mode=untrusted-future-value",
+				1,
+			),
+		},
+		{
+			name: "unknown claude authentication mode",
+			metadata: strings.Replace(
+				string(base),
+				"part_c_auth_mode=codex-seeded",
+				"part_c_auth_mode=codex-seeded\npart_c_claude_auth_mode=untrusted-future-value",
+				1,
+			),
+		},
+		{
+			name:     "unknown Part B AMQ mode",
+			metadata: string(base) + "part_b_amq_mode=untrusted-future-value\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			artifactDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(artifactDir, "metadata.txt"), []byte(tc.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := renderResults(t, "testdata/release-verify-versions.txt", artifactDir)
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+				t.Fatalf("want exit status 1, got %v", err)
+			}
+		})
+	}
+}
+
 func processCheck(t *testing.T, versions, artifactDir string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("./release-verify.sh", "--process-check", versions, artifactDir)
@@ -803,6 +854,16 @@ case "$1" in
     fi
     rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
     touch "$AGENTCTL_TEST_KILLED"
+    if [ "${AGENTCTL_TEST_REPLACE_PART_B_AMQ_CONFIG_AFTER_KILL:-0}" = 1 ]; then
+      mv .amqrc .amqrc-original
+      printf 'replacement config\n' >.amqrc
+    fi
+    if [ "${AGENTCTL_TEST_REPLACE_PART_B_AMQ_ROOT_AFTER_KILL:-0}" = 1 ]; then
+      amq_root="$(cat "$AGENTCTL_TEST_EVIDENCE_DIR_LOG")/part-b-amq"
+      mv "$amq_root" "$amq_root-original"
+      mkdir "$amq_root"
+      printf 'replacement root\n' >"$amq_root/sentinel"
+    fi
     ;;
   *)
     exit 64
@@ -1569,6 +1630,69 @@ func TestLiveVerificationOwnsTemporaryAMQConfigBeforeDetachedLaunchAndRestoresCh
 	}
 }
 
+func TestLiveVerificationRendersDerivedProbeCountAndPartBAMQOwnership(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("live verifier failed: %v\n%s", err, output)
+	}
+	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
+	for _, want := range []string{
+		"- Probes: 6 completed, no surviving throwaway server",
+		"- Part B AMQ mode: temporary (verifier-owned .amqrc and root)",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("rendered notes omit %q:\n%s", want, notes)
+		}
+	}
+}
+
+func TestLiveVerificationRetainsSubstitutedPartBAMQArtifacts(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment string
+		relative    string
+		wantBody    string
+		wantOutput  string
+	}{
+		{
+			name:        "config",
+			environment: "AGENTCTL_TEST_REPLACE_PART_B_AMQ_CONFIG_AFTER_KILL=1",
+			relative:    ".amqrc",
+			wantBody:    "replacement config\n",
+			wantOutput:  "PART B AMQ CLEANUP FAIL (temporary config identity changed:",
+		},
+		{
+			name:        "root",
+			environment: "AGENTCTL_TEST_REPLACE_PART_B_AMQ_ROOT_AFTER_KILL=1",
+			relative:    "part-b-amq/sentinel",
+			wantBody:    "replacement root\n",
+			wantOutput:  "PART B AMQ CLEANUP FAIL (temporary root identity changed:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newLiveFixture(t)
+			output, err := fixture.run(t, strings.Repeat("y\n", 3), tc.environment)
+			if err == nil {
+				t.Fatalf("live verifier removed substituted AMQ %s:\n%s", tc.name, output)
+			}
+			evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+			t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+			path := filepath.Join(evidenceRoot, tc.relative)
+			if tc.name == "config" {
+				path = filepath.Join(fixture.dir, tc.relative)
+			}
+			if got := readTestFile(t, path); got != tc.wantBody {
+				t.Fatalf("substituted %s body = %q, want %q", tc.name, got, tc.wantBody)
+			}
+			if !strings.Contains(output, tc.wantOutput) {
+				t.Fatalf("live verifier omitted substitution failure %q:\n%s", tc.wantOutput, output)
+			}
+		})
+	}
+}
+
 func TestLiveVerificationPreservesPreexistingAMQConfig(t *testing.T) {
 	fixture := newLiveFixture(t)
 	writeTestFile(t, filepath.Join(fixture.dir, ".git", "info", "exclude"), []byte(".amqrc\n"), 0o644)
@@ -1588,6 +1712,10 @@ func TestLiveVerificationPreservesPreexistingAMQConfig(t *testing.T) {
 	metadata := readTestFile(t, filepath.Join(strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog)), "verify-live", "metadata.txt"))
 	if !strings.Contains(metadata, "part_b_amq_mode=existing\n") {
 		t.Fatalf("metadata did not record existing AMQ mode:\n%s", metadata)
+	}
+	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
+	if !strings.Contains(notes, "- Part B AMQ mode: existing (pre-existing .amqrc; verifier removed no AMQ path)") {
+		t.Fatalf("rendered notes did not surface existing AMQ mode:\n%s", notes)
 	}
 	if body, readErr := os.ReadFile(fixture.amqLog); readErr == nil && strings.Contains(string(body), "part-b-amq") {
 		t.Fatal("verifier initialized a temporary Part B root despite an existing .amqrc")

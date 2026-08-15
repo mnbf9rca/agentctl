@@ -424,12 +424,30 @@ render_results() {
     part_b_presentation=$(field part_b_presentation "$metadata")
     part_b_session=$(field part_b_session "$metadata")
     live_human_checkpoint_schema=$(field live_human_checkpoint_schema "$metadata")
+    case "$live_human_checkpoint_schema" in
+      ''|three-observation-v1) ;;
+      *) die 'live metadata has invalid live_human_checkpoint_schema' ;;
+    esac
+    part_b_amq_mode=$(field part_b_amq_mode "$metadata")
+    case "$part_b_amq_mode" in
+      existing|temporary) ;;
+      '')
+        [ "$live_human_checkpoint_schema" != three-observation-v1 ] || die 'live metadata is missing part_b_amq_mode'
+        ;;
+      *) die 'live metadata has invalid part_b_amq_mode' ;;
+    esac
     if [ -n "$part_a_result" ]; then
       [ -n "$part_b_detach_attestation" ] || die 'live metadata new schema is missing part_b_detach_attestation'
       printf -- '- Part A: %s\n' "$part_a_result"
       printf -- '- Part B: %s\n' "$(field part_b_result "$metadata")"
       if [ -n "$part_b_session" ]; then
         printf -- '- Part B session: `%s`\n' "$part_b_session"
+      fi
+      if [ -n "$part_b_amq_mode" ]; then
+        case "$part_b_amq_mode" in
+          existing) printf -- '- Part B AMQ mode: existing (pre-existing .amqrc; verifier removed no AMQ path)\n' ;;
+          temporary) printf -- '- Part B AMQ mode: temporary (verifier-owned .amqrc and root)\n' ;;
+        esac
       fi
       if [ "$live_human_checkpoint_schema" != three-observation-v1 ]; then
         printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
@@ -468,8 +486,19 @@ render_results() {
         if [ -n "$(field part_c_skill_attestation "$metadata")" ]; then
           part_c_auth_mode=$(field part_c_auth_mode "$metadata")
           if [ -n "$part_c_auth_mode" ]; then
+            case "$part_c_auth_mode" in
+              codex-seeded|manual) ;;
+              *) die 'live metadata has invalid part_c_auth_mode' ;;
+            esac
             part_c_claude_auth_mode=$(field part_c_claude_auth_mode "$metadata")
+            if [ -n "$part_c_claude_auth_mode" ]; then
+              case "$part_c_claude_auth_mode" in
+                keychain-linked|isolated-keychain) ;;
+                *) die 'live metadata has invalid part_c_claude_auth_mode' ;;
+              esac
+            fi
             part_c_auth_attestation=$(field part_c_auth_attestation "$metadata")
+            [ -n "$part_c_auth_attestation" ] || die 'live metadata is missing part_c_auth_attestation'
             if [ -n "$part_c_claude_auth_mode" ]; then
               printf -- '- Checkpoint C.C1 authentication (%s, %s): operator confirmed: %s\n' "$part_c_claude_auth_mode" "$part_c_auth_mode" "$part_c_auth_attestation"
             else
@@ -1064,6 +1093,7 @@ step_pass A.1 'build and version capture completed'
 step_start A.2 'run contract probes'
 echo '== Probes =='
 probe_index=1
+probe_count=0
 for probe_name in probe-1-argv.sh probe-2-targeting.sh probe-3-ids.sh probe-4-attach.sh; do
   probe="$TOP/hack/$probe_name"
   echo "-- $probe_name --"
@@ -1080,6 +1110,7 @@ for probe_name in probe-1-argv.sh probe-2-targeting.sh probe-3-ids.sh probe-4-at
     exit 1
   fi
   step_pass "A.$((probe_index + 1))" "$probe_name assertion completed"
+  probe_count=$((probe_count + 1))
   probe_index=$((probe_index + 1))
 done
 
@@ -1104,6 +1135,7 @@ for probe_harness in claude codex; do
     exit 1
   fi
   step_pass "A.$((probe_index + 1))" "$probe_name ($probe_harness) assertion completed"
+  probe_count=$((probe_count + 1))
   probe_index=$((probe_index + 1))
 done
 
@@ -1428,7 +1460,7 @@ EOF
     printf 'mode=verify-live\n'
     printf 'live_human_checkpoint_schema=three-observation-v1\n'
     printf 'harness=both\n'
-    printf 'probes=all four completed, no surviving throwaway server\n'
+    printf 'probes=%s completed, no surviving throwaway server\n' "$probe_count"
 
     printf 'part_a_result=%s\n' "$PART_A_RESULT"
     printf 'part_b_result=%s\n' "$PART_B_RESULT"
