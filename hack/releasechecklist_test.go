@@ -64,3 +64,19 @@ func TestReleaseChecklistNamesEachTmuxlessPromotionEvidenceField(t *testing.T) {
 		}
 	}
 }
+
+func TestReleaseChecklistNamesTheCleanViewerDisconnectBoundary(t *testing.T) {
+	contents, err := os.ReadFile("../docs/release-checklist.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalized := strings.Join(strings.Fields(string(contents)), " ")
+	for _, want := range []string{
+		"closing the viewer's terminal window or tab, or otherwise closing its PTY at the terminal boundary",
+		"typed `Ctrl-C` reaches the harness and can interrupt it",
+	} {
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("release checklist omits clean viewer disconnect guidance %q", want)
+		}
+	}
+}
