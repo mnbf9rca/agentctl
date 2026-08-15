@@ -34,6 +34,19 @@ func TestReleaseNotesVerifyAcceptsExactlyOneUnalteredDraftBlock(t *testing.T) {
 	}
 }
 
+func TestReleaseNotesObligationsMatchApprovedSpec(t *testing.T) {
+	spec, err := os.ReadFile(filepath.Join("..", "docs", "superpowers", "specs", "2026-08-01-agentctl-design.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := numberedObligationsAfterHeading(t, string(spec), "#### 15.11.11 Release obligations")
+	got := numberedObligationsAfterHeading(t, releaseNoteSource(t), "## Upgrade notes")
+	if got != want {
+		t.Fatalf("release-note obligations drifted from approved spec:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
 // This catches line-oriented extraction silently restoring a final newline
 // that was absent from the uploaded release body.
 func TestReleaseNotesVerifyRejectsBlockMissingOnlyItsFinalNewline(t *testing.T) {
@@ -83,6 +96,25 @@ func releaseNoteSource(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(contents)
+}
+
+func numberedObligationsAfterHeading(t *testing.T, contents, heading string) string {
+	t.Helper()
+	headingStart := strings.Index(contents, heading+"\n")
+	if headingStart < 0 {
+		t.Fatalf("missing heading %q", heading)
+	}
+	afterHeading := contents[headingStart+len(heading)+1:]
+	listStart := strings.Index(afterHeading, "1. ")
+	if listStart < 0 {
+		t.Fatalf("heading %q has no numbered obligations", heading)
+	}
+	obligations := afterHeading[listStart:]
+	listEnd := strings.Index(obligations, "\n\n")
+	if listEnd < 0 {
+		t.Fatalf("heading %q has no obligation-list boundary", heading)
+	}
+	return obligations[:listEnd]
 }
 
 func releaseJSON(t *testing.T, body string, draft bool, tag string) string {
