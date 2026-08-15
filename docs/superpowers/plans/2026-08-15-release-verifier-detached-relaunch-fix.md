@@ -123,3 +123,29 @@ fixture to Task 8's executed transcripts.
   walkthroughs, and local gates.
 - [ ] Wait for the PR's own `pull_request` CI run, then request the reviewer
   gate with the exact run URL. Do not merge the PR.
+
+### Task 6: Prevent cross-namespace collision found by the first live run
+
+**Files:**
+
+- Modify: `hack/release-verify.sh`
+- Modify: `hack/releaseverify_test.go`
+- Modify: detached relaunch design notes
+
+**Interfaces:**
+
+- Consumes: the random default-verifier evidence root and agentctl's validated
+  session-name boundary.
+- Protects: repeated live runs from unrelated, pre-existing AMQ co-op state.
+
+- [x] Preserve the failed live artifact and reproduce the hidden child failure
+  directly through `amq coop exec`.
+- [x] Add a RED fixture in which fixed `relverify` has stale AMQ wake-owner
+  state and fails before harness readiness.
+- [x] Derive one lowercase run-unique Part B session from the evidence token,
+  thread it through every command/output check, and record it in metadata.
+- [x] Run affected fixtures to GREEN.
+- [x] Temporarily restore `LIVE_SESSION=relverify`; require the stale-AMQ test
+  to fail with the reproduced wake-owner diagnostic, then restore GREEN.
+- [ ] Repeat full gates, create a signed follow-up commit, and rerun the entire
+  real walkthrough before independent verification.

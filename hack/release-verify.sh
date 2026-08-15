@@ -560,10 +560,14 @@ render_results() {
     part_a_result=$(field part_a_result "$metadata")
     part_b_detach_attestation=$(field part_b_detach_attestation "$metadata")
     part_b_presentation=$(field part_b_presentation "$metadata")
+    part_b_session=$(field part_b_session "$metadata")
     if [ -n "$part_a_result" ]; then
       [ -n "$part_b_detach_attestation" ] || die 'live metadata new schema is missing part_b_detach_attestation'
       printf -- '- Part A: %s\n' "$part_a_result"
       printf -- '- Part B: %s\n' "$(field part_b_result "$metadata")"
+      if [ -n "$part_b_session" ]; then
+        printf -- '- Part B session: `%s`\n' "$part_b_session"
+      fi
       printf -- '- Part C: %s\n' "$(field part_c_result "$metadata")"
       part_b_precheck_observation=$(field part_b_precheck_observation "$metadata")
       if [ -n "$part_b_precheck_observation" ]; then
@@ -1318,7 +1322,12 @@ else
 
   ARTIFACT_DIR="$EVIDENCE_DIR/verify-live"
   mkdir "$ARTIFACT_DIR"
-  LIVE_SESSION=relverify
+  evidence_token=${EVIDENCE_DIR##*.}
+  evidence_token=$(printf '%s' "$evidence_token" | tr '[:upper:]' '[:lower:]')
+  case "$evidence_token" in
+    ''|*[!a-z0-9]*) die 'evidence directory did not provide a safe live-session token' ;;
+  esac
+  LIVE_SESSION="relverify_$evidence_token"
   LIVE_STATUS=0
   ATTACH_ATTESTATION=''
   CLAUDE_CLEAR_ATTESTATION=''
@@ -1347,13 +1356,13 @@ else
 
   step_start B.1 'launch release-candidate fleet'
   echo 'Running:'
-  echo '  ./bin/agentctl launch --session relverify --roles a:claude,b:codex --efforts b:high'
+  printf '  ./bin/agentctl launch --session %s --roles a:claude,b:codex --efforts b:high\n' "$LIVE_SESSION"
   if ! ./bin/agentctl launch --session "$LIVE_SESSION" --roles a:claude,b:codex --efforts b:high; then
     die 'live release verification launch failed'
   fi
   step_pass B.1 'release-candidate fleet launched'
 
-  # This run owns relverify only after launch succeeds. Keep teardown armed
+  # This run owns LIVE_SESSION only after launch succeeds. Keep teardown armed
   # across every later command and attestation; explicit teardown disarms it.
   PART_B_TOP=$TOP
   PART_B_SESSION=$LIVE_SESSION
@@ -1369,9 +1378,9 @@ for role b, run the explicit commands below, and keep both viewers open through
 the delivery checks. Return to Window 1 to answer each numbered checkpoint.
 EOF
     echo 'Attach role a from Window 2 with:'
-    echo '  ./bin/agentctl attach --session relverify a'
+    printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
     echo 'Attach role b from Window 3 with:'
-    echo '  ./bin/agentctl attach --session relverify b'
+    printf '  ./bin/agentctl attach --session %s b\n' "$LIVE_SESSION"
     attach_expected=$(cat <<'EOF'
 Window 2 shows the claude role a surface, and Window 3 shows the codex role b
 surface. Each command owns only its current terminal viewer; the detached roles
@@ -1391,7 +1400,7 @@ EOF
     echo 'In the Window 2 role a viewer, type junk into the input box; do NOT press Enter.'
     if checkpoint B.C2 'claude clear setup' 'junk is visible in the claude input without being submitted.' 'Is the claude junk ready for agentctl clear?'; then
       echo 'Running:'
-      echo '  ./bin/agentctl clear --session relverify a'
+      printf '  ./bin/agentctl clear --session %s a\n' "$LIVE_SESSION"
       if ./bin/agentctl clear --session "$LIVE_SESSION" a; then
         echo 'Claude clear delivery result printed above.'
         action_pass B.3 'claude clear delivery command completed; observed outcome pending checkpoint B.C3'
@@ -1416,7 +1425,7 @@ EOF
     echo 'In the Window 3 role b viewer, type junk into the input box; do NOT press Enter.'
     if checkpoint B.C4 'codex clear setup' 'junk is visible in the codex input without being submitted.' 'Is the codex junk ready for agentctl clear?'; then
       echo 'Running:'
-      echo '  ./bin/agentctl clear --session relverify b'
+      printf '  ./bin/agentctl clear --session %s b\n' "$LIVE_SESSION"
       if ./bin/agentctl clear --session "$LIVE_SESSION" b; then
         echo 'Codex clear delivery result printed above.'
         action_pass B.4 'codex clear delivery command completed; observed outcome pending checkpoint B.C5'
@@ -1445,7 +1454,7 @@ EOF
     echo "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
     if checkpoint B.C6 'claude compact setup' "Claude's two responses are complete, and junk is visible in the claude input without being submitted." 'Are both Claude responses complete and the junk ready for the compact spot check?'; then
       echo 'Running:'
-      echo '  ./bin/agentctl compact --session relverify a'
+      printf '  ./bin/agentctl compact --session %s a\n' "$LIVE_SESSION"
       if ./bin/agentctl compact --session "$LIVE_SESSION" a; then
         echo 'Claude compact delivery result printed above.'
         action_pass B.5 'claude compact delivery command completed; observed outcome pending checkpoint B.C7'
@@ -1504,7 +1513,7 @@ EOF
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
     echo 'Running:'
-    echo '  ./bin/agentctl relaunch --session relverify a'
+    printf '  ./bin/agentctl relaunch --session %s a\n' "$LIVE_SESSION"
     if ./bin/agentctl relaunch --session "$LIVE_SESSION" a >"$ARTIFACT_DIR/relaunch.output" 2>&1; then
       cat "$ARTIFACT_DIR/relaunch.output"
       echo 'RELAUNCH PASS (role a relaunched through the ESRCH-gated command)'
@@ -1517,7 +1526,7 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    expected_relaunch='agentctl: relaunched role "a" in session "relverify"; the shim is ready'
+    expected_relaunch=$(printf 'agentctl: relaunched role "a" in session "%s"; the shim is ready' "$LIVE_SESSION")
     actual_relaunch=$(cat "$ARTIFACT_DIR/relaunch.output")
     if [ "$actual_relaunch" != "$expected_relaunch" ]; then
       printf 'RELAUNCH FAIL (success output mismatch):\n  got:  %s\n  want: %s\n' "$actual_relaunch" "$expected_relaunch"
@@ -1541,13 +1550,11 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    cat <<'EOF'
-
-The original Window 2 role a viewer ended when its recorded shim was
-terminated. From its returned shell, attach to the replacement role a with:
-  ./bin/agentctl attach --session relverify a
-Keep the Window 3 role b viewer open.
-EOF
+    echo
+    printf '%s\n' 'The original Window 2 role a viewer ended when its recorded shim was'
+    printf '%s\n' 'terminated. From its returned shell, attach to the replacement role a with:'
+    printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
+    printf '%s\n' 'Keep the Window 3 role b viewer open.'
     relaunch_prompt=$(cat <<'EOF'
 One of the fleet's harnesses was terminated, and agentctl relaunched it from
 the fleet's stored configuration. The replacement viewer shows a fresh harness
@@ -1576,7 +1583,7 @@ EOF
     if checkpoint B.C10 'detached viewers closed' 'Window 2 and Window 3 were closed without sending a role-stopping command.' 'Are both detached viewer terminals closed?'; then
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER
       echo 'Running:'
-      echo '  ./bin/agentctl status --session relverify'
+      printf '  ./bin/agentctl status --session %s\n' "$LIVE_SESSION"
       if assert_roles_running "$LIVE_SESSION" "$ARTIFACT_DIR/viewer-close.status" "$ARTIFACT_DIR/viewer-close.stderr" a b; then
         echo 'VIEWER CLOSE PASS (roles a and b remain running after their viewers closed)'
         step_pass B.10 'detached roles remain running after viewer close'
@@ -1593,20 +1600,20 @@ EOF
   echo
   echo '== Automated teardown =='
   echo 'Running:'
-  echo '  ./bin/agentctl kill --session relverify'
+  printf '  ./bin/agentctl kill --session %s\n' "$LIVE_SESSION"
   TEARDOWN_STATUS=0
   if ! part_b_teardown; then
-    echo 'TEARDOWN FAIL (relverify cleanup coordinator kill failed)'
+    printf 'TEARDOWN FAIL (%s cleanup coordinator kill failed)\n' "$LIVE_SESSION"
     TEARDOWN_STATUS=1
   fi
 
   if session_absent "$LIVE_SESSION" "$TEARDOWN_STDOUT" "$TEARDOWN_STDERR"; then
     TEARDOWN_STATUS_EXIT=$STATUS_EXIT
-    printf 'TEARDOWN PASS (agentctl status exit %s proves relverify is absent)\n' "$TEARDOWN_STATUS_EXIT"
+    printf 'TEARDOWN PASS (agentctl status exit %s proves %s is absent)\n' "$TEARDOWN_STATUS_EXIT" "$LIVE_SESSION"
   else
     absence_status=$?
     if [ "$absence_status" -eq 1 ]; then
-      echo 'TEARDOWN FAIL (agentctl status still finds relverify)'
+      printf 'TEARDOWN FAIL (agentctl status still finds %s)\n' "$LIVE_SESSION"
     else
       printf 'TEARDOWN FAIL (agentctl status exited %s unexpectedly):\n' "$STATUS_EXIT"
       cat "$TEARDOWN_STDERR"
@@ -1616,7 +1623,7 @@ EOF
 
   if [ "$TEARDOWN_STATUS" -eq 0 ]; then
     TEARDOWN_CHECK=PASS
-    step_pass B.11 'detached relverify teardown checks completed'
+    step_pass B.11 "detached $LIVE_SESSION teardown checks completed"
   else
     LIVE_STATUS=1
   fi
@@ -1909,6 +1916,7 @@ EOF
     printf 'part_a_result=%s\n' "$PART_A_RESULT"
     printf 'part_b_result=%s\n' "$PART_B_RESULT"
     printf 'part_b_presentation=detached\n'
+    printf 'part_b_session=%s\n' "$LIVE_SESSION"
     printf 'part_c_result=%s\n' "$PART_C_RESULT"
     printf 'attach_attestation=%s\n' "$ATTACH_ATTESTATION"
     printf 'claude_clear_attestation=%s\n' "$CLAUDE_CLEAR_ATTESTATION"

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -781,26 +782,32 @@ case "$1" in
 		if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
 			if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
 				if [ "${AGENTCTL_TEST_REUSE_ORIGINAL_RUNTIME:-0}" = 1 ]; then
-				  echo "relverify a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
+				  echo "$3 a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
 				else
-				  echo 'relverify a claude default default anchored 301 302 present running -'
+				  echo "$3 a claude default default anchored 301 302 present running -"
 				fi
         elif kill -0 "$AGENTCTL_TEST_SHIM_PID" 2>/dev/null; then
-          echo "relverify a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
+          echo "$3 a claude default default anchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID present running -"
         else
-          echo "relverify a claude default default unanchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID absent stale-record ESRCH"
+          echo "$3 a claude default default unanchored $AGENTCTL_TEST_SHIM_PID $AGENTCTL_TEST_CHILD_PID absent stale-record ESRCH"
         fi
       fi
       if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
-        echo 'relverify b codex default high anchored 205 206 present running -'
+        echo "$3 b codex default high anchored 205 206 present running -"
       fi
       exit 0
     fi
     if [ -e "$AGENTCTL_TEST_KILLED" ] && [ -n "${AGENTCTL_TEST_STATUS_AFTER_KILL_CODE:-}" ]; then
-      echo "${AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE:-agentctl: transport failure}" >&2
+      status_message=${AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE:-agentctl: transport failure}
+      echo "${status_message//relverify/$3}" >&2
       exit "$AGENTCTL_TEST_STATUS_AFTER_KILL_CODE"
     fi
-    echo "${AGENTCTL_TEST_INITIAL_STATUS_MESSAGE:-agentctl: session \"relverify\" not found}" >&2
+    if [ -n "${AGENTCTL_TEST_INITIAL_STATUS_MESSAGE:-}" ]; then
+      status_message=${AGENTCTL_TEST_INITIAL_STATUS_MESSAGE//relverify/$3}
+    else
+      status_message="agentctl: session \"$3\" not found"
+    fi
+    echo "$status_message" >&2
     exit 3
     ;;
   skill)
@@ -857,25 +864,29 @@ case "$1" in
       echo 'launched skillverify'
       exit 0
     fi
+    if [ "${AGENTCTL_TEST_STALE_AMQ_RELVERIFY:-0}" = 1 ] && [ "$3" = relverify ]; then
+      echo 'capture final coop wake owner: wake owner boot id is required' >&2
+      exit 8
+    fi
     if [ "${AGENTCTL_TEST_COLLISION:-0}" = 1 ]; then
-      echo 'agentctl: session "relverify" already exists' >&2
+      echo "agentctl: session \"$3\" already exists" >&2
       exit 3
     fi
     touch "$AGENTCTL_TEST_OWNED"
     touch "$AGENTCTL_TEST_ROLE_A"
     touch "$AGENTCTL_TEST_ROLE_B"
-    echo 'launched relverify'
+    echo "launched $3"
     ;;
   clear|compact)
     echo "delivered $1"
     ;;
   relaunch)
     touch "$AGENTCTL_TEST_ROLE_A" "$AGENTCTL_TEST_RELAUNCHED"
-    echo 'agentctl: relaunched role "a" in session "relverify"; the shim is ready' >&2
+    echo "agentctl: relaunched role \"a\" in session \"$3\"; the shim is ready" >&2
     ;;
   attach)
-	if [ "$3" = relverify ] && [ "$#" -eq 3 ]; then
-	  echo 'agentctl: detached session "relverify" requires an explicit role: a, b' >&2
+	if [ "$3" != skillverify ] && [ "$#" -eq 3 ]; then
+	  echo "agentctl: detached session \"$3\" requires an explicit role: a, b" >&2
 	  exit 2
 	fi
 	if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
@@ -1250,16 +1261,51 @@ wait "$child_pid"`
 	command.Env = append(command.Env, "AGENTCTL_TEST_CHILD_PID="+childPID)
 	command.Env = append(command.Env, environment...)
 	output, err := command.CombinedOutput()
-	return string(output), err
+	normalized := string(output)
+	if session, ok := fixture.observedLiveSession(); ok {
+		normalized = strings.ReplaceAll(normalized, session, "relverify")
+	}
+	return normalized, err
 }
 
-func (fixture liveFixture) calls(t *testing.T) []string {
+func (fixture liveFixture) observedLiveSession() (string, bool) {
+	body, err := os.ReadFile(fixture.evidenceDirLog)
+	if err != nil {
+		return "", false
+	}
+	evidenceRoot := strings.TrimSpace(string(body))
+	token := strings.ToLower(strings.TrimPrefix(filepath.Ext(evidenceRoot), "."))
+	if token == "" {
+		return "", false
+	}
+	return "relverify_" + token, true
+}
+
+func (fixture liveFixture) liveSession(t *testing.T) string {
+	t.Helper()
+	session, ok := fixture.observedLiveSession()
+	if !ok {
+		t.Fatal("release verifier did not record a run-owned live session")
+	}
+	return session
+}
+
+func (fixture liveFixture) rawCalls(t *testing.T) []string {
 	t.Helper()
 	body, err := os.ReadFile(fixture.agentctlLog)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return strings.FieldsFunc(strings.TrimSpace(string(body)), func(character rune) bool { return character == '\n' })
+}
+
+func (fixture liveFixture) calls(t *testing.T) []string {
+	t.Helper()
+	calls := fixture.rawCalls(t)
+	for index := range calls {
+		calls[index] = strings.ReplaceAll(calls[index], fixture.liveSession(t), "relverify")
+	}
+	return calls
 }
 
 func (fixture liveFixture) tmuxCalls(t *testing.T) []string {
@@ -2359,6 +2405,59 @@ func TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach
 	t.Log("full-default verifier used detached runtime records and explicit role attach")
 }
 
+func TestLiveVerificationUsesRunUniqueSessionOutsideStaleAMQRelverify(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_STALE_AMQ_RELVERIFY=1")
+	if err != nil {
+		t.Fatalf("stale AMQ relverify namespace blocked live verification: %v\n%s", err, output)
+	}
+	var launch string
+	session := fixture.liveSession(t)
+	for _, call := range fixture.rawCalls(t) {
+		if strings.HasPrefix(call, "launch --session ") && strings.Contains(call, " --roles a:claude,b:codex --efforts b:high") {
+			launch = call
+		}
+		if strings.Contains(call, "--session relverify") && !strings.Contains(call, "--session "+session) {
+			t.Fatalf("Part B command escaped the run-owned session %q: %q", session, call)
+		}
+	}
+	if launch == "" {
+		t.Fatalf("live verification did not launch Part B:\n%s", output)
+	}
+	if strings.HasPrefix(launch, "launch --session relverify ") || !strings.HasPrefix(launch, "launch --session relverify_") {
+		t.Fatalf("Part B launch session was not run-unique: %q", launch)
+	}
+	suffix := strings.TrimPrefix(session, "relverify_")
+	if suffix == "" || len(session) > 32 || strings.IndexFunc(suffix, func(character rune) bool {
+		return (character < 'a' || character > 'z') && (character < '0' || character > '9')
+	}) >= 0 {
+		t.Fatalf("run-owned session does not satisfy its lowercase safe-token contract: %q", session)
+	}
+	metadata := readTestFile(t, filepath.Join(strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog)), "verify-live", "metadata.txt"))
+	if !strings.Contains(metadata, "part_b_session="+session+"\n") {
+		t.Fatalf("live evidence does not record its run-owned session %q:\n%s", session, metadata)
+	}
+	script := readTestFile(t, "release-verify.sh")
+	fixedSessionCommand := regexp.MustCompile(`--session relverify(?:[^a-z0-9_]|$)`)
+	for _, mutant := range []string{
+		"./bin/agentctl status --session relverify\n",
+		`echo "./bin/agentctl status --session relverify"`,
+		"./bin/agentctl attach --session relverify a\n",
+	} {
+		if !fixedSessionCommand.MatchString(mutant) {
+			t.Fatalf("fixed-session source guard missed %q", mutant)
+		}
+	}
+	for _, dynamic := range []string{"--session relverify_%s", "--session relverify_abc123 a"} {
+		if fixedSessionCommand.MatchString(dynamic) {
+			t.Fatalf("fixed-session source guard rejected dynamic command %q", dynamic)
+		}
+	}
+	if fixedSessionCommand.MatchString(script) {
+		t.Fatal("live verifier retains a displayed or executed fixed-session command")
+	}
+}
+
 // This catches a later status checkpoint overwriting the evidence that proves
 // what the verifier observed earlier in the same run.
 func TestLiveVerificationPreservesDistinctStatusEvidenceAtEveryCheckpoint(t *testing.T) {
@@ -2384,7 +2483,8 @@ func TestLiveVerificationPreservesDistinctStatusEvidenceAtEveryCheckpoint(t *tes
 		if readErr != nil {
 			t.Fatalf("read %s: %v", name, readErr)
 		}
-		if !strings.Contains(string(body), want) {
+		observed := strings.ReplaceAll(string(body), fixture.liveSession(t), "relverify")
+		if !strings.Contains(observed, want) {
 			t.Fatalf("%s = %q, want observation containing %q", name, body, want)
 		}
 	}
@@ -2401,7 +2501,7 @@ func TestLiveVerificationPreservesFailedReplacementStatusDiagnosticBeforeTeardow
 	if got := readTestFile(t, filepath.Join(artifactDir, "relaunch-after.stderr")); !strings.Contains(got, "replacement runtime observation failed") {
 		t.Fatalf("relaunch-after.stderr = %q, want replacement observation diagnostic", got)
 	}
-	if got := readTestFile(t, filepath.Join(artifactDir, "teardown.stderr")); !strings.Contains(got, `session "relverify" not found`) {
+	if got := strings.ReplaceAll(readTestFile(t, filepath.Join(artifactDir, "teardown.stderr")), fixture.liveSession(t), "relverify"); !strings.Contains(got, `session "relverify" not found`) {
 		t.Fatalf("teardown.stderr = %q, want independent teardown observation", got)
 	}
 }

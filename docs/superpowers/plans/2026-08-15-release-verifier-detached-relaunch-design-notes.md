@@ -63,3 +63,21 @@ replacement success requires fresh status observations plus the operator's
 separate visual confirmation. The preserved operator artifact identified in
 the coordination thread is read-only input to the diagnosis and must not be
 modified or removed.
+
+## Live-run correction
+
+The first build2 live run passed Part A and then failed before checkpoint B.C1.
+The fixed product session name `relverify` also became the AMQ co-op session
+name used by each harness. A pre-existing AMQ `relverify` directory with stale
+wake-owner state made `amq coop exec` exit before Claude reached tty readiness;
+agentctl consequently observed hidden-shim exit 8 and completed its owned
+rollback. The agentctl durable-fleet absence precheck could not observe this
+independent namespace collision.
+
+Each default verifier run therefore derives a lowercase `relverify_<token>`
+session from the already-created random evidence root. The value remains within
+the validated 32-byte session contract, is used consistently by every Part B
+command and expected output, and is recorded as `part_b_session` in evidence.
+This avoids coupling agentctl release tooling to AMQ's private on-disk layout
+and avoids deleting or reusing unrelated coordination state. The failed live
+artifact at `/tmp/agentctl-release-verify.qFePqt` remains preserved read-only.
