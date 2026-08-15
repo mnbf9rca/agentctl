@@ -450,12 +450,10 @@ func integrationMarkerMain() {
 		repaintSignals := make(chan os.Signal, 1)
 		signal.Notify(repaintSignals, syscall.SIGWINCH)
 		defer signal.Stop(repaintSignals)
+		repaintStop := make(chan struct{})
+		defer close(repaintStop)
 		go func() {
-			<-repaintSignals
-			// A detached candidate can receive SIGWINCH before the attach
-			// terminal is usable. Only a successfully observed size is a
-			// repaint observation; an early signal must not crash the stub.
-			_ = integrationMarkerRepaint("resize")
+			serveIntegrationRepaintSignals(repaintStop, repaintSignals, integrationMarkerRepaint)
 		}()
 	}
 
@@ -473,6 +471,54 @@ func integrationMarkerMain() {
 	if err := scanner.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(94)
+	}
+}
+
+// This catches a one-shot SIGWINCH observer that consumes an early detached
+// signal whose terminal-size probe fails, then misses the later attached size.
+func TestIntegrationMarkerRepaintRetriesAfterEarlyProbeFailure(t *testing.T) {
+	signals := make(chan os.Signal, 2)
+	stop := make(chan struct{})
+	defer close(stop)
+	completed := make(chan struct{})
+	calls := 0
+	go func() {
+		serveIntegrationRepaintSignals(stop, signals, func(string) error {
+			calls++
+			if calls == 1 {
+				return errors.New("early detached terminal has no observed size")
+			}
+			return nil
+		})
+		close(completed)
+	}()
+	signals <- syscall.SIGWINCH
+	signals <- syscall.SIGWINCH
+	select {
+	case <-completed:
+		if calls != 2 {
+			t.Fatalf("resize probes = %d, want first failed probe then second successful probe", calls)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resize signal loop did not complete after successful second probe")
+	}
+}
+
+// serveIntegrationRepaintSignals owns only the test-marker signal lifecycle.
+// The marker must stop it before exit so an idle detached stub has no leaked
+// signal observer.
+func serveIntegrationRepaintSignals(stop <-chan struct{}, signals <-chan os.Signal, repaint func(string) error) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-signals:
+			// A detached candidate can receive SIGWINCH before the attach terminal
+			// is usable. Only a successful size observation is a repaint fact.
+			if repaint("resize") == nil {
+				return
+			}
+		}
 	}
 }
 

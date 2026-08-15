@@ -1,6 +1,7 @@
 package hack_test
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -22,15 +23,49 @@ func TestReleaseWorkflowVerifiesDraftNotesBeforeEveryReachableUndraft(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := workflowRelevantLines(string(contents))
+	if err := validateReleaseWorkflow(string(contents)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This catches a publication command hidden behind a shell environment prefix:
+// it must not evade the draft-note verification ordering gate.
+func TestReleaseWorkflowRejectsEnvironmentPrefixedReleaseUndraft(t *testing.T) {
+	contents, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := strings.Replace(string(contents), releaseViewBefore,
+		`GH_TOKEN="$GH_TOKEN" gh release edit "v${{ steps.version.outputs.version }}" --draft=false`+"\n          "+releaseViewBefore, 1)
+	if err := validateReleaseWorkflow(mutated); err == nil || !strings.Contains(err.Error(), "unknown release publication command") {
+		t.Fatal("environment-prefixed early gh release undraft passed the workflow guard")
+	}
+}
+
+// This catches a draft=false publication routed through gh api rather than the
+// normal gh release spelling; non-publication GraphQL formula calls remain valid.
+func TestReleaseWorkflowRejectsEnvironmentPrefixedAPIDraftMutation(t *testing.T) {
+	contents, err := os.ReadFile("../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := strings.Replace(string(contents), releaseViewBefore,
+		`GH_TOKEN="$GH_TOKEN" gh api repos/mnbf9rca/agentctl/releases/example -X PATCH -f draft=false`+"\n          "+releaseViewBefore, 1)
+	if err := validateReleaseWorkflow(mutated); err == nil || !strings.Contains(err.Error(), "unknown API publication command") {
+		t.Fatal("environment-prefixed early gh api draft mutation passed the workflow guard")
+	}
+}
+
+func validateReleaseWorkflow(workflow string) error {
+	lines := workflowRelevantLines(workflow)
 	if got, want := countLine(lines, releaseViewBefore), 1; got != want {
-		t.Fatalf("draft release-before view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
+		return fmt.Errorf("draft release-before view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
 	}
 	if got, want := countLine(lines, releaseViewAfter), 1; got != want {
-		t.Fatalf("draft release-after view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
+		return fmt.Errorf("draft release-after view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
 	}
 	if got, want := countPrefix(lines, `gh release view "v${{ steps.version.outputs.version }}"`), 2; got != want {
-		t.Fatalf("draft gh release view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
+		return fmt.Errorf("draft gh release view calls = %d, want %d:\n%s", got, want, strings.Join(lines, "\n"))
 	}
 
 	before := lineIndex(lines, releaseViewBefore)
@@ -39,32 +74,36 @@ func TestReleaseWorkflowVerifiesDraftNotesBeforeEveryReachableUndraft(t *testing
 	after := lineIndex(lines, releaseViewAfter)
 	verify := lineIndex(lines, releaseVerify)
 	if before < 0 || inject < 0 || edit < 0 || after < 0 || verify < 0 {
-		t.Fatalf("draft note gate omits a required command; relevant lines:\n%s", strings.Join(lines, "\n"))
+		return fmt.Errorf("draft note gate omits a required command; relevant lines:\n%s", strings.Join(lines, "\n"))
 	}
 	if before >= inject || inject >= edit || edit >= after || after >= verify {
-		t.Fatalf("draft note gate must be view-before -> inject -> edit -> view-after -> verify; relevant lines:\n%s", strings.Join(lines, "\n"))
+		return fmt.Errorf("draft note gate must be view-before -> inject -> edit -> view-after -> verify; relevant lines:\n%s", strings.Join(lines, "\n"))
 	}
 
 	undrafts := allLineIndexes(lines, releaseUndraft)
 	if len(undrafts) != 1 {
-		t.Fatalf("release workflow undraft commands = %d, want exactly one allowed undraft:\n%s", len(undrafts), strings.Join(lines, "\n"))
+		return fmt.Errorf("release workflow undraft commands = %d, want exactly one allowed undraft:\n%s", len(undrafts), strings.Join(lines, "\n"))
 	}
 	if verify > undrafts[0] {
-		t.Fatalf("undraft at relevant line %d is reachable before draft-note verification at line %d", undrafts[0], verify)
+		return fmt.Errorf("undraft at relevant line %d is reachable before draft-note verification at line %d", undrafts[0], verify)
 	}
 	for _, line := range lines {
-		if strings.HasPrefix(line, "gh release ") && line != releaseViewBefore && line != releaseInject && line != releaseEdit && line != releaseViewAfter && line != releaseVerify && line != releaseUndraft {
-			t.Fatalf("release workflow has an unknown release publication command %q", line)
+		if strings.Contains(line, "gh release ") && line != releaseViewBefore && line != releaseInject && line != releaseEdit && line != releaseViewAfter && line != releaseVerify && line != releaseUndraft {
+			return fmt.Errorf("release workflow has an unknown release publication command %q", line)
 		}
-		if strings.HasPrefix(line, "gh api ") {
-			t.Fatalf("release workflow has an unknown API publication command %q", line)
+		if strings.Contains(line, "gh api ") && strings.Contains(line, "draft=false") {
+			return fmt.Errorf("release workflow has an unknown API publication command %q", line)
+		}
+		if strings.Contains(line, "draft=false") && line != releaseUndraft {
+			return fmt.Errorf("release workflow has an unknown release publication command %q", line)
 		}
 	}
 	for _, later := range []string{"- name: Smoke-test built artifacts", "- name: Attest release artifacts", "- name: Attest checksums file"} {
 		if index := lineIndex(lines, later); index < 0 || verify > index {
-			t.Fatalf("draft-note verification at relevant line %d must precede %q at line %d", verify, later, index)
+			return fmt.Errorf("draft-note verification at relevant line %d must precede %q at line %d", verify, later, index)
 		}
 	}
+	return nil
 }
 
 func workflowRelevantLines(workflow string) []string {
@@ -72,7 +111,7 @@ func workflowRelevantLines(workflow string) []string {
 	for _, raw := range strings.Split(workflow, "\n") {
 		line := strings.TrimSpace(raw)
 		line = strings.TrimPrefix(line, "run: ")
-		if strings.HasPrefix(line, "gh release ") || strings.HasPrefix(line, "gh api ") || strings.HasPrefix(line, "hack/release-notes.sh ") || strings.HasPrefix(line, "- name: Smoke-test") || strings.HasPrefix(line, "- name: Attest") {
+		if strings.Contains(line, "gh release ") || strings.Contains(line, "gh api ") || strings.Contains(line, "draft=false") || strings.HasPrefix(line, "hack/release-notes.sh ") || strings.HasPrefix(line, "- name: Smoke-test") || strings.HasPrefix(line, "- name: Attest") {
 			relevant = append(relevant, line)
 		}
 	}
