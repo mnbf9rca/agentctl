@@ -1,6 +1,7 @@
 package hack_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -1002,6 +1003,14 @@ func runCommand(t *testing.T, dir, name string, arguments ...string) {
 }
 
 func (fixture liveFixture) run(t *testing.T, input string, environment ...string) (string, error) {
+	return fixture.runWithTTY(t, input, false, environment...)
+}
+
+func (fixture liveFixture) runTTY(t *testing.T, input string, environment ...string) (string, error) {
+	return fixture.runWithTTY(t, input, true, environment...)
+}
+
+func (fixture liveFixture) runWithTTY(t *testing.T, input string, tty bool, environment ...string) (string, error) {
 	t.Helper()
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
 	shimScript := `child_pid=''
@@ -1042,12 +1051,48 @@ wait "$child_pid"`
 		t.Fatal("fixture shim did not report its child PID")
 	}
 	command := exec.Command("bash", "hack/release-verify.sh", "--non-interactive")
+	if tty {
+		command = exec.Command("/usr/bin/script", "-q", "/dev/null", "bash", "hack/release-verify.sh", "--non-interactive")
+	}
 	command.Dir = fixture.dir
-	command.Stdin = strings.NewReader(input)
-	command.Env = append(os.Environ(), "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
+	command.Env = os.Environ()
+	if tty {
+		filtered := command.Env[:0]
+		for _, entry := range command.Env {
+			if !strings.HasPrefix(entry, "NO_COLOR=") {
+				filtered = append(filtered, entry)
+			}
+		}
+		command.Env = filtered
+	}
+	command.Env = append(command.Env, "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
 	command.Env = append(command.Env, "AGENTCTL_TEST_CHILD_PID="+childPID)
 	command.Env = append(command.Env, environment...)
-	output, err := command.CombinedOutput()
+	var output []byte
+	var err error
+	if tty {
+		var captured bytes.Buffer
+		command.Stdout = &captured
+		command.Stderr = &captured
+		stdin, pipeErr := command.StdinPipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		if startErr := command.Start(); startErr != nil {
+			t.Fatal(startErr)
+		}
+		time.Sleep(2 * time.Second)
+		if _, writeErr := stdin.Write([]byte(input)); writeErr != nil {
+			_ = command.Process.Kill()
+			t.Fatal(writeErr)
+		}
+		err = command.Wait()
+		_ = stdin.Close()
+		output = captured.Bytes()
+	} else {
+		command.Stdin = strings.NewReader(input)
+		output, err = command.CombinedOutput()
+	}
 	normalized := string(output)
 	if session, ok := fixture.observedLiveSession(); ok {
 		normalized = strings.ReplaceAll(normalized, session, "relverify")
@@ -1218,8 +1263,14 @@ func TestLiveVerificationRequiresExactlyOneResultsHistoryMarker(t *testing.T) {
 
 func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) {
 	fixture := newLiveFixture(t)
+	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+fi
+trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+`), 0o644)
 	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+		"BASH_ENV="+bashEnvironment,
 		"AGENTCTL_TEST_PART_B_KILL_CODE=17",
 	)
 	if err == nil {
@@ -1295,18 +1346,13 @@ func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testi
 func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
-	writeTestFile(t, bashEnvironment, []byte(`cat() {
-  if [ "${AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH:-0}" = 1 ] && [ -e "$AGENTCTL_TEST_OWNED" ]; then
-    echo 'simulated zero-status exit after Part B launch' >&2
-    set +e
-    exit 0
-  fi
-  command /bin/cat "$@"
-}
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+fi
+trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated zero-status exit after Part B launch" >&2; set +e; exit 0; fi' DEBUG
 `), 0o644)
 	output, err := fixture.run(t, "",
 		"BASH_ENV="+bashEnvironment,
-		"AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH=1",
 		"AGENTCTL_TEST_PART_B_KILL_CODE=17",
 	)
 	if err == nil {
@@ -1363,6 +1409,119 @@ func TestLiveVerificationKeepsOnlyThreeHumanSmokeCheckpoints(t *testing.T) {
 	}
 }
 
+func TestLiveVerificationTTYUsesSemanticColors(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.runTTY(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("TTY live verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"\x1b[1;36m  ./bin/agentctl attach --session relverify a\x1b[0m",
+		"\x1b[1;34mKeep this script running in the verifier terminal.\x1b[0m",
+		"\x1b[1;35mClaude role a\x1b[1;34m",
+		"\x1b[1;33mCodex role b\x1b[1;34m",
+		"\x1b[1;32m[CHECKPOINT PASS B.C1]",
+		"\x1b[1;97;45m===== OPERATOR CHECKPOINT B.C1:",
+		"\x1b[1;30;46m===== OPERATOR CHECKPOINT B.C2:",
+		"\x1b[1;97;44m===== OPERATOR CHECKPOINT B.C3:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("TTY output omits semantic colour sequence %q:\n%s", want, output)
+		}
+	}
+	operatorStart := strings.Index(output, "===== OPERATOR ACTION B.A1:")
+	operatorEnd := strings.Index(output, "===== END OPERATOR CHECKPOINT B.C3 =====")
+	if operatorStart < 0 || operatorEnd <= operatorStart {
+		t.Fatalf("TTY output omits the bounded operator flow:\n%s", output)
+	}
+	operatorFlow := output[operatorStart:operatorEnd]
+	for _, role := range []struct {
+		phrase, style string
+	}{
+		{phrase: "Claude role a", style: "\x1b[1;35m"},
+		{phrase: "Codex role b", style: "\x1b[1;33m"},
+	} {
+		if got, want := strings.Count(operatorFlow, role.style+role.phrase), strings.Count(operatorFlow, role.phrase); got != want {
+			t.Fatalf("%s semantic colour count = %d, want every one of %d operator occurrences:\n%s", role.phrase, got, want, operatorFlow)
+		}
+	}
+	if got, want := strings.Count(operatorFlow, "\x1b[1;36m  ./bin/agentctl attach"), strings.Count(operatorFlow, "  ./bin/agentctl attach"); got != want {
+		t.Fatalf("typed-command colour count = %d, want every one of %d operator commands:\n%s", got, want, operatorFlow)
+	}
+}
+
+func TestLiveVerificationNOColorAndCapturedEvidenceStayByteClean(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.runTTY(t, strings.Repeat("y\n", 3), "NO_COLOR=")
+	if err != nil {
+		t.Fatalf("NO_COLOR TTY live verification failed: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Fatalf("NO_COLOR TTY output contains ANSI escapes:\n%q", output)
+	}
+
+	fixture = newLiveFixture(t)
+	output, err = fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("captured live verification failed: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Fatalf("non-TTY captured output contains ANSI escapes:\n%q", output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+	for _, path := range []string{
+		filepath.Join(fixture.dir, "docs/release-verification-notes.md"),
+		evidenceRoot,
+	} {
+		walkErr := filepath.Walk(path, func(current string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.IsDir() {
+				return nil
+			}
+			body, readErr := os.ReadFile(current)
+			if readErr != nil {
+				return readErr
+			}
+			if strings.Contains(string(body), "\x1b[") {
+				t.Errorf("captured evidence contains ANSI escapes: %s", current)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatal(walkErr)
+		}
+	}
+}
+
+func TestLiveVerificationOperatorProseUsesLogicalUnwrappedLines(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("live verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"The Claude role a viewer shows a ready Claude harness, and the Codex role b viewer shows a ready Codex harness. The detached roles continue running independently of those viewers.",
+		"The script observed the original Claude role a child become absent, agentctl relaunched Claude role a from the fleet's stored configuration, and the replacement runtime has different shim and child identities.",
+		"Close the Claude role a viewer and Codex role b viewer by closing each viewer's terminal window or tab, or by otherwise closing each viewer's PTY at the terminal boundary.",
+	} {
+		if !strings.Contains(output, want+"\n") {
+			t.Fatalf("operator output omits one logical unwrapped line %q:\n%s", want, output)
+		}
+	}
+	for _, stale := range []string{
+		"Codex role b\nviewer",
+		"agentctl relaunched\nrole a",
+		"terminal window or tab,\nor by otherwise",
+	} {
+		if strings.Contains(output, stale) {
+			t.Fatalf("operator output retains manual wrapping %q:\n%s", stale, output)
+		}
+	}
+}
+
 func TestLiveVerificationBoundsEveryHumanStepAndUsesHarnessRoleAnchors(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
@@ -1375,9 +1534,9 @@ func TestLiveVerificationBoundsEveryHumanStepAndUsesHarnessRoleAnchors(t *testin
 	}{
 		{kind: "ACTION", id: "B.A1", wants: []string{"verifier terminal", "Claude role a viewer", "Codex role b viewer"}},
 		{kind: "CHECKPOINT", id: "B.C1", wants: []string{"Claude role a viewer", "Codex role b viewer"}},
-		{kind: "ACTION", id: "B.A2", wants: []string{"Claude role a viewer", "replacement role a"}},
+		{kind: "ACTION", id: "B.A2", wants: []string{"Claude role a viewer", "replacement Claude role a"}},
 		{kind: "CHECKPOINT", id: "B.C2", wants: []string{"Claude role a viewer", "fresh, ready"}},
-		{kind: "ACTION", id: "B.A3", wants: []string{"Claude role a viewer", "Codex role b viewer", "closing its terminal window or tab"}},
+		{kind: "ACTION", id: "B.A3", wants: []string{"Claude role a viewer", "Codex role b viewer", "closing each viewer's terminal window or tab"}},
 		{kind: "CHECKPOINT", id: "B.C3", wants: []string{"Claude role a viewer", "Codex role b viewer", "closed"}},
 	}
 	for _, block := range blocks {
@@ -1826,11 +1985,7 @@ func TestLiveVerificationPairsReplacementRuntimeWithFreshSurfaceObservation(t *t
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
 	}
-	wantPrompt := `The script observed the original role a child become absent, agentctl relaunched
-role a from the fleet's stored configuration, and the replacement runtime has
-different shim and child identities.
-
-Does the Claude role a viewer show the fresh, ready replacement role a harness?`
+	wantPrompt := "The Claude role a viewer shows the fresh, ready replacement harness. The script observed the original Claude role a child become absent, agentctl relaunched Claude role a from the fleet's stored configuration, and the replacement runtime has different shim and child identities.\nDoes the Claude role a viewer show the fresh, ready replacement harness?"
 	if !strings.Contains(output, wantPrompt) {
 		t.Fatalf("release verifier missing final relaunch prompt:\n%s", wantPrompt)
 	}
@@ -1934,8 +2089,14 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 
 func TestLiveVerificationUnexpectedExitRetainsAMQArtifactsWithoutObservedAbsence(t *testing.T) {
 	fixture := newLiveFixture(t)
+	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+fi
+trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+`), 0o644)
 	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+		"BASH_ENV="+bashEnvironment,
 		"AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6",
 		"AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure",
 	)

@@ -5,6 +5,57 @@
 # See docs/release-verification-notes.md for the rationale.
 set -euo pipefail
 
+STYLE_RESET=''
+STYLE_COMMAND=''
+STYLE_INSTRUCTION=''
+STYLE_CLAUDE_ROLE=''
+STYLE_CODEX_ROLE=''
+STYLE_RESULT=''
+STYLE_FAILURE=''
+STYLE_BREAK_1=''
+STYLE_BREAK_2=''
+STYLE_BREAK_3=''
+if [ -t 1 ] && [ -z "${NO_COLOR+x}" ]; then
+  STYLE_RESET=$'\033[0m'
+  STYLE_COMMAND=$'\033[1;36m'
+  STYLE_INSTRUCTION=$'\033[1;34m'
+  STYLE_CLAUDE_ROLE=$'\033[1;35m'
+  STYLE_CODEX_ROLE=$'\033[1;33m'
+  STYLE_RESULT=$'\033[1;32m'
+  STYLE_FAILURE=$'\033[1;31m'
+  STYLE_BREAK_1=$'\033[1;97;45m'
+  STYLE_BREAK_2=$'\033[1;30;46m'
+  STYLE_BREAK_3=$'\033[1;97;44m'
+fi
+
+styled_text() {
+  local base_style=$1
+  local text=$2
+  text=${text//Claude role a/${STYLE_CLAUDE_ROLE}Claude role a${base_style}}
+  text=${text//Codex role b/${STYLE_CODEX_ROLE}Codex role b${base_style}}
+  printf '%s%s%s' "$base_style" "$text" "$STYLE_RESET"
+}
+
+instruction_line() { styled_text "$STYLE_INSTRUCTION" "$1"; printf '\n'; }
+instruction_prompt() { styled_text "$STYLE_INSTRUCTION" "$1"; }
+command_line() { styled_text "$STYLE_COMMAND" "$1"; printf '\n'; }
+result_line() { styled_text "$STYLE_RESULT" "$1"; printf '\n'; }
+failure_line() { styled_text "$STYLE_FAILURE" "$1" >&2; printf '\n' >&2; }
+
+boundary_line() {
+  local checkpoint_id=$1
+  local text=$2
+  local boundary_style
+  case "$checkpoint_id" in
+    *1) boundary_style=$STYLE_BREAK_1 ;;
+    *2) boundary_style=$STYLE_BREAK_2 ;;
+    *3) boundary_style=$STYLE_BREAK_3 ;;
+    *) boundary_style=$STYLE_INSTRUCTION ;;
+  esac
+  styled_text "$boundary_style" "$text"
+  printf '\n'
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -70,7 +121,7 @@ ask() {
   ASK_RESULT=''
   while true; do
     answer=''
-    printf '%s [y/n]: ' "$question"
+    instruction_prompt "$question [y/n]: "
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
       IFS= read -r answer || {
         printf 'input closed — answer y or n\n' >&2
@@ -92,7 +143,7 @@ ask() {
       y|n)
         ASK_ANSWER=$answer
         ASK_RESULT=$answer
-        printf 'recorded: %s\n' "$answer"
+        result_line "recorded: $answer"
         [ "$answer" = y ]
         return
         ;;
@@ -105,31 +156,33 @@ ask() {
 
 part_header() { printf '\n=== Part %s — %s ===\n' "$1" "$2"; }
 step_start() { printf '\n[%s] %s\n' "$1" "$2"; }
-step_pass() { printf '[PASS %s] %s\n' "$1" "$2"; }
-step_fail() { printf '[FAIL %s] %s\n' "$1" "$2" >&2; }
+step_pass() { result_line "[PASS $1] $2"; }
+step_fail() { failure_line "[FAIL $1] $2"; }
 
 checkpoint() {
   local checkpoint_id=$1
   local checkpoint_name=$2
   local expected_output=$3
   local prompt=$4
-  printf '\n===== OPERATOR CHECKPOINT %s: %s =====\n' "$checkpoint_id" "$checkpoint_name"
-  printf 'Expected observation:\n> %s\n' "$expected_output"
+  printf '\n'
+  boundary_line "$checkpoint_id" "===== OPERATOR CHECKPOINT $checkpoint_id: $checkpoint_name ====="
+  instruction_line 'Expected observation:'
+  instruction_line "> $expected_output"
   if ask "$prompt"; then
-    printf '===== END OPERATOR CHECKPOINT %s =====\n' "$checkpoint_id"
-    printf '[CHECKPOINT PASS %s] operator confirmed: %s\n' "$checkpoint_id" "$checkpoint_name"
+    boundary_line "$checkpoint_id" "===== END OPERATOR CHECKPOINT $checkpoint_id ====="
+    result_line "[CHECKPOINT PASS $checkpoint_id] operator confirmed: $checkpoint_name"
     return 0
   fi
-  printf '===== END OPERATOR CHECKPOINT %s =====\n' "$checkpoint_id"
+  boundary_line "$checkpoint_id" "===== END OPERATOR CHECKPOINT $checkpoint_id ====="
   if [ "$ASK_RESULT" = n ]; then
     FAILED_CHECKPOINT_ID=$checkpoint_id
     FAILED_CHECKPOINT_RESULT=refused
-    printf '[CHECKPOINT FAIL %s] operator refused checkpoint: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
+    failure_line "[CHECKPOINT FAIL $checkpoint_id] operator refused checkpoint: $checkpoint_name"
     return 1
   fi
   FAILED_CHECKPOINT_ID=$checkpoint_id
   FAILED_CHECKPOINT_RESULT=input
-  printf '[CHECKPOINT FAIL %s] checkpoint input failed: %s\n' "$checkpoint_id" "$checkpoint_name" >&2
+  failure_line "[CHECKPOINT FAIL $checkpoint_id] checkpoint input failed: $checkpoint_name"
   return 2
 }
 
@@ -1266,20 +1319,16 @@ else
   PART_B_SESSION_OWNED=1
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    printf '\n===== OPERATOR ACTION B.A1: open the live role viewers =====\n'
-    echo 'Keep this script running in the verifier terminal.'
-    echo 'In a separate terminal for the Claude role a viewer, run:'
-    printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
-    echo 'In another terminal for the Codex role b viewer, run:'
-    printf '  ./bin/agentctl attach --session %s b\n' "$LIVE_SESSION"
-    echo 'Keep both role viewers open and return to the verifier terminal.'
-    printf '===== END OPERATOR ACTION B.A1 =====\n'
-    attach_expected=$(cat <<'EOF'
-The Claude role a viewer shows a ready Claude harness, and the Codex role b
-viewer shows a ready Codex harness. The detached roles continue running
-independently of those viewers.
-EOF
-)
+    printf '\n'
+    boundary_line B.A1 '===== OPERATOR ACTION B.A1: open the live role viewers ====='
+    instruction_line 'Keep this script running in the verifier terminal.'
+    instruction_line 'In a separate terminal for the Claude role a viewer, run:'
+    command_line "  ./bin/agentctl attach --session $LIVE_SESSION a"
+    instruction_line 'In another terminal for the Codex role b viewer, run:'
+    command_line "  ./bin/agentctl attach --session $LIVE_SESSION b"
+    instruction_line 'Keep both role viewers open and return to the verifier terminal.'
+    boundary_line B.A1 '===== END OPERATOR ACTION B.A1 ====='
+    attach_expected='The Claude role a viewer shows a ready Claude harness, and the Codex role b viewer shows a ready Codex harness. The detached roles continue running independently of those viewers.'
     if checkpoint B.C1 'live role surfaces' "$attach_expected" 'Do the Claude role a viewer and Codex role b viewer each show the named ready harness?'; then
       ATTACH_ATTESTATION=$ASK_ANSWER
     else
@@ -1359,21 +1408,15 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    printf '\n===== OPERATOR ACTION B.A2: attach the replacement Claude role a viewer =====\n'
-    printf '%s\n' 'The original Claude role a viewer ended when the script terminated its recorded shim.'
-    printf '%s\n' 'In that viewer terminal, attach to replacement role a with:'
-    printf '  ./bin/agentctl attach --session %s a\n' "$LIVE_SESSION"
-    printf '%s\n' 'Keep the Codex role b viewer open, then return to the verifier terminal.'
-    printf '===== END OPERATOR ACTION B.A2 =====\n'
-    relaunch_prompt=$(cat <<'EOF'
-The script observed the original role a child become absent, agentctl relaunched
-role a from the fleet's stored configuration, and the replacement runtime has
-different shim and child identities.
-
-Does the Claude role a viewer show the fresh, ready replacement role a harness?
-EOF
-)
-    if checkpoint B.C2 'fresh replacement role surface' 'The Claude role a viewer shows the fresh, ready replacement role a harness.' "$relaunch_prompt"; then
+    printf '\n'
+    boundary_line B.A2 '===== OPERATOR ACTION B.A2: attach the replacement Claude role a viewer ====='
+    instruction_line 'The original Claude role a viewer ended when the script terminated its recorded shim.'
+    instruction_line 'In that viewer terminal, attach to the replacement Claude role a with:'
+    command_line "  ./bin/agentctl attach --session $LIVE_SESSION a"
+    instruction_line 'Keep the Codex role b viewer open, then return to the verifier terminal.'
+    boundary_line B.A2 '===== END OPERATOR ACTION B.A2 ====='
+    relaunch_expected="The Claude role a viewer shows the fresh, ready replacement harness. The script observed the original Claude role a child become absent, agentctl relaunched Claude role a from the fleet's stored configuration, and the replacement runtime has different shim and child identities."
+    if checkpoint B.C2 'fresh replacement role surface' "$relaunch_expected" 'Does the Claude role a viewer show the fresh, ready replacement harness?'; then
       RELAUNCH_ATTESTATION=$ASK_ANSWER
       RELAUNCH_CHECK='PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached)'
     else
@@ -1383,12 +1426,12 @@ EOF
   fi
 
   if [ "$LIVE_STATUS" -eq 0 ]; then
-    printf '\n===== OPERATOR ACTION B.A3: close both role viewers =====\n'
-    printf '%s\n' 'Close the Claude role a viewer and Codex role b viewer by closing its terminal window or tab,'
-    printf '%s\n' 'or by otherwise closing its PTY at the terminal boundary.'
-    printf '%s\n' 'Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the harness and can interrupt it.'
-    printf '%s\n' 'Closing a detached viewer does not stop its role. Return to the verifier terminal afterward.'
-    printf '===== END OPERATOR ACTION B.A3 =====\n'
+    printf '\n'
+    boundary_line B.A3 '===== OPERATOR ACTION B.A3: close both role viewers ====='
+    instruction_line "Close the Claude role a viewer and Codex role b viewer by closing each viewer's terminal window or tab, or by otherwise closing each viewer's PTY at the terminal boundary."
+    instruction_line 'Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the harness and can interrupt it.'
+    instruction_line 'Closing a detached viewer does not stop its role. Return to the verifier terminal afterward.'
+    boundary_line B.A3 '===== END OPERATOR ACTION B.A3 ====='
     if checkpoint B.C3 'role viewer terminals closed' 'The Claude role a viewer and Codex role b viewer terminal windows or tabs are closed.' 'Are the Claude role a viewer and Codex role b viewer terminals closed?'; then
       PART_B_DETACH_ATTESTATION=$ASK_ANSWER
       echo 'Running:'
