@@ -38,6 +38,25 @@ part of verification the suite is structurally unable to perform.
 
 ### 2026-08-16
 
+- agentctl: `agentctl be35584`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.VmXXGB/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_vmxxgb`
+- Part B AMQ mode: temporary (verifier-owned .amqrc and root)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-16
+
 - agentctl: `agentctl 7a2ff00`
 - tmux: `tmux 3.7b`
 - Claude Code: `2.1.233 (Claude Code)`
