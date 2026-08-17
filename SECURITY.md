@@ -16,8 +16,9 @@
 - **Destroying sessions, records, or presentation agentctl does not own.** Rollback and shutdown remove only typed identifiers the invocation created or observed, and a fleet record is removed only once every role's cleanup has actually been observed. A survivor, an unobserved cleanup, or an ambiguous result retains the evidence instead (spec §15).
 - **A caller-named file becoming a trusted input.** `launch --from-template` verifies the descriptor, accepts only a regular file, bounds input without truncating it, and subjects template values to exactly the validation flag values receive (spec §7).
 - **Overwriting files in your home directory.** Skill installation writes only its two declared directories, replacing each entry rather than writing through it, and refuses any target it cannot prove it wrote unless `--force` is explicit (spec §16).
-- **A compromised dependency reaching a release.** The module graph is standard-library-first and small, a pinned vulnerability scanner runs in CI, Dependabot watches modules and Actions, and archive verification refuses a release missing a required upstream license.
-- **Release verification handling temporary state.** The three-confirmation live smoke uses the operator's already-authenticated harnesses without copying or linking credentials. Its temporary AMQ configuration is removed only after agentctl status proves the owned fleet absent; exhaustive Task 8 checks use isolated roots and no live harness credentials.
+- **A compromised dependency reaching a release.** The module graph is standard-library-first and small, a pinned scanner runs in CI, Dependabot watches modules and Actions, and archive verification refuses a release missing a required license.
+- **Provisioning a fleet inside the operator's message store.** agentctl never writes in an AMQ tree itself: it invokes AMQ's own creator with an explicit root, leaves the base root unchanged, verifies by re-observation, and adopts an existing session read-only or refuses (spec §15.12).
+- **Release verification handling temporary state.** The live smoke uses the operator's already-authenticated harnesses without copying or linking credentials; its temporary AMQ configuration is removed only after status proves the owned fleet absent, and Task 8 checks use isolated roots with no live credentials.
 
 ### Out of scope
 
@@ -40,7 +41,8 @@
 8. **Template symlinks are followed.** Anyone who can plant a symlink where you point `--from-template` can plant the file itself, so this adds no capability — but the target, not the link, is what is read.
 9. **Presentation cleanup can race tmux.** Only an exact observation that a presentation is gone permits removing the fleet record. "Gone" and "removed" remain different facts.
 10. **Fleets without a shim record are not adopted.** A fleet started by the older tmux-metadata lifecycle leaves nothing agentctl can read, so it is neither recognized nor migrated; stop it with the binary that started it. Compatibility is decided by the recorded schema and the wire protocol version, never by binary identity — a different build speaking the same versions operates the same fleet normally.
-11. **Direct viewing is bounded, not replayable or lossless at every viewer speed.** Detached shims discard output while no viewer is present; a viewer that cannot keep up is evicted rather than throttling the role, and output is not replayed on re-attach (spec §15.11).
+11. **Ownership binds a directory, and a directory is not a permission.** If a directory's resolved AMQ root changes between creation and adoption, ownership evidence can be wrong without being loud; `--adopt` substitutes a human claim where evidence is absent, and the record says which. agentctl claims only a directory per declared role; stricter delivery acceptance is AMQ's.
+12. **Direct viewing is bounded, not replayable or lossless at every viewer speed.** Detached shims discard output while no viewer is present; a viewer that cannot keep up is evicted rather than throttling the role, and output is not replayed on re-attach (spec §15.11).
 
 ## File and socket permissions
 
