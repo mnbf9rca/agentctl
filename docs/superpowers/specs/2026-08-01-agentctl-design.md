@@ -2282,7 +2282,7 @@ uppercase words are typed substitutions, not discretionary prose. `SESSION`, `RO
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
 `EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
 `REOBSERVATION` is not a closed token: it is an exact structured substitution rendering either `observation-failed` or
-`present: PRESENT; absent: ABSENT`, whose handle lists §15.12.5 fixes in declaration order with a literal `none` when empty.
+`present: [PRESENT]; absent: [ABSENT]`, whose bracketed handle lists §15.12.5 fixes in declaration order, empty rendering as `[]`.
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -3575,13 +3575,18 @@ over the convenience of a copyable line. The third is omitted wherever §15.12.5
 marks `--adopt` inadmissible, and the fourth is never runnable.
 
 `HANDLES` renders the declared roles in fleet-file declaration order, separated by a
-comma and a space. `REOBSERVATION` is closed and renders exactly one of two forms, chosen by whether
-the post-`init` observation succeeded:
+comma and a space. `REOBSERVATION` has a closed grammar and renders exactly one of two forms, chosen
+by whether the post-`init` observation succeeded:
 
 - `observation-failed` — the re-observation itself yielded no parseable listing.
-- `present: PRESENT; absent: ABSENT` — where each list renders declared roles in
-  fleet-file declaration order, comma-space separated, and either renders the
-  literal `none` when empty.
+- `present: [PRESENT]; absent: [ABSENT]` — where each bracketed list renders
+  declared roles in fleet-file declaration order, comma-space separated, and an
+  empty list renders as `[]`.
+
+The brackets are the empty-list sentinel because a bare word cannot be one: `none`
+matches the role grammar, so `present: none` could not distinguish an empty list
+from a declared role named `none`. Brackets cannot occur in a validated handle, so
+`present: []; absent: [none]` and `present: [none]; absent: []` are distinct.
 
 The second form is exhaustive over the observable outcomes, including the partial
 one `init` can produce by creating some requested directories before failing. It

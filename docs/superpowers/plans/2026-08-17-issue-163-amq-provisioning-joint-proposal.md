@@ -506,9 +506,10 @@ Two related corrections landed with it. The inspect remedy was drafted as
 `--me`; it cannot inspect a folder's mailbox shape, so it taught a command that did
 not do what the refusal said. It is now `amq session list --root BASE --json`,
 which reports exactly the fact in question. And provisioning is scoped to `launch`:
-`run` is outside the contract entirely — it provisions nothing, claims nothing,
-and keeps its existing §15.2 contract including the deprecated implicit-create
-dependency. An earlier draft had `run` refuse against an unprovisioned session;
+`run` is outside the contract entirely — §15.12 adds no explicit preflight
+provisioning or observation to it, and it claims nothing about AMQ, while keeping
+its existing §15.2 contract including `coop exec`'s deprecated implicit-create
+side effect. An earlier draft had `run` refuse against an unprovisioned session;
 that was withdrawn because it contradicted §15.2 and amounted to a foreground
 redesign rather than a scoping decision.
 
