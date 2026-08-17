@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `agentctl launch` establish or read-only adopt the declared AMQ session mailbox shape before runtime launch, while preserving factual durable ownership and leaving foreground `run` behavior unchanged.
+**Goal:** Implement issue #163's amended `launch` provisioning, ownership, and reporting contract while preserving the registered foreground `run` contract.
 
-**Architecture:** Extend the existing `internal/tmuxx.Runner` process boundary with typed noninteractive invocation and termination facts, then build a standard-library-only `internal/amqx` client on that boundary. `internal/fleet` prepares the effective launch from invocation facts plus a descriptor-verified record snapshot, performs the issue #163 state partition before target-session runtime mutation, and commits ownership/config changes with final locked comparisons. CLI code remains responsible for launch-only parsing and factual rendering.
+**Architecture:** First make the approved spec total for the final issue amendments and obtain reviewer agreement on that exact spec commit. Then extend the existing `internal/tmuxx.Runner` process boundary, build a standard-library-only `internal/amqx` client on it, and implement the amended §15.12 workflow in `internal/fleet`; CLI code remains responsible for launch-only parsing and registered rendering.
 
 **Tech Stack:** Go 1.26.6, standard library, existing descriptor-relative state stores and fake runners, integration-tagged throwaway AMQ/tmux fixtures, shellcheck 0.11.0, golangci-lint 2.12.2, and the repository release verifier.
 
@@ -16,7 +16,7 @@
 - No AMQ source change, shell invocation, caller-controlled process boundary, or third-party Go dependency is permitted.
 - Production AMQ execution must use `internal/tmuxx.Runner`; tests assert exact executable, argv element boundaries, cwd, environment, output streams, termination, and call order.
 - Every behavior change begins with a focused failing test, receives the smallest passing implementation, and ends in a focused SSH-signed commit.
-- The implementation is one atomic product PR. The two initial lanes are file-disjoint and publish no standalone PR.
+- The spec and implementation remain one atomic product PR. The reviewed spec commit precedes the two file-disjoint implementation lanes; no lane publishes a standalone PR.
 
 ---
 
@@ -24,25 +24,53 @@
 
 | Task | Owner | Files while parallel | Dependency |
 |---|---|---|---|
-| 1A | build1 | `internal/tmuxx`, new `internal/amqx` | current `main` |
-| 1B | build2 | fleet record codec/store and foreground provenance | current `main` |
+| 0 | planner/build1, reviewer gate | approved design spec only | current `main` |
+| 1A | build1 | `internal/tmuxx`, new `internal/amqx` | reviewed Task 0 commit |
+| 1B | build2 | fleet record codec/store and foreground provenance | reviewed Task 0 commit |
 | 2 | build1 after convergence | fleet preparation/provisioning/launcher | 1A + 1B |
 | 3 | build1 | CLI provenance, parsing, rendering, wiring | 2 |
-| 4 | build1, then build2 review | integration, guards, spec/security/release docs | 3 |
+| 4 | build1 | integration, guards, security/release docs | 3 |
 | 5 | build1 | rebase, gates, publication, reviewer handoff | 4 |
 
-Before either lane starts, invoke `superpowers:using-git-worktrees`, fetch current `main`, verify the exact base commit, and prove SSH signing using the repository procedure. The convergence owner accepts only reviewed signed commits and reruns each lane's focused tests after integration.
+Before Task 0 and each implementation lane, invoke `superpowers:using-git-worktrees`, verify the exact required base commit, and prove SSH signing using the repository procedure. The convergence owner accepts only reviewed signed commits and reruns each lane's focused tests after integration.
 
 ## Contract coverage
 
 | Contract surface | Owning task |
 |---|---|
+| Exact amended contract in §§15.2, 15.8, 15.9, and 15.12 | 0 |
 | Process and AMQ observation boundary (§§15.9, 15.12.2) | 1A |
 | Current, legacy, reservation, and ownership record states (§§15.2, 15.12.3–4; final issue amendments) | 1B |
 | Complete partition, ordering, record refresh, races, rollback (§§15.12.2–7) | 2 |
 | Launch-only flag, provenance, typed output (§§15.8, 15.12.1, 15.12.5–6) | 3 |
 | Real composition, security, release, and every required guard (§15.12.7–8) | 4 |
 | Current-main and merge-result evidence | 5 |
+
+---
+
+### Task 0: Land the reviewed exact spec delta before production TDD
+
+**Files:**
+
+- Modify: `docs/superpowers/specs/2026-08-01-agentctl-design.md`
+
+**Produces:** A signed spec-only commit making §§15.2, 15.8, 15.9, and every affected §15.12 subsection total for issue #163; Tasks 1A–4 consume its exact rows and templates.
+
+- [ ] **Step 1: Draft the complete spec delta from the frozen issue**
+
+  Apply every final issue amendment to the named sections, including all registered outcomes, substitutions, streams, exits, process facts, record facts, guards, and release obligations. Do not edit production code, `SECURITY.md`, public docs, or release notes in this commit.
+
+- [ ] **Step 2: Check the spec-only diff**
+
+  Run `git diff --check`, inspect `git diff -- docs/superpowers/specs/2026-08-01-agentctl-design.md`, and map each frozen issue clause to one exact spec location.
+
+- [ ] **Step 3: Run repository regression checks**
+
+  Run `go test ./...` and `go vet ./...`; report any test that encodes the superseded contract instead of weakening the proposed spec.
+
+- [ ] **Step 4: Commit and obtain reviewer agreement**
+
+  Create one SSH-signed spec-only commit, verify its signature, and send its exact hash plus issue timestamp and clause-to-section map to reviewer and planner. Do not start Task 1A or 1B until reviewer explicitly agrees that exact commit is the approved design delta.
 
 ---
 
@@ -70,7 +98,7 @@ type CommandTerminationKind uint8
 type CommandTermination struct {
     Kind     CommandTerminationKind
     ExitCode int
-    Signal   string
+    Signal   syscall.Signal
 }
 
 type CommandResult struct {
@@ -100,7 +128,7 @@ The concrete runner owns `os/exec`; `internal/amqx` owns only AMQ command constr
 
 - [ ] **Step 1: Add failing `internal/tmuxx` tests for the typed command path**
 
-  Cover every invocation and termination fact required by the final issue D2 ruling and §15.9, plus defensive copies and compatibility with the existing output/interactive methods. Update the local `operationRunner` test double to record the new method.
+  Cover every invocation and termination fact required by amended §§15.8 and 15.9, named and unmapped raw signals, cancellation-versus-independent-signal races, defensive copies, and compatibility with the existing output/interactive methods. Update the local `operationRunner` test double to record the new method.
 
 - [ ] **Step 2: Run the runner RED test**
 
@@ -159,7 +187,7 @@ func (s *ShimFleetRecordStore) CreateForAMQProvisioning(ShimFleetRecordObservati
 func (s *ShimFleetRecordStore) EstablishOwnership(ShimFleetRecordObservation, ShimFleetRecord) error
 ```
 
-`ReadForAMQProvisioning` is the only reader that may expose the issue's pre-provenance and reservation classes. Ordinary `Read` stays current-schema strict. Mutation methods accept the caller's exact observation so the store can compare it again while holding the session mutation flock.
+These methods implement the amended §15.12.4 and final D3 record-store contract; ordinary `Read` continues to implement the general §15.2 contract.
 
 - [ ] **Step 1: Add failing codec tests for the amended current schema**
 
@@ -171,7 +199,7 @@ func (s *ShimFleetRecordStore) EstablishOwnership(ShimFleetRecordObservation, Sh
 
 - [ ] **Step 3: Implement current-schema provenance and foreground initialization**
 
-  Apply the final post-#247 issue amendment without changing the schema version. Add the record source to the existing `fleet.Provenance` vocabulary for later CLI composition.
+  Implement the amended §15.2 codec/initialization contract and add the registered record source to `fleet.Provenance`.
 
 - [ ] **Step 4: Add failing provisioning-read and reservation tests**
 
@@ -239,7 +267,7 @@ type AMQProvisionResult struct {
 }
 ```
 
-The request keeps invocation execution facts separate from durable identity. Preparation selects the effective stored/invocation facts before AMQ mutation; runtime launch receives the resulting durable snapshot and effective execution configuration as distinct values.
+The request keeps invocation execution facts separate from durable identity; see the final D1 spec rows for selection and use of those inputs.
 
 - [ ] **Step 1: Converge Tasks 1A and 1B**
 
@@ -247,7 +275,7 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 2: Add failing preparation tests**
 
-  Cover the complete final issue D1 input/source/refresh matrix and preflight the selected facts. Prove preparation failures satisfy §15.12.2's mutation boundary.
+  Cover the complete amended D1 input/source/refresh matrix and the associated §§15.12.2 and 15.12.7 guards.
 
 - [ ] **Step 3: Run preparation RED and implement the smallest preparation phase**
 
@@ -275,11 +303,11 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 9: Implement record commit/reuse with final comparisons**
 
-  Preserve the exact record snapshot needed by rollback. A pre-existing or refreshed record is never removed by later launch rollback; a current-invocation record follows the existing observed-cleanup contract.
+  Preserve the exact record snapshot required by the amended §15.12.4 rollback matrix.
 
 - [ ] **Step 10: Add failing end-to-end launcher order tests**
 
-  Assert validation, preparation, AMQ observation/mutation, durable commit, runtime/tmux mutation, readiness, and rollback call order. Drive production namespace/store openers and prove provisioning plus every refusal leaves no target-session artifact named by the final issue amendment.
+  Assert the ordering required by amended §15.12.2 and the corresponding §15.12.7 guards through production namespace/store openers.
 
 - [ ] **Step 11: Integrate with `ShimLauncher` and verify**
 
@@ -292,8 +320,10 @@ The request keeps invocation execution facts separate from durable identity. Pre
 - Modify: `cmd/agentctl/launch_template.go`
 - Modify: `cmd/agentctl/launch_template_test.go`
 - Modify: `cmd/agentctl/main.go`
+- Modify: `cmd/agentctl/shim_results.go`
 - Modify: `cmd/agentctl/main_launch_test.go`
 - Modify: `cmd/agentctl/main_launch_template_test.go`
+- Create: `cmd/agentctl/amq_output_contract_test.go`
 - Modify: `cmd/agentctl/runtime_dependencies.go`
 - Modify: `cmd/agentctl/skill_launch_notice_test.go`
 - Modify: `cmd/agentctl/skill_contract_test.go`
@@ -309,7 +339,7 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 1: Add a failing regression test for launch-field provenance**
 
-  Pin the discovered defect: omitted model/effort assignments on flag-built roles must not be reported as operator-supplied. Cover flags, template, overrides, defaults, and the new record-derived source per field.
+  Pin every amended D1 per-field provenance source, including the regression identified in the frozen issue amendment.
 
 - [ ] **Step 2: Run provenance RED and fix source tracking**
 
@@ -317,7 +347,7 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 3: Add failing launch-flag boundary tests**
 
-  Prove the assertion flag is accepted only by `launch`, remains absent from templates/run/environment shortcuts, and reaches the launcher seam exactly once.
+  Assert the launch-option scope and dependency path registered by amended §§15.8 and 15.12.4.
 
 - [ ] **Step 4: Implement launch-only parsing and request composition**
 
@@ -325,21 +355,21 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 5: Add failing exact renderer tests**
 
-  Assert every affected §15.8 row and success template byte-for-byte from shared spec fixtures, including termination, commit certainty, reservation integrity, effective-source reporting, remedies, stream choice, and exit selection. Guard the closed §15.12.1 vocabulary.
+  Create the shared row fixtures/helpers in `cmd/agentctl/amq_output_contract_test.go` and assert every affected amended §15.8 row and §15.12.1 success template there. Keep orchestration assertions in `main_launch_test.go`.
 
 - [ ] **Step 6: Implement typed rendering and production wiring**
 
-  Emit the AMQ success claim only after runtime launch succeeds. Report record-derived identity and invocation/effective execution facts without implying strict delivery authority.
+  Compose registered output according to amended §§15.8 and 15.12.1.
 
 - [ ] **Step 7: Add launch-only and foreground isolation guards**
 
-  Make `run` fail its test if any provisioning dependency is invoked or any §15.12 launch claim appears. Preserve its accepted limitation in operator documentation.
+  Assert the launch-only scope and foreground limitation registered by amended §15.12.6.
 
 - [ ] **Step 8: Update public docs and verify**
 
   Update README, embedded skill, and exit reference using the spec literals. Run `go test ./cmd/agentctl ./skills -count=1`, `go vet ./cmd/agentctl ./skills`, the repository skill-pairing check, and `git diff --check`.
 
-### Task 4: Prove real composition and land the bundled contract/docs delta
+### Task 4: Prove real composition and land current-truth security/release docs
 
 **Files:**
 
@@ -347,7 +377,6 @@ The request keeps invocation execution facts separate from durable identity. Pre
 - Modify: `cmd/agentctl/integration_fixture_test.go`
 - Modify: `cmd/agentctl/integration_shim_lifecycle_test.go`
 - Modify: `internal/structural/invariants_test.go`
-- Modify: `docs/superpowers/specs/2026-08-01-agentctl-design.md`
 - Modify: `SECURITY.md`
 - Modify: `hack/securitydoc_test.go` only if needed for the current-truth guard and existing word budget
 - Modify: `hack/release-verify.sh`
@@ -358,7 +387,7 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 1: Extend the integration process double and capture RED**
 
-  Add the typed `RunCommand` method to the integration runner, model all §15.12 AMQ calls and termination kinds, and keep existing tmux socket isolation. Prove a role cannot reach `coop exec` before its session mailbox exists.
+  Add the typed `RunCommand` method to the integration runner, model the amended §15.12 process facts, keep existing tmux socket isolation, and assert the corresponding §15.12.7 composition guard.
 
 - [ ] **Step 2: Add end-to-end creation/adoption/refusal tests**
 
@@ -366,23 +395,23 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 3: Add real-opener and base-surface guards**
 
-  Exercise production namespace/store openers on throwaway roots. Snapshot the §15.12.7 base surfaces by type/mode/name/bytes and assert the issue's target-session mutation boundary at provisioning and refusal.
+  Exercise production namespace/store openers on throwaway roots and assert the corresponding amended §15.12.7 snapshots and mutation guards.
 
 - [ ] **Step 4: Add structural guards**
 
-  Pin the production dependency graph, the closed AMQ surface, exact argv through `tmuxx.Runner`, provenance schema/order/transitions, legacy/reservation classifiers, full state partition, rollback ownership, output vocabulary, and run isolation. Make the guard fail on an ad-hoc `os/exec` AMQ boundary or direct AMQ-tree writer.
+  Pin every structural invariant registered by amended §§15.2, 15.9, and 15.12.7, including the `tmuxx.Runner` production dependency edge.
 
 - [ ] **Step 5: Update release-verifier fixture tests and script**
 
   Add fixture-first tests for success, substitution, interruption, commit uncertainty, mail preservation/deliverability, base surfaces, and identity-gated cleanup. Keep all live probes on throwaway AMQ roots and throwaway tmux sockets.
 
-- [ ] **Step 6: Apply the complete bundled spec and security delta**
+- [ ] **Step 6: Apply current-truth security documentation**
 
-  Update spec §§15.2, 15.8, 15.9, and all affected §15.12 subsections from the final issue body. Apply §15.12.8's SECURITY obligations and preserve the existing security-document guard budget.
+  Apply amended §15.12.8's SECURITY obligations only after the corresponding production behavior exists, and preserve the existing security-document guard budget.
 
 - [ ] **Step 7: Add release-note/checklist obligations**
 
-  State narrowly that `launch` no longer relies on implicit AMQ creation while `run` retains the documented limitation. Pin release evidence extraction without changing `VERSION` or publishing a release.
+  Apply the amended §15.12.8 release obligations and pin their evidence extraction without changing `VERSION` or publishing a release.
 
 - [ ] **Step 8: Run integration/docs/release GREEN**
 
@@ -391,10 +420,6 @@ The request keeps invocation execution facts separate from durable identity. Pre
 - [ ] **Step 9: Self-review against the contract**
 
   Map every §15.12.7 bullet and final issue-amendment clause to a named test. Run the repository red-flag and forbidden-success-vocabulary scans, inspect each hit, and check interface/type names against Tasks 1A–3.
-
-- [ ] **Step 10: Request fresh adversarial build2 review**
-
-  Send the exact signed commit and focused evidence on `design/issue-163`, copying planner. Require a blocking/non-blocking verdict on process ownership, partition/races, record truth, launch-only scope, deliverability, and spec/security/release alignment; resolve every finding in this branch.
 
 ### Task 5: Rebase, verify, publish, and hand off without merging
 
@@ -413,21 +438,46 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] **Step 3: Run repository and CI-equivalent gates**
 
-  Run `go test ./...`, `go vet ./...`, `go test -race ./...`, `go test -tags integration ./...`, `shellcheck hack/*.sh`, `golangci-lint run`, `goreleaser check`, `goreleaser release --snapshot --clean --skip=notarize`, `./hack/verify-release-archives.sh dist/*.tar.gz`, and every additional current workflow script. Record failures and skips factually.
+  Run every current `.github/workflows/ci.yml` gate explicitly:
+
+  - `hack/check-skill-pairing.sh "$BASE_SHA" "$HEAD_SHA"`
+  - `hack/check-workflow-timeouts.sh`
+  - `./hack/ci-fingerprint.sh` at the workflow's pre/post-tool checkpoints
+  - `hack/check-govulncheck-workflows.sh`
+  - `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...`
+  - `go test ./...` and `go vet ./...`
+  - verify `shellcheck --version` reports `0.11.0`, then run `shellcheck hack/*.sh`
+  - `golangci-lint run` using `v2.12.2`
+  - `go test -race ./...`
+  - verify `tmux -V` reports `tmux 3.7b`, then run `go test -tags integration ./...`
+  - `goreleaser check`
+  - `goreleaser release --snapshot --clean --skip=notarize`
+  - `./hack/verify-release-archives.sh dist/*.tar.gz`
+  - run `./dist/agentctl_darwin_arm64*/agentctl version` and apply the workflow's snapshot-version smoke assertion
+
+  Record every skip or failure factually.
 
 - [ ] **Step 4: Run isolated live AMQ verification**
 
   Execute the amended release verifier per `docs/release-checklist.md`; capture installed AMQ version, the pinned environment/absent-base probes, creation/adoption/refusal facts, mail preservation and fresh deliverability, base surfaces, teardown observations, and artifact hashes.
 
-- [ ] **Step 5: Commit final fixes, push, and open one atomic PR**
+- [ ] **Step 5: Obtain fresh build2 review of the exact verified commit**
 
-  Reverify signatures, push through the approval path, and open the implementation PR with issue, security, release, probe, build2-review, and test evidence. Do not merge it.
+  Send the post-rebase exact commit and evidence to build2 on `design/issue-163`, copying planner. Require an explicit verdict on process ownership, partition/races, record truth, launch-only scope, deliverability, and spec/security/release alignment.
 
-- [ ] **Step 6: Wait for merge-result CI and reviewer release**
+- [ ] **Step 6: Restart verification after any content change**
 
-  Quote the PR's own `pull_request` run URL, address every finding in the same PR, rerun affected evidence, and obtain the reviewer gate.
+  Any review fix, conflict resolution, or other content change returns to its owning RED/GREEN step, then repeats Task 5 Steps 1–5, including all affected local/live gates, signature verification, and a fresh exact-commit build2 verdict. Publication uses only the unchanged reviewed commit.
 
-- [ ] **Step 7: Detach the worktree and hand off**
+- [ ] **Step 7: Push and open one atomic PR**
+
+  Confirm `origin/main` is unchanged since Step 1, then push the unchanged verified/reviewed commit through the approval path and open the implementation PR with issue, security, release, probe, build2-review, and test evidence. If `main` moved, restart at Step 1. Do not merge it.
+
+- [ ] **Step 8: Wait for merge-result CI and reviewer release**
+
+  Quote the PR's own `pull_request` run URL and obtain the reviewer gate. Any resulting content change repeats Task 5 Steps 1–7 before another push.
+
+- [ ] **Step 9: Detach the worktree and hand off**
 
   Detach the PR worktree so it does not hold the branch at merge time. Report the PR, signed commit set, CI run, live evidence, build2 verdict, reviewer verdict, and accepted §15.12.6 limitations to planner/maintainer.
 
@@ -435,10 +485,9 @@ The request keeps invocation execution facts separate from durable identity. Pre
 
 - [ ] Every final issue amendment and §15.12.7 guard maps to a passing test.
 - [ ] AMQ execution uses the typed `internal/tmuxx.Runner` boundary with exact fake assertions.
-- [ ] Preparation selects truthful record/invocation facts before AMQ or target-session mutation.
-- [ ] Creation, termination, re-observation, record certainty, and race outcomes follow the final issue/spec partition.
-- [ ] Adoption preserves queued mail and extras, remains deliverable, and refreshes only explicitly declared durable execution fields without rewriting pinned identity or undeclared stored values.
-- [ ] Safe crashed reservations are recoverable; residue, unsafe paths, and concurrent winners fail closed.
-- [ ] `run` has no new AMQ call, assertion flag, or §15.12 success claim and writes factual current-schema provenance.
+- [ ] The amended §15.12.2 ordering and mutation guards pass.
+- [ ] The amended §§15.8 and 15.12.3–5 partition/ownership guards pass.
+- [ ] Every frozen D1 and D3 integration guard passes.
+- [ ] The amended §15.12.6 foreground-scope guard passes.
 - [ ] Spec, SECURITY, release notes, checklist, README, and embedded skill agree with shipped behavior.
 - [ ] Focused, race, integration, lint, release, live, CI, signature, build2, and reviewer evidence are recorded before handoff.
