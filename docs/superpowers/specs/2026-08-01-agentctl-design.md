@@ -2280,8 +2280,9 @@ Every diagnostic is one line on stderr with the `agentctl: ` prefix and trailing
 uppercase words are typed substitutions, not discretionary prose. `SESSION`, `ROLE`, every path/root/executable/flag,
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
-`EXPECTED_TYPE`, `REMAINING`, `PHASE`, `REOBSERVATION`, and boolean literals are closed canonical tokens rendered without quotes.
-`REOBSERVATION` renders either `observation-failed` or `present: PRESENT; absent: ABSENT` with handle lists in declaration order (§15.12.5).
+`EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
+`REOBSERVATION` is not a closed token: it is an exact structured substitution rendering either `observation-failed` or
+`present: PRESENT; absent: ABSENT`, whose handle lists §15.12.5 fixes in declaration order with a literal `none` when empty.
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -3383,9 +3384,9 @@ record is written**. That order is load-bearing: a crash between AMQ creation an
 the record write leaves a session no record claims, which §15.12.4 refuses rather
 than adopts.
 
-**`run` is outside this contract entirely.** It provisions nothing, observes
-nothing here, emits no claim from §15.12.1, and its foreground contract in §15.2 is
-unchanged: it still composes a one-role fleet record for an absent session and
+**`run` is outside this contract entirely.** §15.12 adds no explicit preflight
+provisioning or observation to `run`, and `run` emits no claim from §15.12.1; its
+foreground contract in §15.2 is unchanged: it still composes a one-role fleet record for an absent session and
 extends an existing one. `run` is the foreground *alternative* to `launch`, not
 something that follows it, so requiring a prior `launch` would be a foreground
 redesign rather than a scoping decision. The consequence is stated plainly in
@@ -3628,8 +3629,10 @@ comfortable.
    leave directories behind while a single configuration wins, so agentctl claims
    no atomic or exclusive creation.
 4. **`run` still depends on AMQ's deprecated implicit creation.** This contract
-   removes that dependency from `launch` only. `run` provisions nothing, claims
-   nothing about AMQ, and reaches its session the way it always has — so when AMQ
+   removes that dependency from `launch` only. §15.12 adds no explicit preflight
+   provisioning or observation to `run`, and `run` claims nothing about AMQ — but
+   it still reaches its session the way it always has, and `coop exec` creating a
+   missing session is itself provisioning that mutates the AMQ tree. So when AMQ
    makes create-on-exec exit 3, foreground `run` into a not-yet-existing session
    breaks and `launch` does not. Closing that means a foreground redesign —
    reconciling §15.2 and §15.7, defining a provision-only path, and pinning the
