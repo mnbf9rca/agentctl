@@ -2271,7 +2271,7 @@ facts. It never reports harness execution from a PTY write. `attach` first prove
 durable fleet configuration, then requires an exactly observed tmux presentation by name and attaches only its typed
 session ID. It never treats a same-named presentation as fleet identity. Without a presentation:
 
-The exact literal is §15.8's `attach-no-presentation` row, which is one of the three multi-line templates: the refusal
+The exact literal is §15.8's `attach-no-presentation` row, one of that section's named multi-line templates: the refusal
 line followed by one `  agentctl attach --session SESSION ROLE` line per roster role. It is not paraphrased here.
 
 ### 15.8 Shim-plane exit map
@@ -2281,6 +2281,8 @@ uppercase words are typed substitutions, not discretionary prose. `SESSION`, `RO
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
 `EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
+`REOBSERVATION` is not a closed token: it is an exact structured substitution rendering either `observation-failed` or
+`present: [PRESENT]; absent: [ABSENT]`, whose bracketed handle lists §15.12.5 fixes in declaration order, empty rendering as `[]`.
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -2301,16 +2303,22 @@ after partial progress — three distinct causes of one permitted shape, none di
 §15.11.7 never writes descriptor 2 itself: it writes a proved-identical private descriptor when, and only when, it has
 proved by `fstat` that fd 2 names the same terminal, and otherwise fd 2's destination through a duplicate floored above
 2 — the destination is `stderr`'s in both cases, the descriptor is not, and that is stated here rather than left as an
-implied equivalence. No other section overrides any of the four. Three rows are explicitly multi-line and
+implied equivalence. No other section overrides any of the four. Five rows are explicitly multi-line and
 their additional lines are part of the selected template rather than an append: `launch-complete-detached` and
-`launch-complete-tmux` each carry exactly one hint line, and `attach-no-presentation` carries one line per roster role.
+`launch-complete-tmux` each carry one hint line, `attach-no-presentation` carries one line per roster role, and
+`amq-session-unowned` and `amq-session-shape-conflict` each carry their facts line followed by one line per admissible
+remedy, whose set and exact text §15.12.5 fixes. §15.12's success claim is **not** a row
+of its own and is never emitted before an outcome is known: the closed sentence of §15.12.1 is a defined final line of
+`launch-complete-detached` and `launch-complete-tmux`, emitted only when that success row is
+selected. `run` makes no such claim, because §15.12 does not apply to it. That line is the single exception to the `agentctl: ` prefix rule — it is the operator-facing claim itself and
+is rendered verbatim, unprefixed — and it is stated here rather than left to inference.
 No other row may emit more than one line. `status` table and JSON documents are the
 sole successful status output and therefore add no diagnostic line.
 
 | Typed outcome | Exit | Exact factual message template |
 |---|---:|---|
-| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE` |
-| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION` |
+| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
+| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
 | `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
 | `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
 | `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
@@ -2338,6 +2346,14 @@ sole successful status output and therefore add no diagnostic line.
 | `role-stale-when-required` | 4 | `agentctl: role ROLE in session SESSION has stale child PID CHILD after kill(CHILD, 0) returned ESRCH (stale-record)` |
 | `observed-self-target` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
 | `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
+| `amq-base-absent` | 5 | `agentctl: refusing to launch session SESSION; ROOT is not an AMQ delivery root; create it with: amq setup; no role was started (amq-base-absent)` |
+| `amq-session-recorded-absent` | 5 | `agentctl: refusing to launch session SESSION; a durable fleet record binds it but no AMQ session folder exists at PATH; no role was started (amq-session-recorded-absent)` |
+| `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
+| `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
+| `amq-root-unresolved` | 6 | `agentctl: could not resolve the AMQ base root for DIRECTORY: CAUSE; no role was started (amq-root-unresolved)` |
+| `amq-observation-failed` | 6 | `agentctl: could not observe the AMQ session list at ROOT: CAUSE; no role was started (amq-observation-failed)` |
+| `amq-session-create-failed` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited STATUS; post-state observed: REOBSERVATION; no role was started (amq-session-create-failed)` |
+| `amq-session-incomplete` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited 0 and discovery reports no mailbox directory for HANDLES; no role was started (amq-session-incomplete)` |
 | `orphan` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and recorded child PID CHILD was present with a matching start token (orphan)` |
 | `indeterminate-child-starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and the durable record is child-starting; independently prove child absence, then remove RECORD_PATH (indeterminate-child-starting)` |
 | `starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM holds the claim and the durable record is STATE (starting)` |
@@ -3328,6 +3344,368 @@ repository carries them; promotion must not omit either.
 2. **Fleets started by the older tmux-metadata lifecycle are not adopted.** They
    leave no shim record, are neither recognized nor migrated, and should be
    stopped with the binary that started them.
+
+
+### 15.12 AMQ session provisioning for a declared fleet
+
+Provenance: this contract answers issue #163 (AMENDED 2026-08-17, second entry),
+whose rulings are the contract. The settled design rationale — the probe matrix
+against `amq 0.61.0`, the rejected alternatives, and the upstream request — is
+non-normative and lives in
+[the joint proposal](../plans/2026-08-17-issue-163-amq-provisioning-joint-proposal.md).
+
+agentctl launches every role through `amq coop exec`, which creates a missing
+session as a side effect AMQ has deprecated and states will exit 3 at its next
+major release. This contract removes that dependency **from `launch`**: the declared
+fleet's AMQ session exists, or is proven ours, before any role starts. Foreground
+`run` is out of scope and keeps the dependency (§15.12.6).
+
+#### 15.12.1 The closed success claim
+
+The AMQ side of a successful launch is claimed in exactly these words —
+**"AMQ session discovery reports a mailbox directory for every declared role"** —
+as a defined final line of the `launch-complete-detached` and
+`launch-complete-tmux` templates, verbatim and unprefixed (§15.8). It is not a row
+of its own, so it is never emitted before the command's outcome is known. Nothing
+further about a role or its mailbox is claimed, in output or in acceptance
+criteria.
+
+This is §1.1 applied to a fact AMQ does not expose. At 0.61.0 a default send to a
+session-scoped role warns and delivers while the same send with `--strict` exits
+1, and no read-only AMQ command reports which of those two behaviors a given role
+will get. Directory discovery is therefore the strongest fact available, and the
+claim stops there. The surface-by-surface evidence is in the joint proposal.
+
+#### 15.12.2 Preflight order and the closed argv
+
+**Provisioning is `launch`'s, and only `launch`'s.** It runs after value
+validation, **before any tmux or runtime mutation, and before the durable fleet
+record is written**. That order is load-bearing: a crash between AMQ creation and
+the record write leaves a session no record claims, which §15.12.4 refuses rather
+than adopts.
+
+**`run` is outside this contract entirely.** §15.12 adds no explicit preflight
+provisioning or observation to `run`, and `run` emits no claim from §15.12.1; its
+foreground contract in §15.2 is unchanged: it still composes a one-role fleet record for an absent session and
+extends an existing one. `run` is the foreground *alternative* to `launch`, not
+something that follows it, so requiring a prior `launch` would be a foreground
+redesign rather than a scoping decision. The consequence is stated plainly in
+§15.12.6 rather than implied: `run` keeps the deprecated implicit-create
+dependency this contract removes from `launch`.
+
+The argv is closed and carries only validated identifiers:
+
+```
+amq env --json
+amq session list --root BASE --json
+amq init --root BASE/SESSION --agents ROLE[,ROLE...]
+```
+
+Resolution runs with `AM_ROOT`, `AM_BASE_ROOT`, `AM_SESSION`, `AM_ME`,
+`AM_ROOT_ID`, and `AM_BASE_ROOT_ID` cleared, and every later call passes `--root`
+explicitly: a partial environment exits 5 in AMQ's session-pin guard, and an
+absent `--root` resolves to the caller's own root, not the fleet's. `--force` and
+`--strict` are never passed. agentctl never creates, repairs, or deletes a
+directory in an AMQ tree itself; AMQ's own commands are the only writers.
+
+Role identifiers are already a strict subset of AMQ's grammar — agentctl session
+names match `^[a-z0-9][a-z0-9_-]*$` at most 32 bytes, AMQ canonical session names
+are `[a-z0-9_-]+`, and AMQ handles are `^[a-z0-9_-]+$` with no leading `-` — and a
+guard pins that relationship rather than a comment asserting it.
+
+**The base root's configuration, mailboxes, and metadata are not modified.**
+Across creation and across adoption those three surfaces are unchanged. The base
+root itself is not untouched, and this contract does not claim it is: creation adds
+the session child, which is a base-level effect and is the session. This
+is a claim about observed effect, not about what agentctl asks AMQ to run: exact
+argv proves the request, and a guard that observes those three base surfaces before
+and after proves the effect.
+
+#### 15.12.3 The state partition, and the predicate
+
+The base root is resolved first: unresolvable is `amq-root-unresolved`, and a path
+that is not a delivery root is `amq-base-absent`, which names `amq setup` — the
+operator's onboarding command, never agentctl's.
+
+Every remaining state is partitioned on **two** observations, the AMQ session
+folder and agentctl's durable fleet record, and each cell has exactly one typed
+outcome. No cell reaches `init` except the first.
+
+The outcome is selected by the first matching rule. Stating them in order rather
+than as a matrix is what makes the partition provably disjoint and total over
+every combination of folder, record, roster, and shape.
+
+Two record classes reach these rules: a record **valid under the current schema**,
+and a **pre-provenance record** as §15.12.4 defines it structurally. Both are
+usable records, and the rules treat them identically except at rule 6 and rule 7.
+
+1. **Unusable record.** The record is unreadable, unsafe, or carries any
+   record-schema defect other than the absent ownership-provenance member → the
+   strict fleet-record error already specified for that condition. This outranks
+   the folder observation: a record that cannot be read cannot be shown to bind
+   anything.
+2. **Folder absent, no record** → **create whole** with the `init` form of
+   §15.12.2. This is the only rule that issues `init`.
+3. **Folder absent, a usable record binds this session** — current or
+   pre-provenance → `amq-session-recorded-absent` (5). A recorded fleet whose
+   folder is gone is **never silently recreated**.
+4. **Contradicted ownership.** A usable record binds this session — current or
+   pre-provenance — and its roster differs from the declared roster →
+   `amq-session-unowned` (5), rendering both rosters. This outranks shape: a
+   differing roster settles that the folder is not this fleet's, whatever its
+   shape. `--adopt` does not apply.
+5. **Shape failure.** A declared role has no mailbox directory →
+   `amq-session-shape-conflict` (5), whether the record is absent,
+   pre-provenance, or current with an equal roster. `--adopt` does not apply: a
+   missing role is refused whether or not ownership could be asserted.
+6. **Absent record, or a pre-provenance record, with a passing shape** →
+   `amq-session-unowned` (5). The pre-provenance cell reached here is
+   `record-legacy-provenance-absent`. `--adopt` admits both, and adoption writes
+   `operator-asserted`.
+7. **A record valid under the current schema** — every member present, including
+   ownership provenance — **with an equal roster and a passing shape** →
+   **adopt**, read-only (§15.12.4).
+
+Rules 5, 6, and 7 are jointly total over every folder-present state that reaches
+them, so no combination falls through. Rule 7 is the only success.
+
+The shape predicate is **declared ⊆ discovered**, never equality: surplus handles
+are ignored, never pruned and never warned about, and a `user` mailbox created
+later by AMQ's own repair is not drift.
+
+An exit code alone never determines the post-state, in either direction. A nonzero
+`init` is a refusal **even when the requested directories appeared**, and exit 0 is
+not proof, so success requires the re-observed predicate as well. A refusal after a
+partial effect reports what was observed rather than hiding the command failure.
+
+#### 15.12.4 Adoption, and `--adopt`
+
+A session is **provably ours** when all of the following hold:
+
+1. agentctl's durable fleet record for that session reads under its strict schema,
+   with its session binding intact;
+2. the declared roster, normalized, **exactly equals** the record's roster — a
+   relaunch derives its declared roster from the record;
+3. the AMQ session folder resolves under the record's **stored** project
+   directory, not the working directory;
+4. discovery reports a mailbox directory for every recorded role.
+
+Roster equality is the ownership test; directory presence is the shape test; they
+are different questions and both must pass. Adoption issues **only the two
+read-only observation calls** of §15.12.2 and performs **no mutation of any kind**
+in the AMQ tree — no `init`, no repair, no send, no drain, no touch. Queued mail
+in an adopted session is untouched by adoption and by `coop exec`, and remains for
+the role's own later drain.
+
+`--adopt` substitutes the operator's assertion for **absent** ownership evidence.
+It does not override **contradicted** evidence — a record naming a different
+session identity is a positive signal that the folder is something else — and it
+does not override a shape failure: a missing declared role refuses with or without
+the flag.
+
+The fleet record carries how ownership was established as a required member with
+exactly two values, `evidence-derived` and `operator-asserted`, on the same rule
+§15.11.1 applies to `presentation`.
+
+**One record class, and one outcome that class can reach.** These are separate
+definitions, and conflating them makes the §15.12.3 rules unable to select what
+they claim.
+
+A **pre-provenance record** is a *structural* class: a version-1 record whose
+**sole record-schema defect is the absent ownership-provenance member**, with
+every other member present and valid and the session binding intact. The class is
+defined independently of the session folder, of roster equality, and of mailbox
+shape — a pre-provenance record is still that class when its folder is gone, when
+its roster differs, and when its shape fails. §15.12.3 assigns it an outcome per
+rule, exactly as it does a record valid under the current schema.
+
+`record-legacy-provenance-absent` names **only the adoptable outcome cell** — a
+pre-provenance record that reaches rule 6, meaning its folder is present, its
+roster is equal, and its shape passes. That cell refuses as `amq-session-unowned`
+on its own and is admissible under `--adopt`, which writes `operator-asserted`.
+
+Every schema defect other than the single missing member is `invalid-record`,
+refusing with or without the flag under rule 1. The exception is narrow
+deliberately: every fleet recorded before this member exists carries a
+pre-provenance record, including fleets running at the moment of upgrade, and
+forcing delete-and-relaunch on those would contradict the crash-recovery purpose
+`--adopt` exists to serve.
+
+#### 15.12.5 Typed refusals, which teach
+
+The refusals are `amq-root-unresolved` (6), `amq-base-absent` (5),
+`amq-session-create-failed` (6), `amq-session-incomplete` (6),
+`amq-session-shape-conflict` (5), `amq-session-recorded-absent` (5),
+`amq-observation-failed` (6), and `amq-session-unowned` (5). Each carries its exact
+literal template in §15.8's register. §15.12 adds no success row of its own: the
+closed sentence of §15.12.1 is a defined final line of the amended
+`launch-complete-detached` and `launch-complete-tmux` templates.
+
+Three refusals are selected by an exact triggering observation, and the selection
+is **phased** so that no two are reachable from one evidence set:
+
+| Row | Phase and triggering observation |
+|---|---|
+| `amq-observation-failed` | the `session list` call did not yield a parseable listing — a nonzero exit, or output that is not the documented JSON document — **outside the init-nonzero phase** |
+| `amq-session-create-failed` | `init` returned a nonzero status, whether or not directories appeared (§15.12.3). This row **absorbs** the re-observation that follows it: `REOBSERVATION` renders the observed post-state, and its defined values include `observation-failed` when that re-observation is itself unparseable |
+| `amq-session-incomplete` | `init` returned zero and the re-observed predicate still fails — a declared role has no mailbox directory |
+
+Precedence is explicit: once `init` has exited nonzero, the outcome is
+`amq-session-create-failed` whatever the subsequent re-observation does, and
+`amq-observation-failed` is reachable only from an observation not preceded by a
+nonzero `init` in the same launch. Neither row claims what agentctl did or could
+not do: both state the command's exit status and what was observed afterwards,
+because a nonzero `init` may still have created directories and an exit 0 does not
+prove agentctl authored them.
+
+The remedy lines are exact template text, not option names. Rendered in this order,
+each on its own line, each indented by two spaces:
+
+```
+  relaunch this fleet under a different session name
+  amq session list --root BASE --json
+  relaunch with --adopt to assert ownership yourself
+  remove the exact folder PATH by hand; deletion destroys every queued message in it
+```
+
+Only the second is a runnable command, and it is complete. The first and third are
+exact **teaching prose**, not commands: a runnable form would have to reproduce the
+operator's own flags, which a literal template cannot do, and §15.8 exactness wins
+over the convenience of a copyable line. The third is omitted wherever §15.12.5
+marks `--adopt` inadmissible, and the fourth is never runnable.
+
+`HANDLES` renders the declared roles in fleet-file declaration order, separated by a
+comma and a space. `REOBSERVATION` has a closed grammar and renders exactly one of two forms, chosen
+by whether the post-`init` observation succeeded:
+
+- `observation-failed` — the re-observation itself yielded no parseable listing.
+- `present: [PRESENT]; absent: [ABSENT]` — where each bracketed list renders
+  declared roles in fleet-file declaration order, comma-space separated, and an
+  empty list renders as `[]`.
+
+The brackets are the empty-list sentinel because a bare word cannot be one: `none`
+matches the role grammar, so `present: none` could not distinguish an empty list
+from a declared role named `none`. Brackets cannot occur in a validated handle, so
+`present: []; absent: [none]` and `present: [none]; absent: []` are distinct.
+
+The second form is exhaustive over the observable outcomes, including the partial
+one `init` can produce by creating some requested directories before failing. It
+also states *what* was observed — a mailbox directory per declared role — rather
+than leaving "present" to mean the folder, one mailbox, or the whole predicate.
+
+`amq-session-unowned` covers exactly the ownership-evidence cells of §15.12.3 — a
+folder with no record, a roster mismatch, and `record-legacy-provenance-absent` —
+and renders which evidence was absent or mismatched, rendering both rosters in the
+mismatch case. The neighbouring conditions keep their own rows rather than being
+folded into it: a missing declared role is `amq-session-shape-conflict`, a
+recorded fleet whose folder is gone is `amq-session-recorded-absent`, and an
+unreadable or unsafe record keeps its strict fleet-record error.
+
+Both `amq-session-unowned` and `amq-session-shape-conflict` then **enumerate the
+operator's options**, as `attach-no-presentation` does for attachable roles — and
+they enumerate only options that can succeed. A refusal never teaches a command
+this contract guarantees will refuse:
+
+| Row and evidence | Options rendered |
+|---|---|
+| `amq-session-unowned`, absent record or `record-legacy-provenance-absent` | different session name, inspect the folder, remove the folder and relaunch, **and** relaunch with `--adopt` |
+| `amq-session-unowned`, contradicted (roster differs) | different session name, inspect the folder, remove the folder and relaunch — `--adopt` is **not** offered, because §15.12.3 refuses it for this evidence |
+| `amq-session-shape-conflict`, any of its cells | the same three admissible options; `--adopt` is never offered, because no cell of rule 5 is adoptable |
+
+The removal option is **not** rendered as a runnable command in either case: it
+names the exact resolved folder and states that deletion destroys every queued
+message in it, so the destructive step is one the operator composes deliberately.
+
+#### 15.12.6 Accepted limitations
+
+These are recorded because they are real and were accepted, not because they are
+comfortable.
+
+1. **`--strict` sends involving a session-scoped role exit 1.** A default send to
+   or from such a role prints an unknown-handle warning and delivers; the same
+   send with `--strict` exits 1. Consumption, listing, receipts, and wake are
+   unaffected. agentctl never passes `--strict`; the upstream request in the joint
+   proposal is the route out.
+2. **`user` is not declared, and may appear anyway.** Nothing auto-creates it;
+   `amq doctor` reports an error for its absent mailbox in a correctly shaped
+   session, and AMQ's own repair or a first delivery may create it later.
+   agentctl corrects neither condition.
+3. **Creation is not atomic.** Concurrent creators of one session name can each
+   leave directories behind while a single configuration wins, so agentctl claims
+   no atomic or exclusive creation.
+4. **`run` still depends on AMQ's deprecated implicit creation.** This contract
+   removes that dependency from `launch` only. §15.12 adds no explicit preflight
+   provisioning or observation to `run`, and `run` claims nothing about AMQ — but
+   it still reaches its session the way it always has, and `coop exec` creating a
+   missing session is itself provisioning that mutates the AMQ tree. So when AMQ
+   makes create-on-exec exit 3, foreground `run` into a not-yet-existing session
+   breaks and `launch` does not. Closing that means a foreground redesign —
+   reconciling §15.2 and §15.7, defining a provision-only path, and pinning the
+   observation that would support a run-side claim — which is an operator scope
+   decision deliberately not taken here, warranted if the AMQ major lands or a
+   real operator need surfaces.
+5. **Ownership binds a directory, not a tree.** The record binds the stored
+   project directory; if that directory's AMQ binding changes between creation and
+   adoption, ownership evidence can be wrong without being loud. A documented
+   stable physical-root identity is requested upstream.
+
+#### 15.12.7 Required guards
+
+These assert the properties above, not their mechanisms.
+
+- Exact argv for all three commands against the fake runner, with the environment
+  cleared for the resolution call and **every post-resolution call carrying an
+  explicit `--root`**, plus a guard that no path passes `--force` or `--strict`.
+- Each rule of §15.12.3 selects its stated outcome, and only rule 2 issues `init`;
+  a folder-absent state with a binding record never reaches `init`. The
+  combinations that distinguish the ordering are covered explicitly: an unreadable
+  record with an absent folder takes the record error rather than creating; a
+  differing roster takes the contradicted outcome whatever the shape and whether
+  the record is current or pre-provenance; a failing shape takes the shape
+  conflict with an absent record, a pre-provenance record, and a current record
+  with an equal roster alike; and a pre-provenance record reaches the adoptable
+  outcome only when the shape passes.
+- The predicate is subset, not equality: a session carrying surplus handles and a
+  later `user` mailbox still satisfies it, and nothing is pruned.
+- A nonzero `init` that nonetheless created directories refuses, and the refusal
+  renders the observed post-state.
+- Adoption issues exactly the two observation calls and no mutating call; the
+  recorded ownership provenance is asserted for the evidence-derived, `--adopt`,
+  and pre-provenance-record paths.
+- `--adopt` is admitted for absent evidence and for
+  `record-legacy-provenance-absent`, and refused for a contradicted record, a
+  shape failure, and every other `invalid-record` defect.
+- Queued messages survive adoption byte-identically, and remain deliverable
+  afterwards.
+- Each refusal row renders its distinguishing facts, and `amq-session-unowned`
+  renders the option set its evidence permits: four options for an absent record
+  or `record-legacy-provenance-absent`, three for contradicted evidence, with `--adopt` never named in the
+  contradicted case and the removal option in non-runnable form in both.
+- The closed sentence of §15.12.1 is asserted verbatim and unprefixed as the final
+  line of each amended success template, is absent from every refusal, and is never
+  emitted before the command's outcome is selected.
+- **The base configuration, mailboxes, and metadata are unchanged.** Against a
+  throwaway base root, those three surfaces are observed before and after both
+  creation and adoption and are identical, with the session child as the only
+  base-level difference. The guard asserts those three, not an untouched root.
+- The structural pre-provenance class is classified by the rules, not by its name:
+  a pre-provenance record with an absent folder selects rule 3, with a differing
+  roster selects rule 4, and with a failing shape selects rule 5.
+- Role and session identifiers are proven a subset of AMQ's grammar.
+
+#### 15.12.8 Release obligations
+
+Two statements are owed to the release that ships this contract.
+
+1. **agentctl no longer relies on AMQ's deprecated create-on-exec path.** The
+   session is provisioned before any role starts.
+2. **Fleets recorded before the ownership-provenance member need `--adopt` once.**
+   Their records are pre-provenance records: the launch refuses until
+   the operator relaunches with `--adopt`, which records `operator-asserted`
+   ownership. No mail is lost and no folder needs removing.
+3. **The SECURITY.md delta for this contract rides the first implementation PR.**
+   It is drafted in the plan document. SECURITY.md states current operator truth,
+   so it may not assert this behavior while only the specification has landed.
 
 
 ## 16. Embedded skill installation
