@@ -2271,7 +2271,7 @@ facts. It never reports harness execution from a PTY write. `attach` first prove
 durable fleet configuration, then requires an exactly observed tmux presentation by name and attaches only its typed
 session ID. It never treats a same-named presentation as fleet identity. Without a presentation:
 
-The exact literal is §15.8's `attach-no-presentation` row, which is one of the three multi-line templates: the refusal
+The exact literal is §15.8's `attach-no-presentation` row, one of that section's named multi-line templates: the refusal
 line followed by one `  agentctl attach --session SESSION ROLE` line per roster role. It is not paraphrased here.
 
 ### 15.8 Shim-plane exit map
@@ -2280,7 +2280,8 @@ Every diagnostic is one line on stderr with the `agentctl: ` prefix and trailing
 uppercase words are typed substitutions, not discretionary prose. `SESSION`, `ROLE`, every path/root/executable/flag,
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
-`EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
+`EXPECTED_TYPE`, `REMAINING`, `PHASE`, `REOBSERVATION`, and boolean literals are closed canonical tokens rendered without quotes.
+`REOBSERVATION` has exactly three values — `directories-present`, `directories-absent`, `observation-failed` (§15.12.5).
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -2346,6 +2347,7 @@ sole successful status output and therefore add no diagnostic line.
 | `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
 | `amq-base-absent` | 5 | `agentctl: refusing to launch session SESSION; ROOT is not an AMQ delivery root; create it with: amq setup; no role was started (amq-base-absent)` |
 | `amq-session-recorded-absent` | 5 | `agentctl: refusing to launch session SESSION; a durable fleet record binds it but no AMQ session folder exists at PATH; no role was started (amq-session-recorded-absent)` |
+| `amq-session-unprovisioned` | 5 | `agentctl: refusing to run role ROLE in session SESSION; no AMQ session folder exists at PATH and run provisions nothing; provision it with agentctl launch, or agentctl launch --adopt if a folder from an earlier run remains; no role was started (amq-session-unprovisioned)` |
 | `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
 | `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
 | `amq-root-unresolved` | 6 | `agentctl: could not resolve the AMQ base root for DIRECTORY: CAUSE; no role was started (amq-root-unresolved)` |
@@ -3375,10 +3377,19 @@ claim stops there. The surface-by-surface evidence is in the joint proposal.
 
 #### 15.12.2 Preflight order and the closed argv
 
-Provisioning runs at `launch` and `run`, after value validation, **before any
-tmux or runtime mutation, and before the durable fleet record is written**. That
-order is load-bearing: a crash between AMQ creation and the record write leaves a
-session no record claims, which §15.12.4 refuses rather than adopts.
+**Provisioning is `launch`'s, and only `launch`'s.** It runs after value
+validation, **before any tmux or runtime mutation, and before the durable fleet
+record is written**. That order is load-bearing: a crash between AMQ creation and
+the record write leaves a session no record claims, which §15.12.4 refuses rather
+than adopts.
+
+`run` provisions nothing. A foreground role requires a session `launch` already
+provisioned, and `run` against an unprovisioned session refuses with
+`amq-session-unprovisioned` (5), whose teaching names `launch` — including
+`launch --adopt`, which is how a folder left by a crashed first `run` is recovered.
+The recovery path therefore exists; it is reached through `launch`. Giving `run`
+its own provisioning and adoption surface is deliberately not opened here
+(§15.12.6).
 
 The argv is closed and carries only validated identifiers:
 
@@ -3400,9 +3411,10 @@ names match `^[a-z0-9][a-z0-9_-]*$` at most 32 bytes, AMQ canonical session name
 are `[a-z0-9_-]+`, and AMQ handles are `^[a-z0-9_-]+$` with no leading `-` — and a
 guard pins that relationship rather than a comment asserting it.
 
-**The base root is not modified.** Across creation and across adoption, the base
-root's configuration, its agent mailboxes, and its `meta/` contents are unchanged;
-the session child itself is the only base-level effect, and it is the session. This
+**The base root's configuration, mailboxes, and metadata are not modified.**
+Across creation and across adoption those three surfaces are unchanged. The base
+root itself is not untouched, and this contract does not claim it is: creation adds
+the session child, which is a base-level effect and is the session. This
 is a claim about observed effect, not about what agentctl asks AMQ to run: exact
 argv proves the request, and a guard that observes those three base surfaces before
 and after proves the effect.
@@ -3522,7 +3534,8 @@ forcing delete-and-relaunch on those would contradict the crash-recovery purpose
 The refusals are `amq-root-unresolved` (6), `amq-base-absent` (5),
 `amq-session-create-failed` (6), `amq-session-incomplete` (6),
 `amq-session-shape-conflict` (5), `amq-session-recorded-absent` (5),
-`amq-observation-failed` (6), and `amq-session-unowned` (5). Each carries its exact
+`amq-observation-failed` (6), `amq-session-unprovisioned` (5), and
+`amq-session-unowned` (5). Each carries its exact
 literal template in §15.8's register. §15.12 adds no success row of its own: the
 closed sentence of §15.12.1 is a defined final line of the amended
 `launch-complete-detached`, `launch-complete-tmux`, and `run-child-exited`
@@ -3549,15 +3562,21 @@ The remedy lines are exact template text, not option names. Rendered in this ord
 each on its own line, each indented by two spaces:
 
 ```
-  agentctl launch --session OTHER_SESSION ...
-  amq list --session SESSION
-  agentctl launch --session SESSION --adopt ...
+  relaunch this fleet under a different session name
+  amq session list --root BASE --json
+  relaunch with --adopt to assert ownership yourself
   remove the exact folder PATH by hand; deletion destroys every queued message in it
 ```
 
-The third line is omitted where §15.12.5 marks `--adopt` inadmissible, and the
-fourth is never a runnable command. `HANDLES` renders the declared roles in
-fleet-file declaration order, separated by a comma and a space.
+Only the second is a runnable command, and it is complete. The first and third are
+exact **teaching prose**, not commands: a runnable form would have to reproduce the
+operator's own flags, which a literal template cannot do, and §15.8 exactness wins
+over the convenience of a copyable line. The third is omitted wherever §15.12.5
+marks `--adopt` inadmissible, and the fourth is never runnable.
+
+`HANDLES` renders the declared roles in fleet-file declaration order, separated by a
+comma and a space. `REOBSERVATION` is closed, with exactly three values:
+`directories-present`, `directories-absent`, and `observation-failed`.
 
 `amq-session-unowned` covers exactly the ownership-evidence cells of §15.12.3 — a
 folder with no record, a roster mismatch, and `record-legacy-provenance-absent` —
@@ -3599,7 +3618,12 @@ comfortable.
 3. **Creation is not atomic.** Concurrent creators of one session name can each
    leave directories behind while a single configuration wins, so agentctl claims
    no atomic or exclusive creation.
-4. **Ownership binds a directory, not a tree.** The record binds the stored
+4. **`run` has no provisioning or adoption surface.** Provisioning is `launch`'s
+   alone, and `run` refuses against an unprovisioned session rather than creating
+   or adopting one. Recovery of a folder left by a crashed `run` goes through
+   `launch --adopt`. Whether foreground parity is worth its own flags and rows is
+   an operator scope decision, deliberately not taken here.
+5. **Ownership binds a directory, not a tree.** The record binds the stored
    project directory; if that directory's AMQ binding changes between creation and
    adoption, ownership evidence can be wrong without being loud. A documented
    stable physical-root identity is requested upstream.
@@ -3639,10 +3663,10 @@ These assert the properties above, not their mechanisms.
 - The closed sentence of §15.12.1 is asserted verbatim and unprefixed as the final
   line of each amended success template, is absent from every refusal, and is never
   emitted before the command's outcome is selected.
-- **The base root is untouched.** Against a throwaway base root, the base
-  configuration, the base agent mailboxes, and the base `meta/` contents are
-  observed before and after both creation and adoption and are unchanged, with the
-  session child as the only base-level difference.
+- **The base configuration, mailboxes, and metadata are unchanged.** Against a
+  throwaway base root, those three surfaces are observed before and after both
+  creation and adoption and are identical, with the session child as the only
+  base-level difference. The guard asserts those three, not an untouched root.
 - The structural pre-provenance class is classified by the rules, not by its name:
   a pre-provenance record with an absent folder selects rule 3, with a differing
   roster selects rule 4, and with a failing shape selects rule 5.

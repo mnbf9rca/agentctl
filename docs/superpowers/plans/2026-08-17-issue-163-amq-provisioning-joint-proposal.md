@@ -486,3 +486,27 @@ budget was at 1553 of 1650 when this was drafted: fitting this text needs
 compression elsewhere, and the earlier attempt weakened two release-verification
 qualifiers ("three-confirmation" live smoke, "exhaustive" Task 8 checks) to make
 room. Those qualifiers are load-bearing; find the words somewhere else.
+
+---
+
+## Amendment, 2026-08-17 — runnable remedy commands narrowed to one
+
+Recorded because this changes content both authors approved.
+
+§6.4 of this proposal promised that the teaching refusal's remedies would be
+runnable commands apart from the deliberately non-runnable removal line. Two of
+them cannot be: `relaunch under a different session name` and `relaunch with
+--adopt` would each have to reproduce the operator's own launch flags, which a
+literal template cannot do, and §15.8 requires exact literal templates. The spec
+therefore renders those two as exact **teaching prose** naming the flag, keeps the
+inspect remedy runnable, and keeps the removal line non-runnable.
+
+Two related corrections landed with it. The inspect remedy was drafted as
+`amq list --session SESSION`, which lists one agent's inbox messages and requires
+`--me`; it cannot inspect a folder's mailbox shape, so it taught a command that did
+not do what the refusal said. It is now `amq session list --root BASE --json`,
+which reports exactly the fact in question. And provisioning is scoped to `launch`:
+`run` provisions nothing and refuses against an unprovisioned session, with
+recovery of a crashed-run folder reached through `launch --adopt`.
+
+Trade accepted: exactness and §1.1 over the convenience of a copyable line.
