@@ -3634,7 +3634,8 @@ comfortable.
    breaks and `launch` does not. Closing that means a foreground redesign —
    reconciling §15.2 and §15.7, defining a provision-only path, and pinning the
    observation that would support a run-side claim — which is an operator scope
-   decision deliberately not taken here.
+   decision deliberately not taken here, warranted if the AMQ major lands or a
+   real operator need surfaces.
 5. **Ownership binds a directory, not a tree.** The record binds the stored
    project directory; if that directory's AMQ binding changes between creation and
    adoption, ownership evidence can be wrong without being loud. A documented
