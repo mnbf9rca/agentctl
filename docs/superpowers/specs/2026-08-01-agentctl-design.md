@@ -3393,16 +3393,36 @@ Every remaining state is partitioned on **two** observations, the AMQ session
 folder and agentctl's durable fleet record, and each cell has exactly one typed
 outcome. No cell reaches `init` except the first.
 
-| Session folder | Durable fleet record | Outcome |
-|---|---|---|
-| absent | absent | **create whole** with the `init` form of §15.12.2 |
-| absent | present and binding this session | refuse `amq-session-recorded-absent` (5); a recorded fleet whose folder is gone is **never silently recreated** |
-| present | absent | refuse `amq-session-unowned` (5) — admissible under `--adopt` |
-| present | present, roster equal, shape passes | **adopt**, read-only (§15.12.4) |
-| present | present, roster differs | refuse `amq-session-unowned` (5), rendering both rosters; `--adopt` does **not** apply, because the evidence is contradicted rather than absent |
-| present | present, roster equal, shape fails | refuse `amq-session-shape-conflict` (5); `--adopt` does **not** apply |
-| present | legacy record (§15.12.4) | refuse `amq-session-unowned` (5) — admissible under `--adopt` |
-| present | unreadable or unsafe | refuse with the strict fleet-record error already specified for that condition |
+The outcome is selected by the first matching rule. Stating them in order rather
+than as a matrix is what makes the partition provably disjoint and total over
+every combination of folder, record, roster, and shape.
+
+1. **Unusable record.** The record is unreadable, unsafe, or carries any schema
+   defect other than the single legacy condition of §15.12.4 → the strict
+   fleet-record error already specified for that condition. This outranks the
+   folder observation: a record that cannot be read cannot be shown to bind
+   anything.
+2. **Folder absent, no record** → **create whole** with the `init` form of
+   §15.12.2. This is the only rule that issues `init`.
+3. **Folder absent, a record binds this session** — current or legacy →
+   `amq-session-recorded-absent` (5). A recorded fleet whose folder is gone is
+   **never silently recreated**.
+4. **Contradicted ownership.** A record binds this session — current or legacy —
+   and its roster differs from the declared roster → `amq-session-unowned` (5),
+   rendering both rosters. This outranks shape: a differing roster settles that
+   the folder is not this fleet's, whatever its shape. `--adopt` does not apply.
+5. **Shape failure.** A declared role has no mailbox directory →
+   `amq-session-shape-conflict` (5), whether the record is absent, legacy, or
+   current with an equal roster. `--adopt` does not apply: a missing role is
+   refused whether or not ownership could be asserted.
+6. **Absent or legacy evidence, shape passing** → `amq-session-unowned` (5).
+   `--adopt` admits it, and adoption writes `operator-asserted`.
+7. **A record valid under the current schema** — every member present, including
+   ownership provenance — **with an equal roster and a passing shape** →
+   **adopt**, read-only (§15.12.4).
+
+Rules 5, 6, and 7 are jointly total over every folder-present state that reaches
+them, so no combination falls through. Rule 7 is the only success.
 
 The shape predicate is **declared ⊆ discovered**, never equality: surplus handles
 are ignored, never pruned and never warned about, and a `user` mailbox created
@@ -3470,11 +3490,17 @@ recorded fleet whose folder is gone is `amq-session-recorded-absent`, and an
 unreadable or unsafe record keeps its strict fleet-record error.
 
 It then **enumerates the operator's options**, as `attach-no-presentation` does
-for attachable roles: launch under a different session name, inspect the folder,
-remove the folder and relaunch, or relaunch with `--adopt`. The removal option is
-**not** rendered as a runnable command: it names the exact resolved folder and
-states that deletion destroys every queued message in it, so the destructive step
-is one the operator composes deliberately.
+for attachable roles — and it enumerates only options that can succeed. A refusal
+never teaches a command this contract guarantees will refuse:
+
+| Evidence | Options rendered |
+|---|---|
+| absent, or `record-legacy-provenance-absent` | different session name, inspect the folder, remove the folder and relaunch, **and** relaunch with `--adopt` |
+| contradicted (roster differs) | different session name, inspect the folder, remove the folder and relaunch — `--adopt` is **not** offered, because §15.12.3 refuses it for this evidence |
+
+The removal option is **not** rendered as a runnable command in either case: it
+names the exact resolved folder and states that deletion destroys every queued
+message in it, so the destructive step is one the operator composes deliberately.
 
 #### 15.12.6 Accepted limitations
 
@@ -3505,9 +3531,15 @@ These assert the properties above, not their mechanisms.
 - Exact argv for all three commands against the fake runner, with the environment
   cleared for the resolution call and **every post-resolution call carrying an
   explicit `--root`**, plus a guard that no path passes `--force` or `--strict`.
-- Every cell of the §15.12.3 partition selects its stated outcome, and only the
-  first cell issues `init`; a folder-absent state with a binding record never
-  reaches `init`.
+- Each rule of §15.12.3 selects its stated outcome, and only rule 2 issues `init`;
+  a folder-absent state with a binding record never reaches `init`. The
+  combinations that distinguish the ordering are covered explicitly: an unreadable
+  record with an absent folder takes the record error rather than creating; a
+  differing roster takes the contradicted outcome whatever the shape and whether
+  the record is current or legacy; a failing shape takes the shape conflict with
+  an absent record, a legacy record, and a current record with an equal roster
+  alike; and a legacy record reaches the adoptable outcome only when the shape
+  passes.
 - The predicate is subset, not equality: a session carrying surplus handles and a
   later `user` mailbox still satisfies it, and nothing is pruned.
 - A nonzero `init` that nonetheless created directories refuses, and the refusal
@@ -3521,7 +3553,9 @@ These assert the properties above, not their mechanisms.
 - Queued messages survive adoption byte-identically, and remain deliverable
   afterwards.
 - Each refusal row renders its distinguishing facts, and `amq-session-unowned`
-  renders all four options with the removal option in non-runnable form.
+  renders the option set its evidence permits: four options for absent or legacy
+  evidence, three for contradicted evidence, with `--adopt` never named in the
+  contradicted case and the removal option in non-runnable form in both.
 - Success output equals the closed sentence of §15.12.1 with nothing added.
 - Role and session identifiers are proven a subset of AMQ's grammar.
 
