@@ -49,11 +49,12 @@ func TestReleaseChecklistNamesEachPromotionClaimSource(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Detached launch in an ordinary terminal",
-		"Per-role attach, repaint, verbatim input, and clean disconnect/re-attach",
+		"Per-role attach, verbatim input, and clean disconnect/re-attach",
 		"Exact SIGWINCH frame emission and TIOCSWINSZ application",
 		"handled/ignored/blocked signal and terminal restoration",
 		".github/workflows/release.yml",
 		"Publish (undraft) release",
+		"golang.org/x/sys v0.47.0",
 		".goreleaser.yaml",
 		"archives.files",
 		"LICENSES/golang.org/x/sys/LICENSE",

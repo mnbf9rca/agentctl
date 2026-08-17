@@ -62,7 +62,7 @@ automated result into a live observation.
 1. **Detached launch in an ordinary terminal** — the live result block records
    the detached fleet, both roles still running after the B.C3 viewer closure,
    and teardown exit 3 with the detached durable fleet absent.
-2. **Per-role attach, repaint, verbatim input, and clean disconnect/re-attach**
+2. **Per-role attach, verbatim input, and clean disconnect/re-attach**
    — the live result block records the B.C1 role surfaces, B.C2 fresh replacement
    and reattach, and B.C3 viewer closure with both roles still running. The
    named automated guards are
@@ -94,7 +94,10 @@ automated result into a live observation.
 5. **Built-artifact executable smoke** — `.github/workflows/release.yml` runs
    the exact Darwin arm64 and amd64 binaries produced in `dist/` by the release
    build, requires both to report the expected release version, and completes
-   that smoke before `Publish (undraft) release`.
+   that smoke before `Publish (undraft) release`. The §15.9 metadata obligation
+   is sourced by the `go.mod` pin of `golang.org/x/sys v0.47.0`; the
+   `hack/release-verify.sh` Task 8 assertion fails unless `go version -m` on the
+   candidate records that dependency and version.
 6. **Archive-license contents** — `.goreleaser.yaml` declares
    `LICENSES/golang.org/x/sys/LICENSE` and the other required license materials
    in `archives.files`, which includes them in every Darwin archive before the
