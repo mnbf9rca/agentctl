@@ -2281,7 +2281,7 @@ uppercase words are typed substitutions, not discretionary prose. `SESSION`, `RO
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
 `EXPECTED_TYPE`, `REMAINING`, `PHASE`, `REOBSERVATION`, and boolean literals are closed canonical tokens rendered without quotes.
-`REOBSERVATION` has exactly three values — `directories-present`, `directories-absent`, `observation-failed` (§15.12.5).
+`REOBSERVATION` renders either `observation-failed` or `present: PRESENT; absent: ABSENT` with handle lists in declaration order (§15.12.5).
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -2302,14 +2302,14 @@ after partial progress — three distinct causes of one permitted shape, none di
 §15.11.7 never writes descriptor 2 itself: it writes a proved-identical private descriptor when, and only when, it has
 proved by `fstat` that fd 2 names the same terminal, and otherwise fd 2's destination through a duplicate floored above
 2 — the destination is `stderr`'s in both cases, the descriptor is not, and that is stated here rather than left as an
-implied equivalence. No other section overrides any of the four. Six rows are explicitly multi-line and
+implied equivalence. No other section overrides any of the four. Five rows are explicitly multi-line and
 their additional lines are part of the selected template rather than an append: `launch-complete-detached` and
 `launch-complete-tmux` each carry one hint line, `attach-no-presentation` carries one line per roster role, and
 `amq-session-unowned` and `amq-session-shape-conflict` each carry their facts line followed by one line per admissible
-remedy, whose set and exact text §15.12.5 fixes. The sixth is `run-child-exited`. §15.12's success claim is **not** a row
+remedy, whose set and exact text §15.12.5 fixes. §15.12's success claim is **not** a row
 of its own and is never emitted before an outcome is known: the closed sentence of §15.12.1 is a defined final line of
-`launch-complete-detached`, `launch-complete-tmux`, and `run-child-exited`, emitted only when that success row is
-selected. That line is the single exception to the `agentctl: ` prefix rule — it is the operator-facing claim itself and
+`launch-complete-detached` and `launch-complete-tmux`, emitted only when that success row is
+selected. `run` makes no such claim, because §15.12 does not apply to it. That line is the single exception to the `agentctl: ` prefix rule — it is the operator-facing claim itself and
 is rendered verbatim, unprefixed — and it is stated here rather than left to inference.
 No other row may emit more than one line. `status` table and JSON documents are the
 sole successful status output and therefore add no diagnostic line.
@@ -2320,7 +2320,7 @@ sole successful status output and therefore add no diagnostic line.
 | `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
 | `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
 | `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
-| `run-child-exited` | 0 | line 1 `agentctl: foreground role ROLE in session SESSION exited with status 0`; line 2 the §15.12.1 closed sentence, verbatim and unprefixed |
+| `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
 | `delivery-submitted` | 0 | `agentctl: OP for role ROLE in session SESSION wrote BYTES bytes and observed submit` |
 | `stop-child-exited` | 0 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP and observed child PID CHILD exit; no PTY input was written` |
 | `unclassified` | 1 | `agentctl: OP failed for session SESSION: CAUSE (unclassified)` |
@@ -2347,7 +2347,6 @@ sole successful status output and therefore add no diagnostic line.
 | `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
 | `amq-base-absent` | 5 | `agentctl: refusing to launch session SESSION; ROOT is not an AMQ delivery root; create it with: amq setup; no role was started (amq-base-absent)` |
 | `amq-session-recorded-absent` | 5 | `agentctl: refusing to launch session SESSION; a durable fleet record binds it but no AMQ session folder exists at PATH; no role was started (amq-session-recorded-absent)` |
-| `amq-session-unprovisioned` | 5 | `agentctl: refusing to run role ROLE in session SESSION; no AMQ session folder exists at PATH and run provisions nothing; provision it with agentctl launch, or agentctl launch --adopt if a folder from an earlier run remains; no role was started (amq-session-unprovisioned)` |
 | `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
 | `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
 | `amq-root-unresolved` | 6 | `agentctl: could not resolve the AMQ base root for DIRECTORY: CAUSE; no role was started (amq-root-unresolved)` |
@@ -3356,15 +3355,16 @@ non-normative and lives in
 
 agentctl launches every role through `amq coop exec`, which creates a missing
 session as a side effect AMQ has deprecated and states will exit 3 at its next
-major release. This contract removes that dependency: the declared fleet's AMQ
-session exists, or is proven ours, before any role starts.
+major release. This contract removes that dependency **from `launch`**: the declared
+fleet's AMQ session exists, or is proven ours, before any role starts. Foreground
+`run` is out of scope and keeps the dependency (§15.12.6).
 
 #### 15.12.1 The closed success claim
 
 The AMQ side of a successful launch is claimed in exactly these words —
 **"AMQ session discovery reports a mailbox directory for every declared role"** —
-as a defined final line of the `launch-complete-detached`, `launch-complete-tmux`,
-and `run-child-exited` templates, verbatim and unprefixed (§15.8). It is not a row
+as a defined final line of the `launch-complete-detached` and
+`launch-complete-tmux` templates, verbatim and unprefixed (§15.8). It is not a row
 of its own, so it is never emitted before the command's outcome is known. Nothing
 further about a role or its mailbox is claimed, in output or in acceptance
 criteria.
@@ -3383,13 +3383,14 @@ record is written**. That order is load-bearing: a crash between AMQ creation an
 the record write leaves a session no record claims, which §15.12.4 refuses rather
 than adopts.
 
-`run` provisions nothing. A foreground role requires a session `launch` already
-provisioned, and `run` against an unprovisioned session refuses with
-`amq-session-unprovisioned` (5), whose teaching names `launch` — including
-`launch --adopt`, which is how a folder left by a crashed first `run` is recovered.
-The recovery path therefore exists; it is reached through `launch`. Giving `run`
-its own provisioning and adoption surface is deliberately not opened here
-(§15.12.6).
+**`run` is outside this contract entirely.** It provisions nothing, observes
+nothing here, emits no claim from §15.12.1, and its foreground contract in §15.2 is
+unchanged: it still composes a one-role fleet record for an absent session and
+extends an existing one. `run` is the foreground *alternative* to `launch`, not
+something that follows it, so requiring a prior `launch` would be a foreground
+redesign rather than a scoping decision. The consequence is stated plainly in
+§15.12.6 rather than implied: `run` keeps the deprecated implicit-create
+dependency this contract removes from `launch`.
 
 The argv is closed and carries only validated identifiers:
 
@@ -3534,12 +3535,10 @@ forcing delete-and-relaunch on those would contradict the crash-recovery purpose
 The refusals are `amq-root-unresolved` (6), `amq-base-absent` (5),
 `amq-session-create-failed` (6), `amq-session-incomplete` (6),
 `amq-session-shape-conflict` (5), `amq-session-recorded-absent` (5),
-`amq-observation-failed` (6), `amq-session-unprovisioned` (5), and
-`amq-session-unowned` (5). Each carries its exact
+`amq-observation-failed` (6), and `amq-session-unowned` (5). Each carries its exact
 literal template in §15.8's register. §15.12 adds no success row of its own: the
 closed sentence of §15.12.1 is a defined final line of the amended
-`launch-complete-detached`, `launch-complete-tmux`, and `run-child-exited`
-templates.
+`launch-complete-detached` and `launch-complete-tmux` templates.
 
 Three refusals are selected by an exact triggering observation, and the selection
 is **phased** so that no two are reachable from one evidence set:
@@ -3575,8 +3574,18 @@ over the convenience of a copyable line. The third is omitted wherever §15.12.5
 marks `--adopt` inadmissible, and the fourth is never runnable.
 
 `HANDLES` renders the declared roles in fleet-file declaration order, separated by a
-comma and a space. `REOBSERVATION` is closed, with exactly three values:
-`directories-present`, `directories-absent`, and `observation-failed`.
+comma and a space. `REOBSERVATION` is closed and renders exactly one of two forms, chosen by whether
+the post-`init` observation succeeded:
+
+- `observation-failed` — the re-observation itself yielded no parseable listing.
+- `present: PRESENT; absent: ABSENT` — where each list renders declared roles in
+  fleet-file declaration order, comma-space separated, and either renders the
+  literal `none` when empty.
+
+The second form is exhaustive over the observable outcomes, including the partial
+one `init` can produce by creating some requested directories before failing. It
+also states *what* was observed — a mailbox directory per declared role — rather
+than leaving "present" to mean the folder, one mailbox, or the whole predicate.
 
 `amq-session-unowned` covers exactly the ownership-evidence cells of §15.12.3 — a
 folder with no record, a roster mismatch, and `record-legacy-provenance-absent` —
@@ -3618,11 +3627,14 @@ comfortable.
 3. **Creation is not atomic.** Concurrent creators of one session name can each
    leave directories behind while a single configuration wins, so agentctl claims
    no atomic or exclusive creation.
-4. **`run` has no provisioning or adoption surface.** Provisioning is `launch`'s
-   alone, and `run` refuses against an unprovisioned session rather than creating
-   or adopting one. Recovery of a folder left by a crashed `run` goes through
-   `launch --adopt`. Whether foreground parity is worth its own flags and rows is
-   an operator scope decision, deliberately not taken here.
+4. **`run` still depends on AMQ's deprecated implicit creation.** This contract
+   removes that dependency from `launch` only. `run` provisions nothing, claims
+   nothing about AMQ, and reaches its session the way it always has — so when AMQ
+   makes create-on-exec exit 3, foreground `run` into a not-yet-existing session
+   breaks and `launch` does not. Closing that means a foreground redesign —
+   reconciling §15.2 and §15.7, defining a provision-only path, and pinning the
+   observation that would support a run-side claim — which is an operator scope
+   decision deliberately not taken here.
 5. **Ownership binds a directory, not a tree.** The record binds the stored
    project directory; if that directory's AMQ binding changes between creation and
    adoption, ownership evidence can be wrong without being loud. A documented
