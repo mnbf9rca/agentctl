@@ -1264,10 +1264,10 @@ func TestLiveVerificationRequiresExactlyOneResultsHistoryMarker(t *testing.T) {
 func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
-	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
-  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
 fi
-trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
 `), 0o644)
 	output, err := fixture.run(t, "",
 		"BASH_ENV="+bashEnvironment,
@@ -1346,10 +1346,10 @@ func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testi
 func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
-	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
-  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
 fi
-trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated zero-status exit after Part B launch" >&2; set +e; exit 0; fi' DEBUG
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated zero-status exit after Part B launch" >&2; set +e; exit 0; fi' DEBUG
 `), 0o644)
 	output, err := fixture.run(t, "",
 		"BASH_ENV="+bashEnvironment,
@@ -2090,10 +2090,10 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 func TestLiveVerificationUnexpectedExitRetainsAMQArtifactsWithoutObservedAbsence(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
-	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_BASHPID:-}" ]; then
-  export AGENTCTL_TEST_VERIFIER_BASHPID=$BASHPID
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
 fi
-trap 'if [ "$BASHPID" = "$AGENTCTL_TEST_VERIFIER_BASHPID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
 `), 0o644)
 	output, err := fixture.run(t, "",
 		"BASH_ENV="+bashEnvironment,
