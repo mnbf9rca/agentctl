@@ -59,9 +59,9 @@ observed there are proven by the named automated guards below. A checked
 promotion-form box claims that its listed sources passed; it does not turn an
 automated result into a live observation.
 
-1. **Detached launch in an ordinary terminal** — the verifier's Task 8 artifact
-   records that the default launch completed without a tmux presentation and
-   that its role remained running after the terminal returned to the shell.
+1. **Detached launch in an ordinary terminal** — the live result block records
+   the detached fleet, both roles still running after the B.C3 viewer closure,
+   and teardown exit 3 with the detached durable fleet absent.
 2. **Per-role attach, repaint, verbatim input, and clean disconnect/re-attach**
    — the live result block records the B.C1 role surfaces, B.C2 fresh replacement
    and reattach, and B.C3 viewer closure with both roles still running. The
@@ -76,8 +76,9 @@ automated result into a live observation.
    readmission. A clean viewer disconnect means closing the viewer's terminal
    window or tab, or otherwise closing its PTY at the terminal boundary; typed
    `Ctrl-C` reaches the harness and can interrupt it.
-3. **SIGWINCH resize observation** — this is an automated property, not a live
-   result-block observation. Its named guards are
+3. **Exact SIGWINCH frame emission and TIOCSWINSZ application** — these are
+   automated properties, not live result-block observations. Their named
+   guards are
    `TestViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame` and
    `TestTerminalConcurrentResizeUsesIndependentExactValues`.
 4. **handled/ignored/blocked signal and terminal restoration** — these are
@@ -90,15 +91,14 @@ automated result into a live observation.
    ordering and exactly-once restoration; and
    `TestIntegrationRoleAttachNeverMutatesParentDescriptorFlagsAcrossStopAndKill`
    for the `SIGSTOP` and `SIGKILL` exclusions.
-5. **§15.9 built-artifact metadata** — the Task 8 artifact records
-   `go version -m` output for each
-   built Darwin binary and each extracted Darwin binary. Each record must show
-   `golang.org/x/sys v0.47.0` and identify the binary hash it describes.
-6. **Archive-license evidence** — the Task 8 artifact records the archive hash
-   and extracted-file observation for every Darwin archive. Each extraction
-   must contain
-   `LICENSES/golang.org/x/sys/LICENSE` alongside the release's required license
-   materials.
+5. **Built-artifact executable smoke** — `.github/workflows/release.yml` runs
+   the exact Darwin arm64 and amd64 binaries produced in `dist/` by the release
+   build, requires both to report the expected release version, and completes
+   that smoke before `Publish (undraft) release`.
+6. **Archive-license contents** — `.goreleaser.yaml` declares
+   `LICENSES/golang.org/x/sys/LICENSE` and the other required license materials
+   in `archives.files`, which includes them in every Darwin archive before the
+   draft release can be published.
 
 ## Evidence
 
