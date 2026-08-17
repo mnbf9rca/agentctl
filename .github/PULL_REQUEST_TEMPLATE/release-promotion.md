@@ -11,13 +11,16 @@ formula update). Check exactly one box; the claim below ships with the release.
 
 When **Checklist run.** is checked, complete all four fields below.
 
-- [ ] **Detached launch passed.** The ordinary-terminal detached-launch leg
-  passed and is recorded in the evidence location below.
-- [ ] **Per-role attach passed.** The attach/repaint/verbatim-input and clean
-  disconnect/re-attach legs passed and are recorded below.
-- [ ] **Signal and terminal restoration passed.** Every required
-  handled/ignored/blocked signal and terminal-restoration leg passed and is
-  recorded below.
+- [ ] **Detached launch passed.** The ordinary-terminal detached-launch smoke
+  passed and its Task 8 record is identified by the evidence location below.
+- [ ] **Per-role attach passed.** The B.C1–B.C3 attach smoke observations passed
+  and are recorded below; repaint, verbatim input, single-viewer arbitration,
+  and clean-EOF readmission passed the named automated guards in
+  `docs/release-checklist.md`.
+- [ ] **Signal and terminal restoration passed.** The required
+  handled/ignored/blocked signal and terminal-restoration properties passed the
+  named automated guards in `docs/release-checklist.md`; this box does not
+  claim that those properties were observed in the live smoke.
 
 Evidence location: <!-- committed path on main, e.g. docs/release-verification-notes.md -->
 
