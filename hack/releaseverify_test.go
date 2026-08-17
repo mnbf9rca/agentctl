@@ -1,6 +1,7 @@
 package hack_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -63,6 +64,57 @@ func TestRenderResultsRejects(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := renderResults(t, tc.versions, tc.artifactDir)
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+				t.Fatalf("want exit status 1, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRenderResultsRejectsUnknownLiveSchemaAndAuthenticationModes(t *testing.T) {
+	base, err := os.ReadFile("testdata/release-verify-live-artifact/metadata.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		metadata string
+	}{
+		{
+			name:     "unknown checkpoint schema",
+			metadata: string(base) + "live_human_checkpoint_schema=future-v2\n",
+		},
+		{
+			name: "unknown codex authentication mode",
+			metadata: strings.Replace(
+				string(base),
+				"part_c_auth_mode=codex-seeded",
+				"part_c_auth_mode=untrusted-future-value",
+				1,
+			),
+		},
+		{
+			name: "unknown claude authentication mode",
+			metadata: strings.Replace(
+				string(base),
+				"part_c_auth_mode=codex-seeded",
+				"part_c_auth_mode=codex-seeded\npart_c_claude_auth_mode=untrusted-future-value",
+				1,
+			),
+		},
+		{
+			name:     "unknown Part B AMQ mode",
+			metadata: string(base) + "part_b_amq_mode=untrusted-future-value\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			artifactDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(artifactDir, "metadata.txt"), []byte(tc.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := renderResults(t, "testdata/release-verify-versions.txt", artifactDir)
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) || ee.ExitCode() != 1 {
 				t.Fatalf("want exit status 1, got %v", err)
@@ -633,29 +685,13 @@ func TestProcessCheckRejects(t *testing.T) {
 }
 
 type liveFixture struct {
-	dir                    string
-	agentctlLog            string
-	agentctlEnvironmentLog string
-	authObservationLog     string
-	claudeConfigLog        string
-	securityLog            string
-	tmuxLog                string
-	amqLog                 string
-	skillRootLog           string
-	environmentLog         string
-	evidenceDirLog         string
-	partCRootLog           string
-	sighupProbeLog         string
-	operatorHome           string
-	keychainTarget         string
-	keychainSentinel       string
+	dir            string
+	agentctlLog    string
+	tmuxLog        string
+	amqLog         string
+	evidenceDirLog string
+	sighupProbeLog string
 }
-
-const (
-	fakeClaudeAuthBody        = "fixture-claude-auth-material-do-not-print"
-	fakeClaudeCredentialsBody = "fixture-claude-credentials-material-do-not-print"
-	fakeCodexAuthBody         = "fixture-codex-auth-material-do-not-print"
-)
 
 func newLiveFixture(t *testing.T) liveFixture {
 	t.Helper()
@@ -678,16 +714,9 @@ func newLiveFixture(t *testing.T) liveFixture {
 	writeTestFile(t, filepath.Join(dir, "docs/release-verification-notes.md"), []byte("# Notes\n\n## Results history\n"), 0o644)
 
 	agentctlLog := filepath.Join(t.TempDir(), "agentctl.log")
-	agentctlEnvironmentLog := filepath.Join(t.TempDir(), "agentctl-environment.log")
-	authObservationLog := filepath.Join(t.TempDir(), "auth-observation.log")
-	claudeConfigLog := filepath.Join(t.TempDir(), "claude-config.log")
-	securityLog := filepath.Join(t.TempDir(), "security.log")
 	tmuxLog := filepath.Join(t.TempDir(), "tmux.log")
 	amqLog := filepath.Join(t.TempDir(), "amq.log")
-	skillRootLog := filepath.Join(t.TempDir(), "skill-root.log")
-	environmentLog := filepath.Join(t.TempDir(), "environment.log")
 	evidenceDirLog := filepath.Join(t.TempDir(), "evidence-dir.log")
-	partCRootLog := filepath.Join(t.TempDir(), "part-c-root.log")
 	sighupProbeLog := filepath.Join(t.TempDir(), "sighup-probe.log")
 	agentctlOwned := filepath.Join(t.TempDir(), "owned")
 	agentctlKilled := filepath.Join(t.TempDir(), "killed")
@@ -698,18 +727,6 @@ func newLiveFixture(t *testing.T) liveFixture {
 	keeperKilled := filepath.Join(t.TempDir(), "keeper-killed")
 	pgrepCalls := filepath.Join(t.TempDir(), "pgrep-calls")
 	operatorHome := t.TempDir()
-	keychainLibrary := filepath.Join(operatorHome, "Library")
-	keychainTarget := filepath.Join(keychainLibrary, "Keychains")
-	for _, path := range []string{filepath.Join(operatorHome, ".claude"), filepath.Join(operatorHome, ".codex"), keychainLibrary, keychainTarget} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, path := range []string{operatorHome, filepath.Join(operatorHome, ".claude"), filepath.Join(operatorHome, ".codex"), filepath.Join(operatorHome, "Library"), keychainTarget} {
-		if err := os.Chmod(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
 	sighupProbe := `#!/usr/bin/env bash
 set -eu
 [ "$#" -eq 4 ] || { echo 'probe-shim-sighup: expected --harness and --output' >&2; exit 64; }
@@ -743,23 +760,9 @@ PROBE_OUTPUT
 echo "probe-shim-sighup: recorded $harness result in $output"
 `
 	writeTestFile(t, filepath.Join(dir, "hack/probe-shim-sighup.sh"), []byte(sighupProbe), 0o755)
-	keychainSentinel := filepath.Join(keychainTarget, "operator-login-keychain-sentinel")
-	writeTestFile(t, keychainSentinel, []byte("real-keychain-target-must-survive"), 0o600)
-	writeTestFile(t, filepath.Join(operatorHome, ".claude.json"), []byte(fakeClaudeAuthBody), 0o600)
-	writeTestFile(t, filepath.Join(operatorHome, ".claude", ".credentials.json"), []byte(fakeClaudeCredentialsBody), 0o600)
-	writeTestFile(t, filepath.Join(operatorHome, ".codex", "auth.json"), []byte(fakeCodexAuthBody), 0o600)
 	agentctl := `#!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >>"$AGENTCTL_TEST_LOG"
-case "$*" in
-  skill\ install|launch\ --session\ skillverify\ *|attach\ --session\ skillverify|kill\ --session\ skillverify)
-    if [ "${AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT:-0}" = 1 ] && [ "${AGENTCTL_RUNTIME_ROOT:-}" != "${HOME%/home}/runtime" ]; then
-      echo "Part C AGENTCTL_RUNTIME_ROOT=${AGENTCTL_RUNTIME_ROOT:-}" >&2
-      exit 2
-    fi
-    printf '%s\t%s\t%s\t%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AGENTCTL_ENVIRONMENT_LOG"
-    ;;
-esac
 case "$1" in
   version)
     echo 'agentctl version test'
@@ -810,64 +813,7 @@ case "$1" in
     echo "$status_message" >&2
     exit 3
     ;;
-  skill)
-    [ "$2" = install ] || exit 64
-    mkdir -p "$HOME/.claude/skills/agentctl" "$HOME/.agents/skills/agentctl"
-    printf '%s\n' "$HOME" >>"$AGENTCTL_TEST_SKILL_ROOT_LOG"
-    ;;
   launch)
-    if [ "$3" = skillverify ]; then
-	  if [ "${AGENTCTL_TEST_REQUIRE_PART_C_TMUX_PRESENTATION:-0}" = 1 ] && [ "${!#}" != --tmux ]; then
-	    echo 'Part C skillverify launch omitted explicit --tmux presentation' >&2
-	    exit 2
-	  fi
-      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT:-0}" = 1 ] && [ ! -d "$HOME/Library/Application Support" ]; then
-        echo 'missing Part C Library/Application Support' >&2
-        exit 2
-      fi
-      if [ "${AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST:-0}" = 1 ]; then
-        expected_project=$(pwd -P)
-        expected_config=$(printf '[projects."%s"]\ntrust_level = "trusted"\n' "$expected_project")
-        actual_config=$(/bin/cat "$HOME/.codex/config.toml" 2>/dev/null) || {
-          echo 'missing Part C Codex trust config' >&2
-          exit 2
-        }
-        if [ "$actual_config" != "$expected_config" ] || [ "$(/usr/bin/stat -f '%Lp' "$HOME/.codex/config.toml")" != 600 ]; then
-          echo 'incorrect Part C Codex trust config' >&2
-          exit 2
-        fi
-      fi
-      : >"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-      if [ -f "$HOME/.claude.json" ]; then
-        /bin/cp "$HOME/.claude.json" "$AGENTCTL_TEST_CLAUDE_CONFIG_LOG"
-      fi
-      printf 'dir .|%s\n' "$(/usr/bin/stat -f '%Lp' "$HOME")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	  for auth_path in "$HOME/.claude.json" "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json"; do
-	    if [ -f "$auth_path" ]; then
-	      relative_path=${auth_path#"$HOME"/}
-	      parent_path=${auth_path%/*}
-	      if [ "$parent_path" != "$HOME" ]; then
-	        printf 'dir %s|%s\n' "${parent_path#"$HOME"/}" "$(/usr/bin/stat -f '%Lp' "$parent_path")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	      fi
-	      printf 'file %s|%s\n' "$relative_path" "$(/usr/bin/stat -f '%Lp' "$auth_path")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	    fi
-	  done
-	  if [ -L "$HOME/Library/Keychains" ]; then
-	    printf 'link Library/Keychains|%s\n' "$(/usr/bin/readlink "$HOME/Library/Keychains")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	  elif [ -d "$HOME/Library/Keychains" ]; then
-	    printf 'dir Library/Keychains|%s\n' "$(/usr/bin/stat -f '%Lp' "$HOME/Library/Keychains")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	    if [ -f "$HOME/Library/Keychains/login.keychain-db" ]; then
-	      printf 'file Library/Keychains/login.keychain-db|%s\n' "$(/usr/bin/stat -f '%Lp' "$HOME/Library/Keychains/login.keychain-db")" >>"$AGENTCTL_TEST_AUTH_OBSERVATION_LOG"
-	    fi
-	  fi
-      if [ "${AGENTCTL_TEST_PART_C_LAUNCH_FAIL:-0}" = 1 ]; then
-        echo 'skillverify launch failed' >&2
-        exit 1
-      fi
-      touch "$AGENTCTL_TEST_SKILL_OWNED"
-      echo 'launched skillverify'
-      exit 0
-    fi
     if [ "${AGENTCTL_TEST_REQUIRE_PART_B_AMQ_INIT:-0}" = 1 ]; then
       expected_amq_root="$(cat "$AGENTCTL_TEST_EVIDENCE_DIR_LOG")/part-b-amq"
       [ -f .amqrc ] || { echo 'Part B temporary .amqrc is missing' >&2; exit 2; }
@@ -887,64 +833,37 @@ case "$1" in
     touch "$AGENTCTL_TEST_ROLE_B"
     echo "launched $3"
     ;;
-  clear|compact)
-    echo "delivered $1"
-    ;;
   relaunch)
     touch "$AGENTCTL_TEST_ROLE_A" "$AGENTCTL_TEST_RELAUNCHED"
     echo "agentctl: relaunched role \"a\" in session \"$3\"; the shim is ready" >&2
     ;;
-  attach)
-	if [ "$3" != skillverify ] && [ "$#" -eq 3 ]; then
-	  echo "agentctl: detached session \"$3\" requires an explicit role: a, b" >&2
-	  exit 2
-	fi
-	if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_REQUIRE_PART_C_ITERM:-0}" = 1 ] && { [ "${TERM_PROGRAM:-}" != iTerm.app ] || [ -n "${TMUX:-}" ] || [ -n "${TMUX_PANE:-}" ]; }; then
-      echo "Part C attach TERM_PROGRAM=${TERM_PROGRAM:-} TMUX=${TMUX:-} TMUX_PANE=${TMUX_PANE:-}" >&2
-      exit 2
-    fi
-    if [ "$3" = skillverify ] && [ "${AGENTCTL_TEST_PART_C_ATTACH_FAIL:-0}" = 1 ]; then
-      echo 'attach failed' >&2
-      exit 1
-    fi
-    ;;
   kill)
-    if [ "$3" = skillverify ]; then
-      code=0
-      if [ -n "${AGENTCTL_TEST_PART_C_KILL_CODES:-}" ]; then
-        calls=0
-        [ ! -e "$AGENTCTL_TEST_PART_C_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_C_KILL_CALLS")
-        calls=$((calls + 1))
-        printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_C_KILL_CALLS"
-        IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_C_KILL_CODES"
-        index=$((calls - 1))
-        [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
-        code=${codes[$index]}
-      fi
-      if [ "$code" -ne 0 ]; then
-        echo 'simulated skillverify kill failure' >&2
-        exit "$code"
-      fi
-      rm -f "$AGENTCTL_TEST_SKILL_OWNED"
-      touch "$AGENTCTL_TEST_SKILL_KILLED"
-    else
-      code=${AGENTCTL_TEST_PART_B_KILL_CODE:-0}
-      if [ -n "${AGENTCTL_TEST_PART_B_KILL_CODES:-}" ]; then
-        calls=0
-        [ ! -e "$AGENTCTL_TEST_PART_B_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_B_KILL_CALLS")
-        calls=$((calls + 1))
-        printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_B_KILL_CALLS"
-        IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_B_KILL_CODES"
-        index=$((calls - 1))
-        [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
-        code=${codes[$index]}
-      fi
-      if [ "$code" -ne 0 ]; then
-        echo 'simulated relverify kill failure' >&2
-        exit "$code"
-      fi
-      rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
-      touch "$AGENTCTL_TEST_KILLED"
+    code=${AGENTCTL_TEST_PART_B_KILL_CODE:-0}
+    if [ -n "${AGENTCTL_TEST_PART_B_KILL_CODES:-}" ]; then
+      calls=0
+      [ ! -e "$AGENTCTL_TEST_PART_B_KILL_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_PART_B_KILL_CALLS")
+      calls=$((calls + 1))
+      printf '%s\n' "$calls" >"$AGENTCTL_TEST_PART_B_KILL_CALLS"
+      IFS=, read -r -a codes <<<"$AGENTCTL_TEST_PART_B_KILL_CODES"
+      index=$((calls - 1))
+      [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
+      code=${codes[$index]}
+    fi
+    if [ "$code" -ne 0 ]; then
+      echo 'simulated relverify kill failure' >&2
+      exit "$code"
+    fi
+    rm -f "$AGENTCTL_TEST_OWNED" "$AGENTCTL_TEST_ROLE_B" "$AGENTCTL_TEST_RELAUNCHED"
+    touch "$AGENTCTL_TEST_KILLED"
+    if [ "${AGENTCTL_TEST_REPLACE_PART_B_AMQ_CONFIG_AFTER_KILL:-0}" = 1 ]; then
+      mv .amqrc .amqrc-original
+      printf 'replacement config\n' >.amqrc
+    fi
+    if [ "${AGENTCTL_TEST_REPLACE_PART_B_AMQ_ROOT_AFTER_KILL:-0}" = 1 ]; then
+      amq_root="$(cat "$AGENTCTL_TEST_EVIDENCE_DIR_LOG")/part-b-amq"
+      mv "$amq_root" "$amq_root-original"
+      mkdir "$amq_root"
+      printf 'replacement root\n' >"$amq_root/sentinel"
     fi
     ;;
   *)
@@ -965,139 +884,12 @@ exec /bin/cat "$@"
 	tmux := `#!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >>"$AGENTCTL_TEST_TMUX_LOG"
-case "$1" in
-  -L)
-    [ "$3" = kill-server ] || exit 64
-    touch "$AGENTCTL_TEST_SKILL_SOCKET_KILLED"
-    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT_WARNING:-0}" = 1 ]; then
-      echo 'warning: unexpected tmux diagnostic' >&2
-      echo "error connecting to /private/tmp/tmux-501/$2 (No such file or directory)" >&2
-      exit 1
-    fi
-    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT_WRONG_SOCKET:-0}" = 1 ]; then
-      echo "error connecting to /private/tmp/tmux-501/not-$2 (No such file or directory)" >&2
-      exit 1
-    fi
-    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT:-0}" = 1 ]; then
-      echo "error connecting to /private/tmp/tmux-501/$2 (No such file or directory)" >&2
-      exit 1
-    fi
-    if [ "${AGENTCTL_TEST_SKILL_KILL_SERVER_ABSENT:-0}" = 1 ]; then
-      echo 'no server running'
-      exit 1
-    fi
-    code=${AGENTCTL_TEST_SKILL_KILL_SERVER_CODE:-0}
-    if [ -n "${AGENTCTL_TEST_SKILL_KILL_SERVER_CODES:-}" ]; then
-      calls=0
-      [ ! -e "$AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS" ] || calls=$(cat "$AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS")
-      calls=$((calls + 1))
-      printf '%s\n' "$calls" >"$AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS"
-      IFS=, read -r -a codes <<<"$AGENTCTL_TEST_SKILL_KILL_SERVER_CODES"
-      index=$((calls - 1))
-      [ "$index" -lt "${#codes[@]}" ] || index=$((${#codes[@]} - 1))
-      code=${codes[$index]}
-    fi
-    [ "$code" -eq 0 ] || exit "$code"
-    ;;
-  -V)
-    echo 'tmux 3.7b'
-    ;;
-  list-sessions)
-    [ -e "$AGENTCTL_TEST_OWNED" ] && printf '$4\trelverify\n'
-    ;;
-  new-session)
-    [ "$2" = -d ] && [ "$3" = -s ] && [ "$5" = -n ] && [ "$6" = keeper ] && [ "$7" = -- ] && [ "$8" = 'exec sleep 86400' ] || exit 65
-    case "$4" in
-      agentctl-release-verify-keeper-[0-9]*) ;;
-      *) exit 65 ;;
-    esac
-    if [ "${AGENTCTL_TEST_KEEPER_CREATE_CODE:-0}" -ne 0 ]; then
-      echo 'simulated keeper creation failure' >&2
-      exit "$AGENTCTL_TEST_KEEPER_CREATE_CODE"
-    fi
-    touch "$AGENTCTL_TEST_KEEPER_OWNED"
-    ;;
-  kill-session)
-    [ "$2" = -t ] || exit 65
-    case "$3" in
-      =agentctl-release-verify-keeper-[0-9]*) ;;
-      *) exit 65 ;;
-    esac
-    [ -e "$AGENTCTL_TEST_KEEPER_OWNED" ] || exit 66
-    rm -f "$AGENTCTL_TEST_KEEPER_OWNED"
-    touch "$AGENTCTL_TEST_KEEPER_KILLED"
-    ;;
-  list-windows)
-    if [ -e "$AGENTCTL_TEST_ROLE_A" ]; then
-      if [ -e "$AGENTCTL_TEST_RELAUNCHED" ]; then
-        printf '@11\t%s\ta\n' "${AGENTCTL_TEST_RELAUNCHED_PANE_ID:-%12}"
-      else
-        printf '@7\t%%5\ta\n'
-      fi
-    fi
-    if [ -e "$AGENTCTL_TEST_ROLE_B" ]; then
-      printf '@8\t%%9\tb\n'
-    fi
-    ;;
-  *)
-    exit 64
-    ;;
-esac
+[ "$1" = -V ] || exit 64
+echo 'tmux 3.7b'
 `
 	writeTestFile(t, filepath.Join(dir, "stubs/tmux"), []byte(tmux), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/claude"), []byte("#!/usr/bin/env bash\necho '2.1.220 (Claude Code)'\n"), 0o755)
 	writeTestFile(t, filepath.Join(dir, "stubs/codex"), []byte("#!/usr/bin/env bash\necho 'codex-cli 0.146.0'\n"), 0o755)
-	install := `#!/usr/bin/env bash
-set -u
-if [ "${AGENTCTL_TEST_AUTH_INSTALL_FAIL:-0}" = 1 ]; then
-  case "$*" in
-    *codex/auth.json*) printf 'simulated install failure: %s\n' "$*" >&2; exit 1 ;;
-  esac
-fi
-exec /usr/bin/install "$@"
-`
-	writeTestFile(t, filepath.Join(dir, "stubs/install"), []byte(install), 0o755)
-	security := `#!/usr/bin/env bash
-set -u
-printf '%s\t%s\t%s\t%s\t%s\n' "$HOME" "$#" "${1:-}" "${2:-}" "${4:-}" >>"$AGENTCTL_TEST_SECURITY_LOG"
-[ "$#" -eq 4 ] || exit 64
-[ "$1" = create-keychain ] && [ "$2" = -p ] && [ -z "$3" ] || exit 64
-case "$4" in
-  "$HOME"/Library/Keychains/login.keychain-db) ;;
-  *) exit 64 ;;
-esac
-if [ "${AGENTCTL_TEST_SECURITY_CREATE_FAIL:-0}" = 1 ]; then
-  echo 'simulated security create-keychain failure' >&2
-  exit 19
-fi
-: >"$4"
-chmod 0600 "$4"
-`
-	writeTestFile(t, filepath.Join(dir, "stubs/security"), []byte(security), 0o755)
-	ln := `#!/usr/bin/env bash
-set -u
-if [ "${AGENTCTL_TEST_KEYCHAIN_LINK_FAIL:-0}" = 1 ]; then
-  case "${3:-}" in
-    */Library/Keychains) echo 'simulated Keychains link failure' >&2; exit 20 ;;
-  esac
-fi
-exec /bin/ln "$@"
-`
-	writeTestFile(t, filepath.Join(dir, "stubs/ln"), []byte(ln), 0o755)
-	rm := `#!/usr/bin/env bash
-set -u
-printf '%s|%s|%s\n' "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_ENVIRONMENT_LOG"
-if [ "${AGENTCTL_TEST_PART_C_RM_FAIL:-0}" = 1 ] && [ "$1" = -rf ] && [ "$2" = -- ] && [ "$3" = "$(/bin/cat "$AGENTCTL_TEST_PART_C_ROOT_LOG")" ]; then
-  echo 'simulated Part C rm failure' >&2
-  exit 1
-fi
-if [ "${AGENTCTL_TEST_PART_C_HOME_RM_FAIL:-0}" = 1 ] && [ "$1" = -rf ] && [ "$2" = -- ] && [ "$3" = "$(/bin/cat "$AGENTCTL_TEST_PART_C_ROOT_LOG")/home" ]; then
-  echo 'simulated Part C HOME rm failure' >&2
-  exit 1
-fi
-exec /bin/rm "$@"
-`
-	writeTestFile(t, filepath.Join(dir, "stubs/rm"), []byte(rm), 0o755)
 	amq := `#!/usr/bin/env bash
 set -u
 printf '%s|%s|%s|%s\n' "$*" "$PWD" "$HOME" "$PATH" >>"$AGENTCTL_TEST_AMQ_LOG"
@@ -1110,7 +902,7 @@ if [ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --root ] && [ "$5" = --agents 
   fi
   exit 0
 fi
-[ "$1" = coop ] && [ "$2" = init ] && [ "$3" = --agents ] && [ "$4" = a,b,user ] && [ "$#" -eq 4 ] || exit 64
+exit 64
 `
 	writeTestFile(t, filepath.Join(dir, "stubs/amq"), []byte(amq), 0o755)
 	mktemp := `#!/usr/bin/env bash
@@ -1118,7 +910,6 @@ set -u
 created=$(/usr/bin/mktemp "$@") || exit $?
 case "$*" in
   "-d /tmp/agentctl-release-verify.XXXXXX") printf '%s\n' "$created" >"$AGENTCTL_TEST_EVIDENCE_DIR_LOG" ;;
-  "-d /tmp/agentctl-skill-verify.XXXXXX") printf '%s\n' "$created" >"$AGENTCTL_TEST_PART_C_ROOT_LOG" ;;
 esac
 printf '%s\n' "$created"
 `
@@ -1152,16 +943,9 @@ esac
 	runCommand(t, dir, "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
 
 	t.Setenv("AGENTCTL_TEST_LOG", agentctlLog)
-	t.Setenv("AGENTCTL_TEST_AGENTCTL_ENVIRONMENT_LOG", agentctlEnvironmentLog)
-	t.Setenv("AGENTCTL_TEST_AUTH_OBSERVATION_LOG", authObservationLog)
-	t.Setenv("AGENTCTL_TEST_CLAUDE_CONFIG_LOG", claudeConfigLog)
-	t.Setenv("AGENTCTL_TEST_SECURITY_LOG", securityLog)
 	t.Setenv("AGENTCTL_TEST_TMUX_LOG", tmuxLog)
 	t.Setenv("AGENTCTL_TEST_AMQ_LOG", amqLog)
-	t.Setenv("AGENTCTL_TEST_SKILL_ROOT_LOG", skillRootLog)
-	t.Setenv("AGENTCTL_TEST_ENVIRONMENT_LOG", environmentLog)
 	t.Setenv("AGENTCTL_TEST_EVIDENCE_DIR_LOG", evidenceDirLog)
-	t.Setenv("AGENTCTL_TEST_PART_C_ROOT_LOG", partCRootLog)
 	t.Setenv("AGENTCTL_TEST_SIGHUP_PROBE_LOG", sighupProbeLog)
 	t.Setenv("AGENTCTL_TEST_OWNED", agentctlOwned)
 	t.Setenv("AGENTCTL_TEST_KILLED", agentctlKilled)
@@ -1170,32 +954,17 @@ esac
 	t.Setenv("AGENTCTL_TEST_RELAUNCHED", agentctlRelaunched)
 	t.Setenv("AGENTCTL_TEST_KEEPER_OWNED", keeperOwned)
 	t.Setenv("AGENTCTL_TEST_KEEPER_KILLED", keeperKilled)
-	t.Setenv("AGENTCTL_TEST_SKILL_OWNED", filepath.Join(t.TempDir(), "skill-owned"))
-	t.Setenv("AGENTCTL_TEST_SKILL_KILLED", filepath.Join(t.TempDir(), "skill-killed"))
-	t.Setenv("AGENTCTL_TEST_PART_C_KILL_CALLS", filepath.Join(t.TempDir(), "skill-kill-calls"))
 	t.Setenv("AGENTCTL_TEST_PART_B_KILL_CALLS", filepath.Join(t.TempDir(), "relverify-kill-calls"))
-	t.Setenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED", filepath.Join(t.TempDir(), "skill-socket-killed"))
-	t.Setenv("AGENTCTL_TEST_SKILL_KILL_SERVER_CALLS", filepath.Join(t.TempDir(), "skill-kill-server-calls"))
 	t.Setenv("AGENTCTL_TEST_PGREP_CALLS", pgrepCalls)
 	t.Setenv("HOME", operatorHome)
 	t.Setenv("PATH", filepath.Join(dir, "stubs")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return liveFixture{
-		dir:                    dir,
-		agentctlLog:            agentctlLog,
-		agentctlEnvironmentLog: agentctlEnvironmentLog,
-		authObservationLog:     authObservationLog,
-		claudeConfigLog:        claudeConfigLog,
-		securityLog:            securityLog,
-		tmuxLog:                tmuxLog,
-		amqLog:                 amqLog,
-		skillRootLog:           skillRootLog,
-		environmentLog:         environmentLog,
-		evidenceDirLog:         evidenceDirLog,
-		partCRootLog:           partCRootLog,
-		sighupProbeLog:         sighupProbeLog,
-		operatorHome:           operatorHome,
-		keychainTarget:         keychainTarget,
-		keychainSentinel:       keychainSentinel,
+		dir:            dir,
+		agentctlLog:    agentctlLog,
+		tmuxLog:        tmuxLog,
+		amqLog:         amqLog,
+		evidenceDirLog: evidenceDirLog,
+		sighupProbeLog: sighupProbeLog,
 	}
 }
 
@@ -1234,6 +1003,14 @@ func runCommand(t *testing.T, dir, name string, arguments ...string) {
 }
 
 func (fixture liveFixture) run(t *testing.T, input string, environment ...string) (string, error) {
+	return fixture.runWithTTY(t, input, false, environment...)
+}
+
+func (fixture liveFixture) runTTY(t *testing.T, input string, environment ...string) (string, error) {
+	return fixture.runWithTTY(t, input, true, environment...)
+}
+
+func (fixture liveFixture) runWithTTY(t *testing.T, input string, tty bool, environment ...string) (string, error) {
 	t.Helper()
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
 	shimScript := `child_pid=''
@@ -1274,12 +1051,48 @@ wait "$child_pid"`
 		t.Fatal("fixture shim did not report its child PID")
 	}
 	command := exec.Command("bash", "hack/release-verify.sh", "--non-interactive")
+	if tty {
+		command = exec.Command("/usr/bin/script", "-q", "/dev/null", "bash", "hack/release-verify.sh", "--non-interactive")
+	}
 	command.Dir = fixture.dir
-	command.Stdin = strings.NewReader(input)
-	command.Env = append(os.Environ(), "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
+	command.Env = os.Environ()
+	if tty {
+		filtered := command.Env[:0]
+		for _, entry := range command.Env {
+			if !strings.HasPrefix(entry, "NO_COLOR=") {
+				filtered = append(filtered, entry)
+			}
+		}
+		command.Env = filtered
+	}
+	command.Env = append(command.Env, "AGENTCTL_TEST_SHIM_PID="+strconv.Itoa(shimProcess.Process.Pid))
 	command.Env = append(command.Env, "AGENTCTL_TEST_CHILD_PID="+childPID)
 	command.Env = append(command.Env, environment...)
-	output, err := command.CombinedOutput()
+	var output []byte
+	var err error
+	if tty {
+		var captured bytes.Buffer
+		command.Stdout = &captured
+		command.Stderr = &captured
+		stdin, pipeErr := command.StdinPipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		if startErr := command.Start(); startErr != nil {
+			t.Fatal(startErr)
+		}
+		time.Sleep(2 * time.Second)
+		if _, writeErr := stdin.Write([]byte(input)); writeErr != nil {
+			_ = command.Process.Kill()
+			t.Fatal(writeErr)
+		}
+		err = command.Wait()
+		_ = stdin.Close()
+		output = captured.Bytes()
+	} else {
+		command.Stdin = strings.NewReader(input)
+		output, err = command.CombinedOutput()
+	}
 	normalized := string(output)
 	if session, ok := fixture.observedLiveSession(); ok {
 		normalized = strings.ReplaceAll(normalized, session, "relverify")
@@ -1338,7 +1151,7 @@ func (fixture liveFixture) tmuxCalls(t *testing.T) []string {
 
 func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
@@ -1346,19 +1159,12 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"=== Part A — Automated release checks ===",
 		"[PASS A.",
 		"=== Part B — Live release-candidate delivery ===",
-		"Part B verifies the default detached presentation",
+		"===== OPERATOR ACTION B.A1: open the live role viewers =====",
 		"./bin/agentctl attach --session relverify a",
 		"./bin/agentctl attach --session relverify b",
 		"VIEWER CLOSE PASS (roles a and b remain running after their viewers closed)",
-		"Expected output:",
+		"Expected observation:",
 		"operator confirmed:",
-		"=== Part C — Live skill discovery and meaning ===",
-		"harness lists the agentctl skill",
-		"probe answer matches references/status-states.md",
-		"What does `present-not-ours` mean in agentctl status, and does it authorize relaunch?",
-		"kill(pid, 0) returned EPERM",
-		"only stale-record or missing can authorize relaunch",
-		"press esc to detach cleanly; do not use uppercase X",
 		"ALL VERIFIED — evidence appended",
 	} {
 		if !strings.Contains(output, want) {
@@ -1384,12 +1190,9 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 	for _, want := range []string{
 		"- Part A:",
 		"- Part B:",
-		"- Part C:",
-		"- Checkpoint B.C1 explicit role attachments: operator confirmed: y",
-		"- Checkpoint B.C10 viewer terminals closed: operator confirmed: y",
-		"- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y",
-		"- Checkpoint C.C2 skill inventory: operator confirmed: y",
-		"- Checkpoint C.C3 status meaning: operator confirmed: y",
+		"- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y",
+		"- Checkpoint B.C2 fresh replacement Claude role a surface: PASS",
+		"- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running",
 	} {
 		if !strings.Contains(string(notes), want) {
 			t.Fatalf("notes missing %q:\n%s", want, notes)
@@ -1399,19 +1202,12 @@ func TestLiveVerificationCompletesAndAppendsEvidence(t *testing.T) {
 		"version",
 		"status --session relverify",
 		"launch --session relverify --roles a:claude,b:codex --efforts b:high",
-		"clear --session relverify a",
-		"clear --session relverify b",
-		"compact --session relverify a",
 		"status --session relverify",
 		"relaunch --session relverify a",
 		"status --session relverify",
 		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
-		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project") + " --tmux",
-		"attach --session skillverify",
-		"kill --session skillverify",
 	}
 	if got := fixture.calls(t); strings.Join(got, "\n") != strings.Join(wantCalls, "\n") {
 		t.Fatalf("agentctl calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantCalls, "\n"))
@@ -1446,7 +1242,7 @@ func TestLiveVerificationRequiresExactlyOneResultsHistoryMarker(t *testing.T) {
 			runCommand(t, fixture.dir, "git", "add", "docs/release-verification-notes.md")
 			runCommand(t, fixture.dir, "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "marker fixture")
 
-			output, err := fixture.run(t, strings.Repeat("y\n", 15))
+			output, err := fixture.run(t, strings.Repeat("y\n", 3))
 			if err == nil {
 				t.Fatalf("release verification accepted %s marker fixture:\n%s", test.name, output)
 			}
@@ -1467,8 +1263,14 @@ func TestLiveVerificationRequiresExactlyOneResultsHistoryMarker(t *testing.T) {
 
 func TestLiveVerificationUnexpectedExitReportsPartBCleanupFailure(t *testing.T) {
 	fixture := newLiveFixture(t)
+	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
+fi
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+`), 0o644)
 	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+		"BASH_ENV="+bashEnvironment,
 		"AGENTCTL_TEST_PART_B_KILL_CODE=17",
 	)
 	if err == nil {
@@ -1515,69 +1317,17 @@ func TestLiveVerificationRetriesTransientPartBChildObservationOnce(t *testing.T)
 	}
 }
 
-func TestLiveVerificationCreatesPartCUserConfigRoot(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15),
-		"AGENTCTL_TEST_REQUIRE_PART_C_APP_SUPPORT=1",
-	)
-	if err != nil {
-		t.Fatalf("release verification omitted the isolated user-config root: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
-		t.Fatalf("release verification did not complete after creating user-config root:\n%s", output)
-	}
-}
-
-func TestLiveVerificationPartCAttachDeclaresITermEnvironment(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15),
-		"AGENTCTL_TEST_REQUIRE_PART_C_ITERM=1",
-		"TERM_PROGRAM=tmux",
-		"TMUX=fixture-tmux",
-		"TMUX_PANE=%28",
-	)
-	if err != nil {
-		t.Fatalf("release verification omitted Part C iTerm attach environment: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "ALL VERIFIED — evidence appended") {
-		t.Fatalf("release verification did not complete with pinned Part C iTerm environment:\n%s", output)
-	}
-}
-
-func TestLiveVerificationRetriesPartCKillAfterSocketRemoval(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12)+"n\n",
-		"AGENTCTL_TEST_PART_C_KILL_CODES=9,0",
-	)
-	if err == nil {
-		t.Fatalf("release verification accepted refused Part C checkpoint:\n%s", output)
-	}
-	for _, want := range []string{
-		"PART C CLEANUP FAIL (skillverify kill)",
-		"PART C CLEANUP PASS (named tmux socket killed)",
-		"PART C CLEANUP PASS (skillverify kill retry after socket removal)",
-		"PART C CLEANUP PASS (temporary root removed)",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing %q:\n%s", want, output)
-		}
-	}
-	if got := strings.TrimSpace(readTestFile(t, os.Getenv("AGENTCTL_TEST_PART_C_KILL_CALLS"))); got != "2" {
-		t.Fatalf("Part C kill call count = %q, want 2", got)
-	}
-}
-
 func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 9)+"n\n")
+	output, err := fixture.run(t, strings.Repeat("y\n", 2)+"n\n")
 	if err == nil {
-		t.Fatalf("release verification passed after B.C10 rejection:\n%s", output)
+		t.Fatalf("release verification passed after B.C3 rejection:\n%s", output)
 	}
 	evidenceDir := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
 	t.Cleanup(func() { _ = os.RemoveAll(evidenceDir) })
 	metadataPath := filepath.Join(evidenceDir, "verify-live", "metadata.txt")
 	metadata := readTestFile(t, metadataPath)
-	wantResult := "part_b_result=FAIL — operator refused checkpoint B.C10"
+	wantResult := "part_b_result=FAIL — operator refused checkpoint B.C3"
 	if !strings.Contains(metadata, wantResult) || strings.Contains(metadata, "part_b_result=PASS") {
 		t.Fatalf("rejected Part B metadata is not fail-closed.\n--- metadata ---\n%s", metadata)
 	}
@@ -1588,26 +1338,21 @@ func TestLiveVerificationRejectedCheckpointArtifactCannotClaimPartBPass(t *testi
 	if renderErr != nil {
 		t.Fatalf("render rejected Part B artifact: %v\n%s", renderErr, rendered)
 	}
-	if !strings.Contains(string(rendered), "- Part B: FAIL — operator refused checkpoint B.C10") || strings.Contains(string(rendered), "- Part B: PASS") {
-		t.Fatalf("renderer fabricated Part B success after B.C10 rejection:\n%s", rendered)
+	if !strings.Contains(string(rendered), "- Part B: FAIL — operator refused checkpoint B.C3") || strings.Contains(string(rendered), "- Part B: PASS") {
+		t.Fatalf("renderer fabricated Part B success after B.C3 rejection:\n%s", rendered)
 	}
 }
 
 func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing.T) {
 	fixture := newLiveFixture(t)
 	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
-	writeTestFile(t, bashEnvironment, []byte(`cat() {
-  if [ "${AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH:-0}" = 1 ] && [ -e "$AGENTCTL_TEST_OWNED" ]; then
-    echo 'simulated zero-status exit after Part B launch' >&2
-    set +e
-    exit 0
-  fi
-  command /bin/cat "$@"
-}
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
+fi
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated zero-status exit after Part B launch" >&2; set +e; exit 0; fi' DEBUG
 `), 0o644)
 	output, err := fixture.run(t, "",
 		"BASH_ENV="+bashEnvironment,
-		"AGENTCTL_TEST_EXIT_ZERO_AFTER_PART_B_LAUNCH=1",
 		"AGENTCTL_TEST_PART_B_KILL_CODE=17",
 	)
 	if err == nil {
@@ -1624,96 +1369,223 @@ func TestLiveVerificationZeroStatusExitBecomesFailureWhenCleanupFails(t *testing
 	}
 }
 
-func TestLiveVerificationNumbersCheckpointsAndGuidesUnfamiliarOperator(t *testing.T) {
+func TestLiveVerificationKeepsOnlyThreeHumanSmokeCheckpoints(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
-	for _, checkpointID := range []string{
-		"B.C1", "B.C2", "B.C3", "B.C4", "B.C5", "B.C6", "B.C7", "B.C8", "B.C9", "B.C10",
-		"C.C1", "C.C2", "C.C3",
-	} {
-		for _, prefix := range []string{"[CHECKPOINT " + checkpointID + "]", "[CHECKPOINT PASS " + checkpointID + "]"} {
+	for _, checkpointID := range []string{"B.C1", "B.C2", "B.C3"} {
+		for _, prefix := range []string{
+			"===== OPERATOR CHECKPOINT " + checkpointID + ":",
+			"===== END OPERATOR CHECKPOINT " + checkpointID + " =====",
+			"[CHECKPOINT PASS " + checkpointID + "]",
+		} {
 			if !strings.Contains(output, prefix) {
 				t.Fatalf("output missing numbered checkpoint result %q:\n%s", prefix, output)
 			}
 		}
 	}
-	for _, want := range []string{
-		"Leave this verifier running in Window 1",
-		"Open Window 2 for role a and Window 3",
-		"keep both viewers open through",
-		"Return to Window 1 to answer each numbered checkpoint",
-		"Close the Window 2 and Window 3 viewer terminals",
-		"The verifier will attach this Window 1 to the isolated skill fleet now.",
-		"While attached, use these concrete actions:",
-		"In the Claude Code tab, type /skills",
-		"In the codex tab, type /skills",
-		"find agentctl in the displayed skill inventory",
+	if got := strings.Count(output, "===== OPERATOR CHECKPOINT "); got != 3 {
+		t.Fatalf("human checkpoint count = %d, want exactly 3:\n%s", got, output)
+	}
+	for _, forbidden := range []string{
+		"claude clear setup",
+		"codex clear setup",
+		"claude compact setup",
+		"type junk",
+		"type /skills",
+		"present-not-ours",
+		"=== Part C",
 	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing operator guidance %q:\n%s", want, output)
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("live smoke retained duplicate human feature drill %q:\n%s", forbidden, output)
 		}
 	}
-	operatorGuidance := strings.Join(strings.Fields(output), " ")
-	for _, want := range []string{
-		"Close each viewer by closing its terminal window or tab, or by otherwise closing its PTY at the terminal boundary",
-		"Do not type Ctrl-C: attach relays every byte, so Ctrl-C reaches the harness and can interrupt it",
-	} {
-		if !strings.Contains(operatorGuidance, want) {
-			t.Fatalf("output missing safe viewer-close guidance %q:\n%s", want, output)
-		}
-	}
-	for _, want := range []string{
-		"[ACTION PASS B.3] claude clear delivery command completed; observed outcome pending checkpoint B.C3",
-		"[ACTION PASS B.4] codex clear delivery command completed; observed outcome pending checkpoint B.C5",
-		"[ACTION PASS B.5] claude compact delivery command completed; observed outcome pending checkpoint B.C7",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing action/checkpoint distinction %q:\n%s", want, output)
-		}
-	}
-	if strings.Contains(output, "[PASS B.3] claude clear delivery command completed") {
-		t.Fatalf("delivery action was presented as a checkpoint outcome:\n%s", output)
-	}
-	for _, impossible := range []string{"Before attaching, inspect both skill inventories", "Attach to the isolated skill fleet with:"} {
-		if strings.Contains(output, impossible) {
-			t.Fatalf("output gives impossible or operator-owned Part C attach guidance %q:\n%s", impossible, output)
+	for _, call := range fixture.rawCalls(t) {
+		if strings.HasPrefix(call, "clear ") || strings.HasPrefix(call, "compact ") || strings.Contains(call, "launch --session skillverify") {
+			t.Fatalf("live smoke executed duplicate feature drill: %q", call)
 		}
 	}
 }
 
-func TestLiveVerificationCreatesClaudeContextBeforeCompactCheckpoint(t *testing.T) {
+func TestLiveVerificationTTYUsesSemanticColors(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.runTTY(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("TTY live verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"\x1b[1;36m  ./bin/agentctl attach --session relverify a\x1b[0m",
+		"\x1b[1;34mKeep this script running in the verifier terminal.\x1b[0m",
+		"\x1b[1;35mClaude role a\x1b[1;34m",
+		"\x1b[1;33mCodex role b\x1b[1;34m",
+		"\x1b[1;32m[CHECKPOINT PASS B.C1]",
+		"\x1b[1;97;45m===== OPERATOR CHECKPOINT B.C1:",
+		"\x1b[1;30;46m===== OPERATOR CHECKPOINT B.C2:",
+		"\x1b[1;97;44m===== OPERATOR CHECKPOINT B.C3:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("TTY output omits semantic colour sequence %q:\n%s", want, output)
+		}
+	}
+	operatorStart := strings.Index(output, "===== OPERATOR ACTION B.A1:")
+	operatorEnd := strings.Index(output, "===== END OPERATOR CHECKPOINT B.C3 =====")
+	if operatorStart < 0 || operatorEnd <= operatorStart {
+		t.Fatalf("TTY output omits the bounded operator flow:\n%s", output)
+	}
+	operatorFlow := output[operatorStart:operatorEnd]
+	for _, role := range []struct {
+		phrase, style string
+	}{
+		{phrase: "Claude role a", style: "\x1b[1;35m"},
+		{phrase: "Codex role b", style: "\x1b[1;33m"},
+	} {
+		if got, want := strings.Count(operatorFlow, role.style+role.phrase), strings.Count(operatorFlow, role.phrase); got != want {
+			t.Fatalf("%s semantic colour count = %d, want every one of %d operator occurrences:\n%s", role.phrase, got, want, operatorFlow)
+		}
+	}
+	if got, want := strings.Count(operatorFlow, "\x1b[1;36m  ./bin/agentctl attach"), strings.Count(operatorFlow, "  ./bin/agentctl attach"); got != want {
+		t.Fatalf("typed-command colour count = %d, want every one of %d operator commands:\n%s", got, want, operatorFlow)
+	}
+}
+
+func TestLiveVerificationNOColorAndCapturedEvidenceStayByteClean(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.runTTY(t, strings.Repeat("y\n", 3), "NO_COLOR=")
+	if err != nil {
+		t.Fatalf("NO_COLOR TTY live verification failed: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Fatalf("NO_COLOR TTY output contains ANSI escapes:\n%q", output)
+	}
+
+	fixture = newLiveFixture(t)
+	output, err = fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("captured live verification failed: %v\n%s", err, output)
+	}
+	if strings.Contains(output, "\x1b[") {
+		t.Fatalf("non-TTY captured output contains ANSI escapes:\n%q", output)
+	}
+	evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+	t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+	for _, path := range []string{
+		filepath.Join(fixture.dir, "docs/release-verification-notes.md"),
+		evidenceRoot,
+	} {
+		walkErr := filepath.Walk(path, func(current string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.IsDir() {
+				return nil
+			}
+			body, readErr := os.ReadFile(current)
+			if readErr != nil {
+				return readErr
+			}
+			if strings.Contains(string(body), "\x1b[") {
+				t.Errorf("captured evidence contains ANSI escapes: %s", current)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatal(walkErr)
+		}
+	}
+}
+
+func TestLiveVerificationOperatorProseUsesLogicalUnwrappedLines(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("live verification failed: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"The Claude role a viewer shows a ready Claude harness, and the Codex role b viewer shows a ready Codex harness. The detached roles continue running independently of those viewers.",
+		"The script observed the original Claude role a child become absent, agentctl relaunched Claude role a from the fleet's stored configuration, and the replacement runtime has different shim and child identities.",
+		"Close the Claude role a viewer and Codex role b viewer by closing each viewer's terminal window or tab, or by otherwise closing each viewer's PTY at the terminal boundary.",
+	} {
+		if !strings.Contains(output, want+"\n") {
+			t.Fatalf("operator output omits one logical unwrapped line %q:\n%s", want, output)
+		}
+	}
+	for _, stale := range []string{
+		"Codex role b\nviewer",
+		"agentctl relaunched\nrole a",
+		"terminal window or tab,\nor by otherwise",
+	} {
+		if strings.Contains(output, stale) {
+			t.Fatalf("operator output retains manual wrapping %q:\n%s", stale, output)
+		}
+	}
+}
+
+func TestLiveVerificationBoundsEveryHumanStepAndUsesHarnessRoleAnchors(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
-	seed := "Before the compact spot check, create compactable context in the Window 2 role a viewer:"
-	firstPrompt := "Reply with FIRST READY and one sentence about this repository."
-	firstWait := "Wait for Claude's complete response, then submit this second message:"
-	secondPrompt := "Reply with SECOND READY and one different sentence about testing this repository."
-	secondWait := "Wait for Claude's second complete response. Then type junk into the input box; do NOT press Enter."
-	checkpoint := "[CHECKPOINT B.C6] claude compact setup"
-	positions := []int{
-		strings.Index(output, seed),
-		strings.Index(output, firstPrompt),
-		strings.Index(output, firstWait),
-		strings.Index(output, secondPrompt),
-		strings.Index(output, secondWait),
-		strings.Index(output, checkpoint),
+	blocks := []struct {
+		kind, id string
+		wants    []string
+	}{
+		{kind: "ACTION", id: "B.A1", wants: []string{"verifier terminal", "Claude role a viewer", "Codex role b viewer"}},
+		{kind: "CHECKPOINT", id: "B.C1", wants: []string{"Claude role a viewer", "Codex role b viewer"}},
+		{kind: "ACTION", id: "B.A2", wants: []string{"Claude role a viewer", "replacement Claude role a"}},
+		{kind: "CHECKPOINT", id: "B.C2", wants: []string{"Claude role a viewer", "fresh, ready"}},
+		{kind: "ACTION", id: "B.A3", wants: []string{"Claude role a viewer", "Codex role b viewer", "closing each viewer's terminal window or tab"}},
+		{kind: "CHECKPOINT", id: "B.C3", wants: []string{"Claude role a viewer", "Codex role b viewer", "closed"}},
 	}
-	for index, position := range positions {
+	for _, block := range blocks {
+		start := "===== OPERATOR " + block.kind + " " + block.id + ":"
+		end := "===== END OPERATOR " + block.kind + " " + block.id + " ====="
+		startAt := strings.Index(output, start)
+		endAt := strings.Index(output, end)
+		if startAt < 0 || endAt <= startAt {
+			t.Fatalf("operator block %s %s is not visibly bounded:\n%s", block.kind, block.id, output)
+		}
+		body := output[startAt:endAt]
+		for _, want := range block.wants {
+			if !strings.Contains(body, want) {
+				t.Fatalf("operator block %s %s omits human anchor %q:\n%s", block.kind, block.id, want, body)
+			}
+		}
+	}
+	if regexp.MustCompile(`(?i)\bwindow[[:space:]]+[0-9]+\b`).MatchString(output) {
+		t.Fatalf("operator guidance relies on human-ambiguous window numbers:\n%s", output)
+	}
+}
+
+func TestLiveVerificationDoesNotCloseViewerBeforeSurfaceCheckpoint(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("release verification failed: %v\n%s", err, output)
+	}
+	positions := map[string]int{
+		"live surface checkpoint":        strings.Index(output, "===== OPERATOR CHECKPOINT B.C1:"),
+		"replacement surface checkpoint": strings.Index(output, "===== OPERATOR CHECKPOINT B.C2:"),
+		"viewer close instruction":       strings.Index(output, "===== OPERATOR ACTION B.A3:"),
+		"viewer closure checkpoint":      strings.Index(output, "===== OPERATOR CHECKPOINT B.C3:"),
+	}
+	for name, position := range positions {
 		if position < 0 {
-			t.Fatalf("output missing compact-context instruction %d:\n%s", index, output)
-		}
-		if index > 0 && position <= positions[index-1] {
-			t.Fatalf("compact-context instructions are out of order: positions=%v\n%s", positions, output)
+			t.Fatalf("output omits %s:\n%s", name, output)
 		}
 	}
-	if !strings.Contains(output, "Claude's two responses are complete, and junk is visible in the claude input without being submitted.") {
-		t.Fatalf("B.C6 does not require both compactable context and unsent junk:\n%s", output)
+	if positions["live surface checkpoint"] >= positions["viewer close instruction"] ||
+		positions["replacement surface checkpoint"] >= positions["viewer close instruction"] ||
+		positions["viewer close instruction"] >= positions["viewer closure checkpoint"] {
+		t.Fatalf("viewer-close instruction is not after every surface checkpoint: positions=%v\n%s", positions, output)
+	}
+	closedSuffix := output[positions["viewer close instruction"]:]
+	for _, staleQuestion := range []string{"skill inventory", "present-not-ours", "fresh, ready claude input surface"} {
+		if strings.Contains(closedSuffix, staleQuestion) {
+			t.Fatalf("checkpoint requiring a live viewer follows the close instruction (%q):\n%s", staleQuestion, closedSuffix)
+		}
 	}
 }
 
@@ -1737,610 +1609,9 @@ func TestLiveVerificationRequiresAMQBeforePartB(t *testing.T) {
 	}
 }
 
-func TestLiveVerificationPartCConsentSeedsCodexAndLinksExactClaudeKeychains(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
-	if err != nil {
-		t.Fatalf("release verification failed: %v\n%s", err, output)
-	}
-	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-	wantDestination := filepath.Join(partCRoot, "home", "Library", "Keychains")
-	wantClaudeConfig := filepath.Join(partCRoot, "home", ".claude.json")
-	wantGuidance := []string{
-		"Part C can seed codex authentication from this empirically proven file:",
-		"  ~/.codex/auth.json",
-		"Copy only this Codex file into the temporary Part C HOME?",
-		"Claude Code 2.1.226 can authenticate through this exact symlink:",
-		fixture.keychainTarget + " -> " + wantDestination,
-		"Both probe harnesses can reach the operator's login keychain through this link; per-item ACLs still apply.",
-		"Part C will synthesize this minimal Claude onboarding configuration:",
-		wantClaudeConfig,
-		"It contains onboarding state only, not credentials, and does not copy the operator's Claude configuration.",
-		"Create exactly this Claude Keychains symlink and synthesized onboarding configuration: " + fixture.keychainTarget + " -> " + wantDestination + "?",
-		"The proven Codex auth.json, Claude Keychains symlink, and synthesized onboarding",
-		"configuration were created with your consent.",
-		"Did both harnesses start without requiring re-authentication?",
-	}
-	previousIndex := -1
-	for _, want := range wantGuidance {
-		index := strings.Index(output, want)
-		if index <= previousIndex {
-			t.Fatalf("auth consent guidance missing or out of order at %q:\n%s", want, output)
-		}
-		previousIndex = index
-	}
-	for _, forbidden := range []string{
-		"Part C can seed Claude authentication from",
-		"Copy only this Claude file",
-		filepath.Join(fixture.operatorHome, ".claude.json"),
-		"~/.claude/.credentials.json",
-		"CLAUDE_CODE_OAUTH_TOKEN",
-	} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("auth consent offered .claude.json as an authentication mechanism via %q:\n%s", forbidden, output)
-		}
-	}
-	for _, line := range strings.Split(output, "\n") {
-		if strings.Contains(line, ".claude.json") && line != "  "+wantClaudeConfig {
-			t.Fatalf("auth transcript mentioned .claude.json outside the exact synthesized-config destination: %q", line)
-		}
-	}
-	for _, forbidden := range []string{fakeClaudeAuthBody, fakeClaudeCredentialsBody, fakeCodexAuthBody} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("release verifier printed fake credential contents %q:\n%s", forbidden, output)
-		}
-	}
-	wantObservation := strings.Join([]string{
-		"dir .|700",
-		"file .claude.json|600",
-		"dir .codex|700",
-		"file .codex/auth.json|600",
-		"link Library/Keychains|" + fixture.keychainTarget,
-	}, "\n") + "\n"
-	if got := readTestFile(t, fixture.authObservationLog); got != wantObservation {
-		t.Fatalf("auth files observed at skillverify launch:\n%s\nwant:\n%s", got, wantObservation)
-	}
-	if got, want := readTestFile(t, fixture.claudeConfigLog), "{\"hasCompletedOnboarding\":true}\n"; got != want {
-		t.Fatalf("synthesized Claude onboarding config = %q, want %q", got, want)
-	}
-	if _, statErr := os.Stat(fixture.securityLog); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("consented-link path unexpectedly created an isolated keychain: %v", statErr)
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCAuthSelectionEOFIsInputFailure(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 10))
-	if err == nil {
-		t.Fatalf("release verification accepted closed auth-selection input:\n%s", output)
-	}
-	for _, want := range []string{"input closed — answer y or n", "Part C authentication selection input failed"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("closed auth-selection output missing %q:\n%s", want, output)
-		}
-	}
-	if strings.Contains(output, "operator declined") || strings.Contains(output, "Continue with guided manual sign-in instead?") {
-		t.Fatalf("closed auth-selection input was reported as a refusal:\n%s", output)
-	}
-}
-
-func TestLiveVerificationPartCMissingSeedRefusalNamesOnlyOfferedPath(t *testing.T) {
-	fixture := newLiveFixture(t)
-	if err := os.Remove(filepath.Join(fixture.operatorHome, ".codex", "auth.json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(fixture.keychainTarget); err != nil {
-		t.Fatal(err)
-	}
-	output, err := fixture.run(t, strings.Repeat("y\n", 10)+"n\n")
-	if err == nil {
-		t.Fatalf("release verification accepted refusal of the only available auth path:\n%s", output)
-	}
-	if !strings.Contains(output, "operator declined isolated-keychain guided sign-in") {
-		t.Fatalf("missing-seed refusal did not name the offered path:\n%s", output)
-	}
-	if strings.Contains(output, "declined both Claude authentication paths") || strings.Contains(output, "Copy only this Codex file") || strings.Contains(output, "Create exactly this Claude Keychains symlink") {
-		t.Fatalf("missing-seed refusal claimed an unoffered path:\n%s", output)
-	}
-}
-
-func TestLiveVerificationPartCAuthCopyFailureHidesSourcePath(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 11), "AGENTCTL_TEST_AUTH_INSTALL_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted authentication copy failure:\n%s", output)
-	}
-	if !strings.Contains(output, "Part C authentication seeding failed") {
-		t.Fatalf("copy failure output omitted fixed diagnostic:\n%s", output)
-	}
-	if strings.Contains(output, fixture.operatorHome) || strings.Contains(output, fakeCodexAuthBody) {
-		t.Fatalf("copy failure output exposed source credential data or path:\n%s", output)
-	}
-}
-
-func TestLiveVerificationPartCConsentDeclineGuidesManualSignIn(t *testing.T) {
-	fixture := newLiveFixture(t)
-	input := strings.Repeat("y\n", 11) + "n\n" + strings.Repeat("y\n", 4)
-	output, err := fixture.run(t, input)
-	if err != nil {
-		t.Fatalf("manual-auth release verification failed: %v\n%s", err, output)
-	}
-	for _, want := range []string{
-		"Continue with guided Claude sign-in using an isolated empty login keychain instead?",
-		"A fresh Claude token will be minted into the isolated temporary keychain.",
-		"While attached, complete these authentication steps before checking skills:",
-		"In the Claude Code tab, complete onboarding and sign in until a ready prompt appears.",
-		"The proven Codex auth.json was copied with your consent.",
-		"[CHECKPOINT C.C1] harness authentication ready",
-		"Did Claude Code mint a fresh token through guided sign-in and did codex authenticate from the seeded auth.json?",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("manual-auth guidance missing %q:\n%s", want, output)
-		}
-	}
-	wantObservation := strings.Join([]string{
-		"dir .|700",
-		"dir .codex|700",
-		"file .codex/auth.json|600",
-		"dir Library/Keychains|700",
-		"file Library/Keychains/login.keychain-db|600",
-	}, "\n") + "\n"
-	if got := readTestFile(t, fixture.authObservationLog); got != wantObservation {
-		t.Fatalf("manual-auth launch inherited copied files:\n%s", got)
-	}
-	if _, statErr := os.Stat(fixture.claudeConfigLog); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("isolated-keychain path received a Claude onboarding config: %v", statErr)
-	}
-	securityFields := strings.Split(strings.TrimSpace(readTestFile(t, fixture.securityLog)), "\t")
-	if len(securityFields) != 5 || securityFields[0] != filepath.Join(strings.TrimSpace(readTestFile(t, fixture.partCRootLog)), "home") || securityFields[1] != "4" || securityFields[2] != "create-keychain" || securityFields[3] != "-p" || securityFields[4] != filepath.Join(strings.TrimSpace(readTestFile(t, fixture.partCRootLog)), "home", "Library", "Keychains", "login.keychain-db") {
-		t.Fatalf("isolated keychain creation boundary was wrong: %q", strings.TrimSpace(readTestFile(t, fixture.securityLog)))
-	}
-	for _, forbidden := range []string{fakeClaudeAuthBody, fakeClaudeCredentialsBody, fakeCodexAuthBody} {
-		if strings.Contains(output, forbidden) {
-			t.Fatalf("manual-auth transcript printed fake credential contents %q:\n%s", forbidden, output)
-		}
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCRefusesConsentAndManualSignIn(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 11)+"n\nn\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT=1")
-	if err == nil {
-		t.Fatalf("release verification accepted refusal of both auth paths:\n%s", output)
-	}
-	if !strings.Contains(output, "operator declined Claude keychain link and isolated-keychain guided sign-in") {
-		t.Fatalf("output did not state both declined auth paths:\n%s", output)
-	}
-	for _, call := range fixture.calls(t) {
-		if call == "skill install" || strings.Contains(call, "--session skillverify") {
-			t.Fatalf("Part C work began after both auth paths were refused:\n%s", strings.Join(fixture.calls(t), "\n"))
-		}
-	}
-	if amqCalls := readTestFile(t, fixture.amqLog); strings.Contains(amqCalls, "coop init --agents a,b,user|") {
-		t.Fatalf("Part C AMQ initialization ran after both auth paths were refused:\n%s", amqCalls)
-	}
-	if !strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") || strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
-		t.Fatalf("real tmux connect-ENOENT was not accepted as named-socket absence:\n%s", output)
-	}
-	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-	t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })
-	if _, statErr := os.Stat(partCRoot); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Part C root survived refusal of both auth paths: %q, err=%v", partCRoot, statErr)
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCAgentctlBoundariesUseIsolatedEnvironment(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
-	if err != nil {
-		t.Fatalf("release verification failed: %v\n%s", err, output)
-	}
-	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
-	partCRoot := filepath.Dir(skillHome)
-	wantProject := filepath.Join(partCRoot, "project")
-	wantPathPrefix := filepath.Join(partCRoot, "bin") + string(os.PathListSeparator)
-	wantCommands := []string{
-		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + wantProject + " --tmux",
-		"attach --session skillverify",
-		"kill --session skillverify",
-	}
-	records := strings.Split(strings.TrimSpace(readTestFile(t, fixture.agentctlEnvironmentLog)), "\n")
-	if len(records) != len(wantCommands) {
-		t.Fatalf("Part C agentctl environment records = %d, want %d:\n%s", len(records), len(wantCommands), strings.Join(records, "\n"))
-	}
-	for index, record := range records {
-		fields := strings.Split(record, "\t")
-		if len(fields) != 4 {
-			t.Fatalf("Part C agentctl environment record %d malformed: %q", index, record)
-		}
-		if fields[0] != wantCommands[index] || fields[1] != wantProject || fields[2] != skillHome || !strings.HasPrefix(fields[3], wantPathPrefix) {
-			t.Fatalf("Part C agentctl boundary %d = %q; want command=%q cwd=%q HOME=%q PATH prefix=%q", index, record, wantCommands[index], wantProject, skillHome, wantPathPrefix)
-		}
-		if fields[2] == os.Getenv("HOME") || !strings.HasPrefix(fields[3], wantPathPrefix) {
-			t.Fatalf("Part C agentctl boundary could reach the real HOME or unshimmed tmux context: %q", record)
-		}
-	}
-}
-
-func TestLiveVerificationOptsPartCSkillFleetIntoTmuxPresentation(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_TMUX_PRESENTATION=1")
-	if err != nil {
-		t.Fatalf("Part C did not explicitly opt its tabbed skill fleet into tmux presentation: %v\n%s", err, output)
-	}
-	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
-	want := "launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(filepath.Dir(skillHome), "project") + " --tmux"
-	if calls := strings.Join(fixture.calls(t), "\n"); !strings.Contains(calls, want) {
-		t.Fatalf("Part C launch omitted exact explicit tmux argv %q:\n%s", want, calls)
-	}
-}
-
-func TestLiveVerificationPartCPinsPrivateRuntimeRoot(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_RUNTIME_ROOT=1")
-	if err != nil {
-		t.Fatalf("release verification did not pin Part C to its private runtime root: %v\n%s", err, output)
-	}
-}
-
-func TestLiveVerificationPartCSeedsCodexFixtureTrust(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15), "AGENTCTL_TEST_REQUIRE_PART_C_CODEX_TRUST=1")
-	if err != nil {
-		t.Fatalf("release verification did not seed deterministic Codex trust for its fixture project: %v\n%s", err, output)
-	}
-}
-
-func TestLiveVerificationPartCKillRetryUsesPinnedIsolatedEnvironment(t *testing.T) {
-	fixture := newLiveFixture(t)
-	originalHome := os.Getenv("HOME")
-	originalPath := os.Getenv("PATH")
-	output, err := fixture.run(t, strings.Repeat("y\n", 12)+"n\n",
-		"AGENTCTL_TEST_PART_C_KILL_CODES=17,0",
-		"AGENTCTL_TEST_SKILL_KILL_SERVER_CODES=18,0",
-	)
-	if err == nil {
-		t.Fatalf("release verification accepted Part C checkpoint refusal:\n%s", output)
-	}
-	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
-	partCRoot := filepath.Dir(skillHome)
-	wantProject := filepath.Join(partCRoot, "project")
-	wantPathPrefix := filepath.Join(partCRoot, "bin") + string(os.PathListSeparator)
-	var killRecords []string
-	for _, record := range strings.Split(strings.TrimSpace(readTestFile(t, fixture.agentctlEnvironmentLog)), "\n") {
-		if strings.HasPrefix(record, "kill --session skillverify\t") {
-			killRecords = append(killRecords, record)
-		}
-	}
-	if len(killRecords) != 2 {
-		t.Fatalf("Part C kill environment records = %d, want 2:\n%s", len(killRecords), strings.Join(killRecords, "\n"))
-	}
-	for index, record := range killRecords {
-		fields := strings.Split(record, "\t")
-		if len(fields) != 4 {
-			t.Fatalf("Part C kill environment record %d malformed: %q", index, record)
-		}
-		if fields[1] != wantProject || fields[2] != skillHome || !strings.HasPrefix(fields[3], wantPathPrefix) {
-			t.Fatalf("Part C kill retry %d escaped captured context: %q; want cwd=%q HOME=%q PATH prefix=%q", index, record, wantProject, skillHome, wantPathPrefix)
-		}
-		if fields[2] == originalHome || fields[3] == originalPath {
-			t.Fatalf("Part C kill retry %d reached the real HOME or default PATH: %q", index, record)
-		}
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_OWNED")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("Part C ownership survived the observed successful retry: %v", statErr)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_KILLED")); statErr != nil {
-		t.Fatalf("Part C successful retry was not observed: %v", statErr)
-	}
-	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCRejectCleansOnlyNamedResources(t *testing.T) {
-	fixture := newLiveFixture(t)
-	originalHome := os.Getenv("HOME")
-	originalPath := os.Getenv("PATH")
-	output, err := fixture.run(t, strings.Repeat("y\n", 13)+"n\n")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C refusal:\n%s", output)
-	}
-	if !strings.Contains(output, "operator refused checkpoint: harness lists the agentctl skill") {
-		t.Fatalf("output missing Part C refusal:\n%s", output)
-	}
-	calls := strings.Join(fixture.calls(t), "\n")
-	for _, want := range []string{"kill --session skillverify", "kill --session relverify"} {
-		if !strings.Contains(calls, want) {
-			t.Fatalf("calls missing %q:\n%s", want, calls)
-		}
-	}
-	if !strings.Contains(strings.Join(fixture.tmuxCalls(t), "\n"), "-L agentctl-skill-verify-") || !strings.Contains(strings.Join(fixture.tmuxCalls(t), "\n"), "kill-server") {
-		t.Fatalf("named Part C tmux socket was not removed:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
-	}
-	for _, path := range []string{os.Getenv("AGENTCTL_TEST_SKILL_KILLED"), os.Getenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED")} {
-		if _, statErr := os.Stat(path); statErr != nil {
-			t.Fatalf("cleanup marker %q: %v", path, statErr)
-		}
-	}
-	for _, call := range fixture.tmuxCalls(t) {
-		if call == "kill-server" {
-			t.Fatalf("bare/default-socket kill-server invoked:\n%s", strings.Join(fixture.tmuxCalls(t), "\n"))
-		}
-	}
-	var partCAMQRecord string
-	for _, record := range strings.Split(strings.TrimSpace(readTestFile(t, fixture.amqLog)), "\n") {
-		if strings.HasPrefix(record, "coop init --agents a,b,user|") {
-			if partCAMQRecord != "" {
-				t.Fatalf("Part C initialized AMQ more than once: %q and %q", partCAMQRecord, record)
-			}
-			partCAMQRecord = record
-		}
-	}
-	if partCAMQRecord == "" || strings.Contains(partCAMQRecord, "|"+fixture.dir+"|"+originalHome+"|"+originalPath) {
-		t.Fatalf("Part C did not use isolated cwd/HOME/PATH: %q", partCAMQRecord)
-	}
-	skillHome := strings.TrimSpace(readTestFile(t, fixture.skillRootLog))
-	if _, statErr := os.Stat(skillHome); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("temporary Part C HOME survived cleanup: %q, err=%v", skillHome, statErr)
-	}
-	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func assertChildRestoredEnvironment(t *testing.T, fixture liveFixture, wantDir, wantHome, wantPath string) {
-	t.Helper()
-	canonicalDir, err := filepath.EvalSymlinks(wantDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	records := strings.FieldsFunc(strings.TrimSpace(readTestFile(t, fixture.environmentLog)), func(character rune) bool { return character == '\n' })
-	if len(records) == 0 {
-		t.Fatal("fixture did not observe a post-teardown child command")
-	}
-	got := records[len(records)-1]
-	want := canonicalDir + "|" + wantHome + "|" + wantPath
-	if got != want {
-		t.Fatalf("post-teardown child environment = %q, want %q", got, want)
-	}
-}
-
-func assertPartCCredentialHomeAbsent(t *testing.T, fixture liveFixture) {
-	t.Helper()
-	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-	t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })
-	partCHome := filepath.Join(partCRoot, "home")
-	for _, path := range []string{
-		filepath.Join(partCHome, ".claude.json"),
-		filepath.Join(partCHome, ".claude", ".credentials.json"),
-		filepath.Join(partCHome, ".codex", "auth.json"),
-		partCHome,
-	} {
-		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("credential-bearing Part C path survived cleanup: %q, err=%v", path, statErr)
-		}
-	}
-}
-
-func assertOperatorKeychainTargetSurvives(t *testing.T, fixture liveFixture) {
-	t.Helper()
-	info, err := os.Stat(fixture.keychainTarget)
-	if err != nil || !info.IsDir() {
-		t.Fatalf("operator Keychains target did not survive: %q, info=%v, err=%v", fixture.keychainTarget, info, err)
-	}
-	if got := readTestFile(t, fixture.keychainSentinel); got != "real-keychain-target-must-survive" {
-		t.Fatalf("operator Keychains sentinel changed: %q", got)
-	}
-}
-
-func TestLiveVerificationPartCKeychainLinkFailureAbortsBeforeLaunch(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12), "AGENTCTL_TEST_KEYCHAIN_LINK_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted Keychains link failure:\n%s", output)
-	}
-	if !strings.Contains(output, "Part C Claude Keychains link creation failed") {
-		t.Fatalf("link failure output omitted fixed diagnostic:\n%s", output)
-	}
-	for _, call := range fixture.calls(t) {
-		if call == "skill install" || strings.Contains(call, "--session skillverify") {
-			t.Fatalf("Part C work began after Keychains link failure:\n%s", strings.Join(fixture.calls(t), "\n"))
-		}
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCIsolatedKeychainFailureAbortsBeforeLaunch(t *testing.T) {
-	fixture := newLiveFixture(t)
-	input := strings.Repeat("y\n", 11) + "n\ny\n"
-	output, err := fixture.run(t, input, "AGENTCTL_TEST_SECURITY_CREATE_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted isolated keychain failure:\n%s", output)
-	}
-	if !strings.Contains(output, "Part C isolated login keychain creation failed") {
-		t.Fatalf("isolated-keychain failure output omitted fixed diagnostic:\n%s", output)
-	}
-	for _, call := range fixture.calls(t) {
-		if call == "skill install" || strings.Contains(call, "--session skillverify") {
-			t.Fatalf("Part C work began after isolated keychain failure:\n%s", strings.Join(fixture.calls(t), "\n"))
-		}
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCCleanupRemovesOnlyOwnedKeychainLinkOnAbort(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12),
-		"AGENTCTL_TEST_PART_C_ATTACH_FAIL=1",
-		"AGENTCTL_TEST_PART_C_HOME_RM_FAIL=1",
-	)
-	if err == nil {
-		t.Fatalf("release verification accepted attach abort with retained Part C HOME:\n%s", output)
-	}
-	for _, want := range []string{
-		"PART C CLEANUP PASS (temporary Keychains symlink removed)",
-		"PART C CLEANUP FAIL (remove temporary credential HOME",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("attach-abort cleanup output missing %q:\n%s", want, output)
-		}
-	}
-	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-	t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })
-	linkPath := filepath.Join(partCRoot, "home", "Library", "Keychains")
-	if _, statErr := os.Lstat(linkPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("owned Keychains link survived abort cleanup: %q, err=%v", linkPath, statErr)
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCAttachAbortRemovesSeededCredentials(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12),
-		"AGENTCTL_TEST_PART_C_ATTACH_FAIL=1",
-		"AGENTCTL_TEST_PART_C_RM_FAIL=1",
-	)
-	if err == nil {
-		t.Fatalf("release verification accepted attach abort with failed root cleanup:\n%s", output)
-	}
-	for _, want := range []string{"Part C attach guidance failed", "PART C CLEANUP FAIL (remove temporary root"} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("attach-abort cleanup output missing %q:\n%s", want, output)
-		}
-	}
-	assertPartCCredentialHomeAbsent(t, fixture)
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCAttachAbortCleansResources(t *testing.T) {
-	fixture := newLiveFixture(t)
-	originalHome := os.Getenv("HOME")
-	originalPath := os.Getenv("PATH")
-	output, err := fixture.run(t, strings.Repeat("y\n", 12), "AGENTCTL_TEST_PART_C_ATTACH_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C attach failure:\n%s", output)
-	}
-	if !strings.Contains(output, "Part C attach guidance failed") {
-		t.Fatalf("output missing attach failure:\n%s", output)
-	}
-	calls := strings.Join(fixture.calls(t), "\n")
-	if !strings.Contains(calls, "kill --session skillverify") || !strings.Contains(calls, "kill --session relverify") {
-		t.Fatalf("cleanup calls missing:\n%s", calls)
-	}
-	if _, statErr := os.Stat(os.Getenv("AGENTCTL_TEST_SKILL_SOCKET_KILLED")); statErr != nil {
-		t.Fatalf("named socket cleanup missing: %v", statErr)
-	}
-	assertChildRestoredEnvironment(t, fixture, fixture.dir, originalHome, originalPath)
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCSocketCleanupFailureIsReported(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 13)+"n\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_CODE=1")
-	if err == nil {
-		t.Fatalf("release verification accepted named-socket cleanup failure:\n%s", output)
-	}
-	if strings.Contains(output, "[PASS C.5]") || !strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
-		t.Fatalf("named-socket cleanup failure was not reported:\n%s", output)
-	}
-	if !strings.Contains(output, "temporary Keychains symlink retained until fleet and socket cleanup completes") || strings.Contains(output, "temporary Keychains symlink removed") {
-		t.Fatalf("Keychains link was not retained behind the failed socket cleanup:\n%s", output)
-	}
-	partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-	t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })
-	linkPath := filepath.Join(partCRoot, "home", "Library", "Keychains")
-	if target, readErr := os.Readlink(linkPath); readErr != nil || target != fixture.keychainTarget {
-		t.Fatalf("retained Keychains link = %q, err=%v; want target %q", target, readErr, fixture.keychainTarget)
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCSocketAlreadyAbsentIsObserved(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 13)+"n\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_ABSENT=1")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C refusal:\n%s", output)
-	}
-	if !strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") || strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") {
-		t.Fatalf("already-absent named socket was not distinguished:\n%s", output)
-	}
-}
-
-func TestLiveVerificationPartCRejectsUnboundOrMultilineSocketENOENT(t *testing.T) {
-	tests := []struct {
-		name string
-		env  string
-	}{
-		{name: "warning before expected line", env: "AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT_WARNING=1"},
-		{name: "different socket", env: "AGENTCTL_TEST_SKILL_KILL_SERVER_ENOENT_WRONG_SOCKET=1"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := newLiveFixture(t)
-			output, err := fixture.run(t, strings.Repeat("y\n", 11)+"n\nn\n", test.env)
-			if err == nil {
-				t.Fatalf("release verification accepted refusal of both auth paths:\n%s", output)
-			}
-			if !strings.Contains(output, "PART C CLEANUP FAIL (named tmux socket") || strings.Contains(output, "PART C CLEANUP OBSERVED (named tmux socket already absent)") {
-				t.Fatalf("untrusted connect-ENOENT was accepted as named-socket absence:\n%s", output)
-			}
-			partCRoot := strings.TrimSpace(readTestFile(t, fixture.partCRootLog))
-			t.Cleanup(func() { _ = os.RemoveAll(partCRoot) })
-			if _, statErr := os.Stat(partCRoot); statErr != nil {
-				t.Fatalf("Part C root was removed after untrusted connect-ENOENT: %q, err=%v", partCRoot, statErr)
-			}
-			assertOperatorKeychainTargetSurvives(t, fixture)
-		})
-	}
-}
-
-func TestLiveVerificationPartCRootRemovalFailureIsReported(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 13)+"n\n", "AGENTCTL_TEST_PART_C_RM_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C root-removal failure:\n%s", output)
-	}
-	if strings.Contains(output, "[PASS C.5]") || !strings.Contains(output, "PART C CLEANUP FAIL (remove temporary root") {
-		t.Fatalf("Part C root-removal failure was not reported:\n%s", output)
-	}
-	assertPartCCredentialHomeAbsent(t, fixture)
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCLaunchFailureCleansNamedSocket(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 12), "AGENTCTL_TEST_PART_C_LAUNCH_FAIL=1")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C launch failure:\n%s", output)
-	}
-	if !strings.Contains(output, "Part C skill fleet launch failed") || !strings.Contains(strings.Join(fixture.tmuxCalls(t), "\n"), "-L agentctl-skill-verify-") {
-		t.Fatalf("named socket cleanup was not attempted after launch failure:\n%s\n%s", output, strings.Join(fixture.tmuxCalls(t), "\n"))
-	}
-	assertOperatorKeychainTargetSurvives(t, fixture)
-}
-
-func TestLiveVerificationPartCSocketCleanupRetryResetsExitStatus(t *testing.T) {
-	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 13)+"n\n", "AGENTCTL_TEST_SKILL_KILL_SERVER_CODES=17,0")
-	if err == nil {
-		t.Fatalf("release verification accepted Part C checkpoint refusal:\n%s", output)
-	}
-	for _, want := range []string{
-		"PART C CLEANUP FAIL (named tmux socket kill-server exited 17)",
-		"PART C CLEANUP PASS (named tmux socket killed)",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("cleanup retry output missing %q:\n%s", want, output)
-		}
-	}
-}
-
 func TestLiveVerificationDoesNotCallRefusalOnCheckpointEOF(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 10))
+	output, err := fixture.run(t, strings.Repeat("y\n", 2))
 	if err == nil {
 		t.Fatalf("release verification accepted checkpoint EOF:\n%s", output)
 	}
@@ -2355,7 +1626,7 @@ func TestLiveVerificationRejectsDetachedRoleAttachmentsAndTearsDown(t *testing.T
 	if err == nil {
 		t.Fatalf("release verification accepted detached-role-attachment refusal:\n%s", output)
 	}
-	if !strings.Contains(output, "[CHECKPOINT FAIL B.C1] operator refused checkpoint: detached role attachments") {
+	if !strings.Contains(output, "[CHECKPOINT FAIL B.C1] operator refused checkpoint: live role surfaces") {
 		t.Fatalf("output missing detached-role-attachment refusal:\n%s", output)
 	}
 	calls := strings.Join(fixture.calls(t), "\n")
@@ -2366,7 +1637,7 @@ func TestLiveVerificationRejectsDetachedRoleAttachmentsAndTearsDown(t *testing.T
 
 func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
@@ -2383,26 +1654,19 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 		"version",
 		"status --session relverify",
 		"launch --session relverify --roles a:claude,b:codex --efforts b:high",
-		"clear --session relverify a",
-		"clear --session relverify b",
-		"compact --session relverify a",
 		"status --session relverify",
 		"relaunch --session relverify a",
 		"status --session relverify",
 		"status --session relverify",
 		"kill --session relverify",
 		"status --session relverify",
-		"skill install",
-		"launch --session skillverify --roles a:claude,b:codex --dir " + filepath.Join(strings.TrimSpace(readTestFile(t, fixture.skillRootLog)), "..", "project") + " --tmux",
-		"attach --session skillverify",
-		"kill --session skillverify",
 	}
 	if got := fixture.calls(t); strings.Join(got, "\n") != strings.Join(wantAgentctl, "\n") {
 		t.Fatalf("agentctl calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantAgentctl, "\n"))
 	}
 	wantTmux := []string{"-V"}
 	gotTmux := fixture.tmuxCalls(t)
-	if len(gotTmux) != len(wantTmux)+1 || strings.Join(gotTmux[:len(wantTmux)], "\n") != strings.Join(wantTmux, "\n") || !strings.HasPrefix(gotTmux[len(wantTmux)], "-L agentctl-skill-verify-") || !strings.HasSuffix(gotTmux[len(wantTmux)], " kill-server") {
+	if strings.Join(gotTmux, "\n") != strings.Join(wantTmux, "\n") {
 		t.Fatalf("tmux calls:\n%s\nwant:\n%s", strings.Join(gotTmux, "\n"), strings.Join(wantTmux, "\n"))
 	}
 	notes, err := os.ReadFile(filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
@@ -2410,7 +1674,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y",
+		"- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y",
 		"- Teardown status: exit 3 (detached durable fleet absent)",
 	} {
 		if !strings.Contains(string(notes), want) {
@@ -2424,7 +1688,7 @@ func TestLiveVerificationRelaunchesClaudeFromStoredQuadByExactIDs(t *testing.T) 
 // runs; the fixture controls only its agentctl, tmux, and process boundaries.
 func TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach(t *testing.T) {
 	fixture := newLiveFixture(t)
-	output, err := fixture.run(t, strings.Repeat("y\n", 15))
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
 	if err != nil {
 		t.Fatalf("detached live verification failed: %v\n%s", err, output)
 	}
@@ -2440,10 +1704,9 @@ func TestLiveVerificationDetachedRelaunchUsesRuntimeRecordsAndExplicitRoleAttach
 	if got := strings.Count(output, "./bin/agentctl attach --session relverify a"); got < 2 {
 		t.Fatalf("role a attach guidance occurred %d times, want initial attach and post-relaunch reattach:\n%s", got, output)
 	}
-	partB := strings.SplitN(output, "=== Part C —", 2)[0]
 	for _, stale := range []string{"Command Menu", "pane ID", "press esc to detach"} {
-		if strings.Contains(partB, stale) {
-			t.Fatalf("detached Part B output retains tmux-era claim %q:\n%s", stale, partB)
+		if strings.Contains(output, stale) {
+			t.Fatalf("detached Part B output retains tmux-era claim %q:\n%s", stale, output)
 		}
 	}
 	for _, call := range fixture.tmuxCalls(t) {
@@ -2521,8 +1784,71 @@ func TestLiveVerificationOwnsTemporaryAMQConfigBeforeDetachedLaunchAndRestoresCh
 		t.Fatalf("temporary Part B AMQ root survived verification: %v", statErr)
 	}
 	amqCalls := strings.Split(strings.TrimSpace(readTestFile(t, fixture.amqLog)), "\n")
-	if len(amqCalls) < 2 || !strings.HasPrefix(amqCalls[0], "coop init --root "+evidenceRoot+"/part-b-amq --agents a,b,user --no-gitignore|") {
+	if len(amqCalls) != 1 || !strings.HasPrefix(amqCalls[0], "coop init --root "+evidenceRoot+"/part-b-amq --agents a,b,user --no-gitignore|") {
 		t.Fatalf("first AMQ call was not the owned Part B initialization: %q", amqCalls)
+	}
+}
+
+func TestLiveVerificationRendersDerivedProbeCountAndPartBAMQOwnership(t *testing.T) {
+	fixture := newLiveFixture(t)
+	output, err := fixture.run(t, strings.Repeat("y\n", 3))
+	if err != nil {
+		t.Fatalf("live verifier failed: %v\n%s", err, output)
+	}
+	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
+	for _, want := range []string{
+		"- Probes: 6 completed, no surviving throwaway server",
+		"- Part B AMQ mode: temporary (verifier-owned .amqrc and root)",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("rendered notes omit %q:\n%s", want, notes)
+		}
+	}
+}
+
+func TestLiveVerificationRetainsSubstitutedPartBAMQArtifacts(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment string
+		relative    string
+		wantBody    string
+		wantOutput  string
+	}{
+		{
+			name:        "config",
+			environment: "AGENTCTL_TEST_REPLACE_PART_B_AMQ_CONFIG_AFTER_KILL=1",
+			relative:    ".amqrc",
+			wantBody:    "replacement config\n",
+			wantOutput:  "PART B AMQ CLEANUP FAIL (temporary config identity changed:",
+		},
+		{
+			name:        "root",
+			environment: "AGENTCTL_TEST_REPLACE_PART_B_AMQ_ROOT_AFTER_KILL=1",
+			relative:    "part-b-amq/sentinel",
+			wantBody:    "replacement root\n",
+			wantOutput:  "PART B AMQ CLEANUP FAIL (temporary root identity changed:",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newLiveFixture(t)
+			output, err := fixture.run(t, strings.Repeat("y\n", 3), tc.environment)
+			if err == nil {
+				t.Fatalf("live verifier removed substituted AMQ %s:\n%s", tc.name, output)
+			}
+			evidenceRoot := strings.TrimSpace(readTestFile(t, fixture.evidenceDirLog))
+			t.Cleanup(func() { _ = os.RemoveAll(evidenceRoot) })
+			path := filepath.Join(evidenceRoot, tc.relative)
+			if tc.name == "config" {
+				path = filepath.Join(fixture.dir, tc.relative)
+			}
+			if got := readTestFile(t, path); got != tc.wantBody {
+				t.Fatalf("substituted %s body = %q, want %q", tc.name, got, tc.wantBody)
+			}
+			if !strings.Contains(output, tc.wantOutput) {
+				t.Fatalf("live verifier omitted substitution failure %q:\n%s", tc.wantOutput, output)
+			}
+		})
 	}
 }
 
@@ -2546,8 +1872,14 @@ func TestLiveVerificationPreservesPreexistingAMQConfig(t *testing.T) {
 	if !strings.Contains(metadata, "part_b_amq_mode=existing\n") {
 		t.Fatalf("metadata did not record existing AMQ mode:\n%s", metadata)
 	}
-	if strings.Contains(readTestFile(t, fixture.amqLog), "part-b-amq") {
+	notes := readTestFile(t, filepath.Join(fixture.dir, "docs/release-verification-notes.md"))
+	if !strings.Contains(notes, "- Part B AMQ mode: existing (pre-existing .amqrc; verifier removed no AMQ path)") {
+		t.Fatalf("rendered notes did not surface existing AMQ mode:\n%s", notes)
+	}
+	if body, readErr := os.ReadFile(fixture.amqLog); readErr == nil && strings.Contains(string(body), "part-b-amq") {
 		t.Fatal("verifier initialized a temporary Part B root despite an existing .amqrc")
+	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read AMQ log: %v", readErr)
 	}
 }
 
@@ -2638,14 +1970,14 @@ func TestLiveVerificationWaitsForRecordedClaudeChildAbsenceBeforeOneRelaunch(t *
 	}
 }
 
-func TestLiveVerificationPairsReplacementRuntimeWithFreshInputObservation(t *testing.T) {
+func TestLiveVerificationPairsReplacementRuntimeWithFreshSurfaceObservation(t *testing.T) {
 	fixture := newLiveFixture(t)
 	output, err := fixture.run(t, strings.Repeat("y\n", 15))
 	if err != nil {
 		t.Fatalf("release verification failed: %v\n%s", err, output)
 	}
 	for _, want := range []string{
-		"In the Window 2 role a viewer, type junk into the input box again; do NOT press Enter.",
+		"===== OPERATOR ACTION B.A2: attach the replacement Claude role a viewer =====",
 		"RELAUNCH PASS (replacement role a runtime identities observed)",
 		"./bin/agentctl attach --session relverify a",
 	} {
@@ -2653,12 +1985,7 @@ func TestLiveVerificationPairsReplacementRuntimeWithFreshInputObservation(t *tes
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
 	}
-	wantPrompt := `One of the fleet's harnesses was terminated, and agentctl relaunched it from
-the fleet's stored configuration. The replacement viewer shows a fresh harness
-whose model and effort carry over; its conversation does not, so the junk you
-typed is gone.
-
-Do you see a fresh, ready claude input surface with no trace of that junk?`
+	wantPrompt := "The Claude role a viewer shows the fresh, ready replacement harness. The script observed the original Claude role a child become absent, agentctl relaunched Claude role a from the fleet's stored configuration, and the replacement runtime has different shim and child identities.\nDoes the Claude role a viewer show the fresh, ready replacement harness?"
 	if !strings.Contains(output, wantPrompt) {
 		t.Fatalf("release verifier missing final relaunch prompt:\n%s", wantPrompt)
 	}
@@ -2762,8 +2089,14 @@ func TestLiveVerificationRejectsUnexpectedStatusFailure(t *testing.T) {
 
 func TestLiveVerificationUnexpectedExitRetainsAMQArtifactsWithoutObservedAbsence(t *testing.T) {
 	fixture := newLiveFixture(t)
+	bashEnvironment := filepath.Join(t.TempDir(), "bash-environment")
+	writeTestFile(t, bashEnvironment, []byte(`if [ -z "${AGENTCTL_TEST_VERIFIER_PID:-}" ]; then
+  export AGENTCTL_TEST_VERIFIER_PID=$$
+fi
+trap 'if [ "$$" = "$AGENTCTL_TEST_VERIFIER_PID" ] && [ "${PART_B_SESSION_OWNED:-0}" = 1 ]; then trap - DEBUG; echo "simulated unexpected Part B exit" >&2; exit 23; fi' DEBUG
+`), 0o644)
 	output, err := fixture.run(t, "",
-		"AGENTCTL_TEST_UNEXPECTED_EXIT_AFTER_PART_B_LAUNCH=1",
+		"BASH_ENV="+bashEnvironment,
 		"AGENTCTL_TEST_STATUS_AFTER_KILL_CODE=6",
 		"AGENTCTL_TEST_STATUS_AFTER_KILL_MESSAGE=agentctl: transport failure",
 	)
