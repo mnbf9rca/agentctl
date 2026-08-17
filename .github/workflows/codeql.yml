@@ -13,11 +13,8 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 15
-    env:
-      GOOS: darwin
-      GOARCH: arm64
     permissions:
       contents: read
       security-events: write
