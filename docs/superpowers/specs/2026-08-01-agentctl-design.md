@@ -2301,23 +2301,25 @@ after partial progress — three distinct causes of one permitted shape, none di
 §15.11.7 never writes descriptor 2 itself: it writes a proved-identical private descriptor when, and only when, it has
 proved by `fstat` that fd 2 names the same terminal, and otherwise fd 2's destination through a duplicate floored above
 2 — the destination is `stderr`'s in both cases, the descriptor is not, and that is stated here rather than left as an
-implied equivalence. No other section overrides any of the four. Five rows are explicitly multi-line and
+implied equivalence. No other section overrides any of the four. Six rows are explicitly multi-line and
 their additional lines are part of the selected template rather than an append: `launch-complete-detached` and
-`launch-complete-tmux` each carry exactly one hint line, `attach-no-presentation` carries one line per roster role, and
+`launch-complete-tmux` each carry one hint line, `attach-no-presentation` carries one line per roster role, and
 `amq-session-unowned` and `amq-session-shape-conflict` each carry their facts line followed by one line per admissible
-remedy, whose set §15.12.5 fixes by evidence. Those two rows are the whole of §15.12's addition to this rule: the AMQ
-success sentence is its own row, `amq-session-ready`, so the `launch-complete-*` and `run-child-*` templates are
-unchanged by §15.12 and nothing composes ad hoc.
+remedy, whose set and exact text §15.12.5 fixes. The sixth is `run-child-exited`. §15.12's success claim is **not** a row
+of its own and is never emitted before an outcome is known: the closed sentence of §15.12.1 is a defined final line of
+`launch-complete-detached`, `launch-complete-tmux`, and `run-child-exited`, emitted only when that success row is
+selected. That line is the single exception to the `agentctl: ` prefix rule — it is the operator-facing claim itself and
+is rendered verbatim, unprefixed — and it is stated here rather than left to inference.
 No other row may emit more than one line. `status` table and JSON documents are the
 sole successful status output and therefore add no diagnostic line.
 
 | Typed outcome | Exit | Exact factual message template |
 |---|---:|---|
-| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE` |
-| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION` |
+| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
+| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
 | `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
 | `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
-| `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
+| `run-child-exited` | 0 | line 1 `agentctl: foreground role ROLE in session SESSION exited with status 0`; line 2 the §15.12.1 closed sentence, verbatim and unprefixed |
 | `delivery-submitted` | 0 | `agentctl: OP for role ROLE in session SESSION wrote BYTES bytes and observed submit` |
 | `stop-child-exited` | 0 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP and observed child PID CHILD exit; no PTY input was written` |
 | `unclassified` | 1 | `agentctl: OP failed for session SESSION: CAUSE (unclassified)` |
@@ -2342,15 +2344,14 @@ sole successful status output and therefore add no diagnostic line.
 | `role-stale-when-required` | 4 | `agentctl: role ROLE in session SESSION has stale child PID CHILD after kill(CHILD, 0) returned ESRCH (stale-record)` |
 | `observed-self-target` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
 | `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
-| `amq-session-ready` | 0 | `agentctl: AMQ session discovery reports a mailbox directory for every declared role in session SESSION` |
 | `amq-base-absent` | 5 | `agentctl: refusing to launch session SESSION; ROOT is not an AMQ delivery root; create it with: amq setup; no role was started (amq-base-absent)` |
 | `amq-session-recorded-absent` | 5 | `agentctl: refusing to launch session SESSION; a durable fleet record binds it but no AMQ session folder exists at PATH; no role was started (amq-session-recorded-absent)` |
-| `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then one line per admissible remedy of §15.12.5, in that order |
-| `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then one line per admissible remedy of §15.12.5, in that order |
+| `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
+| `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
 | `amq-root-unresolved` | 6 | `agentctl: could not resolve the AMQ base root for DIRECTORY: CAUSE; no role was started (amq-root-unresolved)` |
 | `amq-observation-failed` | 6 | `agentctl: could not observe the AMQ session list at ROOT: CAUSE; no role was started (amq-observation-failed)` |
-| `amq-session-create-failed` | 6 | `agentctl: could not create the AMQ session SESSION at PATH; amq init exited STATUS; no role was started (amq-session-create-failed)` |
-| `amq-session-incomplete` | 6 | `agentctl: created the AMQ session SESSION at PATH but discovery reports no mailbox directory for HANDLES; no role was started (amq-session-incomplete)` |
+| `amq-session-create-failed` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited STATUS; post-state observed: REOBSERVATION; no role was started (amq-session-create-failed)` |
+| `amq-session-incomplete` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited 0 and discovery reports no mailbox directory for HANDLES; no role was started (amq-session-incomplete)` |
 | `orphan` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and recorded child PID CHILD was present with a matching start token (orphan)` |
 | `indeterminate-child-starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and the durable record is child-starting; independently prove child absence, then remove RECORD_PATH (indeterminate-child-starting)` |
 | `starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM holds the claim and the durable record is STATE (starting)` |
@@ -3358,10 +3359,13 @@ session exists, or is proven ours, before any role starts.
 
 #### 15.12.1 The closed success claim
 
-On success, agentctl states exactly one sentence about the AMQ side of a launch:
-**"AMQ session discovery reports a mailbox directory for every declared role"**.
-Success output and acceptance criteria state that sentence and **add or substitute
-no further claim about a role or its mailbox**.
+The AMQ side of a successful launch is claimed in exactly these words —
+**"AMQ session discovery reports a mailbox directory for every declared role"** —
+as a defined final line of the `launch-complete-detached`, `launch-complete-tmux`,
+and `run-child-exited` templates, verbatim and unprefixed (§15.8). It is not a row
+of its own, so it is never emitted before the command's outcome is known. Nothing
+further about a role or its mailbox is claimed, in output or in acceptance
+criteria.
 
 This is §1.1 applied to a fact AMQ does not expose. At 0.61.0 a default send to a
 session-scoped role warns and delivers while the same send with `--strict` exits
@@ -3519,18 +3523,41 @@ The refusals are `amq-root-unresolved` (6), `amq-base-absent` (5),
 `amq-session-create-failed` (6), `amq-session-incomplete` (6),
 `amq-session-shape-conflict` (5), `amq-session-recorded-absent` (5),
 `amq-observation-failed` (6), and `amq-session-unowned` (5). Each carries its exact
-literal template in §15.8's register, as does the `amq-session-ready` success row
-that emits the closed sentence of §15.12.1; the `launch-complete-*` and
-`run-child-*` templates are unchanged.
+literal template in §15.8's register. §15.12 adds no success row of its own: the
+closed sentence of §15.12.1 is a defined final line of the amended
+`launch-complete-detached`, `launch-complete-tmux`, and `run-child-exited`
+templates.
 
-Three of the refusals are selected by an exact triggering observation, so that no
-two can be reached from the same evidence:
+Three refusals are selected by an exact triggering observation, and the selection
+is **phased** so that no two are reachable from one evidence set:
 
-| Row | Triggering observation |
+| Row | Phase and triggering observation |
 |---|---|
-| `amq-observation-failed` | the `session list` call did not yield a parseable listing — a nonzero exit, or output that is not the documented JSON document |
-| `amq-session-create-failed` | `init` returned a nonzero status, whether or not directories appeared (§15.12.3) |
+| `amq-observation-failed` | the `session list` call did not yield a parseable listing — a nonzero exit, or output that is not the documented JSON document — **outside the init-nonzero phase** |
+| `amq-session-create-failed` | `init` returned a nonzero status, whether or not directories appeared (§15.12.3). This row **absorbs** the re-observation that follows it: `REOBSERVATION` renders the observed post-state, and its defined values include `observation-failed` when that re-observation is itself unparseable |
 | `amq-session-incomplete` | `init` returned zero and the re-observed predicate still fails — a declared role has no mailbox directory |
+
+Precedence is explicit: once `init` has exited nonzero, the outcome is
+`amq-session-create-failed` whatever the subsequent re-observation does, and
+`amq-observation-failed` is reachable only from an observation not preceded by a
+nonzero `init` in the same launch. Neither row claims what agentctl did or could
+not do: both state the command's exit status and what was observed afterwards,
+because a nonzero `init` may still have created directories and an exit 0 does not
+prove agentctl authored them.
+
+The remedy lines are exact template text, not option names. Rendered in this order,
+each on its own line, each indented by two spaces:
+
+```
+  agentctl launch --session OTHER_SESSION ...
+  amq list --session SESSION
+  agentctl launch --session SESSION --adopt ...
+  remove the exact folder PATH by hand; deletion destroys every queued message in it
+```
+
+The third line is omitted where §15.12.5 marks `--adopt` inadmissible, and the
+fourth is never a runnable command. `HANDLES` renders the declared roles in
+fleet-file declaration order, separated by a comma and a space.
 
 `amq-session-unowned` covers exactly the ownership-evidence cells of §15.12.3 — a
 folder with no record, a roster mismatch, and `record-legacy-provenance-absent` —
@@ -3609,8 +3636,9 @@ These assert the properties above, not their mechanisms.
   renders the option set its evidence permits: four options for an absent record
   or `record-legacy-provenance-absent`, three for contradicted evidence, with `--adopt` never named in the
   contradicted case and the removal option in non-runnable form in both.
-- Success output equals the closed sentence of §15.12.1 with nothing added, emitted
-  as its own typed row per §15.8.
+- The closed sentence of §15.12.1 is asserted verbatim and unprefixed as the final
+  line of each amended success template, is absent from every refusal, and is never
+  emitted before the command's outcome is selected.
 - **The base root is untouched.** Against a throwaway base root, the base
   configuration, the base agent mailboxes, and the base `meta/` contents are
   observed before and after both creation and adoption and are unchanged, with the
@@ -3630,6 +3658,9 @@ Two statements are owed to the release that ships this contract.
    Their records are pre-provenance records: the launch refuses until
    the operator relaunches with `--adopt`, which records `operator-asserted`
    ownership. No mail is lost and no folder needs removing.
+3. **The SECURITY.md delta for this contract rides the first implementation PR.**
+   It is drafted in the plan document. SECURITY.md states current operator truth,
+   so it may not assert this behavior while only the specification has landed.
 
 
 ## 16. Embedded skill installation

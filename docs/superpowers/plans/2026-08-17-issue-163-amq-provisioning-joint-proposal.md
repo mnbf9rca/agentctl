@@ -453,3 +453,36 @@ future per-fleet bookkeeping inside an AMQ tree goes in the reserved
   fail-closed posture. We report it; upstream rules on it.
 - The `init` concurrency race (§3) is stated but not eliminated by this design;
   a real cross-process fix belongs in the §5 contract.
+
+---
+
+## SECURITY.md delta — MUST ride the first implementation PR of #163
+
+SECURITY.md is guarded as an operator document stating **current** truth
+(`hack/securitydoc_test.go`), so this text may not land while only the
+specification has. It is parked here, ready to apply, and the §15.12.8 release
+obligations require it to accompany the first implementation PR.
+
+Add to the threat list, after the dependency entry:
+
+> - **Provisioning a fleet inside the operator's message store.** agentctl never
+>   writes in an AMQ tree itself: it invokes AMQ's own creator with an explicit
+>   root, leaves the base configuration, base mailboxes, and base metadata
+>   unchanged, verifies by re-observation, and adopts an existing session
+>   read-only or refuses (spec §15.12).
+
+Add to the residual list:
+
+> **Ownership binds a directory, and a directory is not a permission.** If a
+> directory's resolved AMQ root changes between creation and adoption, ownership
+> evidence can be wrong without being loud; `--adopt` substitutes a human claim
+> where evidence is absent, and the record says which. agentctl claims only a
+> directory per declared role; stricter delivery acceptance is AMQ's.
+
+Two constraints on applying it. The claim is **not** that the base root is
+unchanged — creation adds the session child, which is a base-level effect — but
+that the base configuration, mailboxes, and metadata are. And the file's word
+budget was at 1553 of 1650 when this was drafted: fitting this text needs
+compression elsewhere, and the earlier attempt weakened two release-verification
+qualifiers ("three-confirmation" live smoke, "exhaustive" Task 8 checks) to make
+room. Those qualifiers are load-bearing; find the words somewhere else.
