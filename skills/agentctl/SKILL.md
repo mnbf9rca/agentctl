@@ -1,42 +1,43 @@
 ---
 name: agentctl
-description: Use when operating an agentctl fleet from inside it — checking sibling agent status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
-compatibility: Requires the agentctl binary on PATH, run from inside an agentctl-managed tmux window.
+description: Use when operating an agentctl fleet — checking runtime status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
+compatibility: Requires the agentctl binary on PATH. Runtime status, control, and detached-role attach work without tmux.
 metadata:
-  version: "0.4.1"
+  version: "0.5.0"
 ---
 
 # Driving agentctl
 
-agentctl launches and controls tmux fleets of coding agents. You are one of
-those agents. This skill covers the commands you may use and the rules the
-binary cannot enforce for you.
+agentctl launches and controls fleets of coding agents. Each role is owned by
+a resident PTY shim; tmux is optional presentation, not role identity or the
+delivery path. Joining, breaking, moving, swapping, or renaming panes does not
+change runtime ownership or control eligibility.
 
 ## 1. Verify who and where you are first
 
-Every agentctl-launched window carries identity in its environment:
+An agentctl-launched role normally carries advisory launch identity:
 
-- `AGENTCTL_ROLE` — your role name; `AGENTCTL_SESSION` — your fleet's
-  session; `AGENTCTL_MANAGED=1` — this window is fleet-managed.
+- `AGENTCTL_ROLE` — your role; `AGENTCTL_SESSION` — your fleet;
+  `AGENTCTL_MANAGED=1` — agentctl launched this process.
 - `AM_ME` / `AM_SESSION` — your AMQ identity, set by `amq coop exec`.
-- `TMUX_PANE` — your own pane ID; agentctl refuses a control command that
-  resolves to it (an accident guard, not a permission boundary).
+- `TMUX_PANE` may identify a presentation pane, but is never role identity or
+  a targeting input.
 
 Check these before your first command. If `AM_ME != AGENTCTL_ROLE` or
-`AM_SESSION != AGENTCTL_SESSION`, your environment is not what you assume:
-stop and report instead of targeting anything. These variables are advisory
-identity fixed when your process started — treat them as facts about launch,
-not proof of the present.
+`AM_SESSION != AGENTCTL_SESSION`, stop and report the mismatch. These values
+describe launch, not current proof. For control, agentctl independently checks
+the connected shim and walks process ancestry; it refuses observed self-target
+and undetermined ancestry separately.
 
-Session resolution order is `--session` > `AGENTCTL_SESSION` > the tmux
-session you are in. So a bare command acts on **your own fleet**; name any
-other fleet explicitly with `--session`. Exception: bare `status` always
-lists every session (a `*` marks yours) — it never narrows to the ambient
-session.
+Single-target session resolution is `--session` > `AGENTCTL_SESSION` > the
+displayed tmux session when it can be observed unambiguously. Name a different
+fleet explicitly. Bare `status` is different: it enumerates every durable
+fleet and never narrows to the ambient session. A `*` marks the caller's
+session only when agentctl can observe one.
 
 ## 2. Commands you may use
 
-```
+```text
 agentctl status --json
 agentctl status --session SESSION --json
 agentctl clear --session SESSION ROLE
@@ -44,83 +45,76 @@ agentctl compact --session SESSION ROLE
 agentctl kill --session SESSION
 ```
 
-`launch`, `relaunch`, and `attach` are operator-only; do not issue them.
-`launch --from-template FILE` lets the operator supply fleet shape from a
-strict JSON file; launch remains operator-only.
+`launch`, `run`, `relaunch`, and `attach` are operator-only; do not issue them.
+The exact foreground form is `agentctl run --session SESSION --role ROLE
+--harness HARNESS [--model MODEL] [--effort LEVEL]`.
+
+It runs one role in the foreground using the current working directory and
+creates or extends the durable fleet. It creates or contacts no tmux server,
+session, window, or pane. A different stored fleet directory is refused before
+the role starts or durable state changes. Before cwd or runtime construction,
+`run` requires both standard input and standard output to be terminals. Pipes
+select exit 2; another terminal-observation failure selects exit 6. Neither
+refusal creates the runtime root, state root, or `sessions/` entry. See
+[references/exit-codes.md](references/exit-codes.md) for the exact rows. It
+remains attached through child exit. `launch --from-template FILE` supplies
+fleet shape from strict JSON. Passing neither `--detached` nor `--tmux` launches detached;
+a template may select `presentation`, and an explicit flag overrides it.
 
 ### 2.1 Author a launch template when the operator asks
 
-You may author or review a launch template for an operator. Before doing so,
-read [references/fleet-template.schema.json](references/fleet-template.schema.json):
-it is the complete template-shape contract. Schema-valid does not mean
-launch-valid; value rules apply to the merged template-and-flag union at launch.
-Do not issue the operator's `launch` command.
+You may author or review a launch template. First read
+[references/fleet-template.schema.json](references/fleet-template.schema.json),
+the complete shape contract. Schema-valid is not necessarily launch-valid;
+value rules apply to the merged template-and-flag union. Do not issue launch.
 
 ## 3. Read status as factual claims
 
-Status is roster-driven: roles come from fleet metadata, not from whatever
-windows exist. The states `ambiguous`, `unmanaged`, `missing`, `dead`,
-`no-baseline`, `unexpected-process`, `running` are distinct claims with
-distinct meanings — see
-[references/status-states.md](references/status-states.md). Never infer
-liveness from anything else (pane text, AMQ traffic, silence). An exited
-agent normally reports `missing`, not `dead`, because managed windows close
-on exit. `no-baseline` means the stored process baseline is empty, so agentctl
-never proved the pane's launch identity; control commands fail closed and no
-current-process probe is issued. Operator-only `relaunch` can recover it only
-when the window carries launch's positive `@agentctl_unproven=1` abandonment
-record and the session has at least one other listed window. An unmarked
-`no-baseline` window is refused because it may still be settling. A
-sole-window case is also refused and requires the operator's managed `kill`
-plus `launch` remedy.
+Status enumerates volatile runtime claims first and durable records second,
+with or without tmux. Its closed states have distinct meanings and precedence;
+see [references/status-states.md](references/status-states.md). Never infer
+liveness, identity, or execution from pane text, layout, AMQ traffic, or
+silence.
+
+`confidence: anchored` means a volatile lockfile anchored the runtime/durable
+join. `unanchored` is a weaker durable-only observation, never anchored
+absence. Presentation is separately `present`, `gone`, or `unavailable`; it
+never changes a role's runtime state. A missing presentation does not disable
+status or control.
 
 ## 4. Rules the binary does not enforce
 
-- **Never reset a role that is still working on a task.** A mid-task `clear`
-  or `compact` destroys its working context and work in progress. Reset only
-  when the current task is finished — its result has been delivered or
-  control explicitly handed back — or when you deliberately abandon that
-  work.
-- **Do not issue control commands while the fleet is saturating the host.**
-  agentctl cannot detect saturation without inferring machine state, which
-  its design forbids; the obligation is yours.
-- **Delivery is not execution.** Exit 0 proves tmux accepted the keys, not
-  that the agent's TUI ran the command. Use an AMQ message ping and `status`
-  only for the facts they can establish. To verify the reset itself, take the
-  pane ID from `status --json` and inspect the screen read-only:
-
-  ```tmux
-  tmux capture-pane -p -t PANE
-  ```
-
-  Confirm the captured screen shows that the TUI actually reset.
-  `capture-pane` is observation only. Never write to a sibling with raw tmux;
-  doing so bypasses every guard agentctl provides.
-- **The self-target guard is an accident guard.** It stops you wiping your
-  own context by mistake; it is not a security boundary.
+- Never reset a role still working. `clear` or `compact` destroys its current
+  context. Reset only after its result or handoff, or deliberately abandon it.
+- Do not issue control commands while the fleet saturates the host. agentctl
+  does not infer machine state.
+- Delivery is not execution. Exit 0 for `clear` or `compact` proves the shim
+  accepted the closed operation, wrote the registered bytes to its PTY, and
+  observed submit; it does not prove the harness ran the command. Confirm via
+  AMQ. A tmux pane, when present, may be inspected read-only, but never write
+  to a sibling with raw tmux.
+- The self-target check is an accident guard, not a security boundary.
 
 ## 5. Context hygiene for clear and compact
 
 - `clear` after a finished task when the next task is unrelated, or when you
   deliberately abandon work by a wedged or confused role.
-- `compact` after a finished task when the next task continues the same
-  subject and the prior context remains useful.
-- Never send either while the role is still working or while the fleet
-  saturates the host. Confirm the reset as described above before assigning
-  the next task.
-- Keep every new task description self-contained so clearing prior context
-  does not discard information the role still needs.
+- `compact` after a finished task when the next task continues the subject.
+- Never send either while the role is working or the host is saturated.
+- Keep new task descriptions self-contained so clearing context loses nothing
+  the role still needs.
 
-## 6. What agentctl deliberately cannot do
+## 6. Operator-only lifecycle facts
 
-No arbitrary keystrokes or free-text payloads (the payload registry is
-closed and argument-free), no reading or writing AMQ state, no attaching for
-you, no agent-initiated per-window restart, no machine-state inference.
-`relaunch` is operator-only because role recovery is a fleet-level decision;
-report a missing sibling to the operator instead of trying to repair it.
+`relaunch` starts only a runtime-observed missing role or ESRCH-backed stale
+record; every state that may retain a child refuses. `attach ROLE` streams a detached role directly, with one viewer and no output replay. Bare `attach` remains the fleet-level tmux presentation route; if no presentation is observed it lists the direct role commands and never creates a presentation.
+
+Only the explicit `attach ROLE` terminal stream carries operator keystrokes;
+control operations have no arbitrary free-text path. agentctl has no AMQ-state
+access, no agent-initiated per-role restart, and no machine-state inference. Report a
+missing sibling to the operator rather than trying to repair it.
 
 ## 7. Branch on exit codes, not prose
 
-Exit codes are contracts — see
-[references/exit-codes.md](references/exit-codes.md). Prose output may
-change; the codes may not.
+Exit codes are contracts; see [references/exit-codes.md](references/exit-codes.md).
+Typed prose names the observed outcome, but automation branches on the code.

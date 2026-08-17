@@ -20,10 +20,15 @@ func (e *MissingExecutableError) Error() string {
 	return fmt.Sprintf("required executable %q not found", e.Name)
 }
 
-// CheckExecutables confirms that base tools and requested harnesses resolve.
-func CheckExecutables(fleet config.FleetConfig, lookPath LookPathFunc) error {
-	required := []string{"tmux", "amq"}
-	seen := map[string]struct{}{"tmux": {}, "amq": {}}
+// CheckExecutables confirms that the presentation's base tools and requested
+// harnesses resolve. Detached shims do not use tmux.
+func CheckExecutables(fleet config.FleetConfig, requireTmux bool, lookPath LookPathFunc) error {
+	required := []string{"amq"}
+	seen := map[string]struct{}{"amq": {}}
+	if requireTmux {
+		required = append([]string{"tmux"}, required...)
+		seen["tmux"] = struct{}{}
+	}
 	for _, role := range fleet.Roles {
 		spec, ok := harness.Lookup(string(role.Harness))
 		if !ok {

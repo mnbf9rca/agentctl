@@ -1,718 +1,156 @@
+//go:build darwin
+
 package main
 
 import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io/fs"
-	"os"
-	"os/exec"
 	"reflect"
-	"strconv"
 	"testing"
-	"time"
 
+	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
-	"github.com/mnbf9rca/agentctl/internal/status"
-	"github.com/mnbf9rca/agentctl/internal/tmuxx"
+	"github.com/mnbf9rca/agentctl/internal/preflight"
+	"github.com/mnbf9rca/agentctl/internal/shim"
 )
 
-type launchTestFileInfo struct{ mode fs.FileMode }
+func TestRunLaunchDefaultsToDetachedAndReportsExactAttachHint(t *testing.T) {
+	t.Parallel()
 
-func (info launchTestFileInfo) Name() string       { return "test" }
-func (info launchTestFileInfo) Size() int64        { return 0 }
-func (info launchTestFileInfo) Mode() fs.FileMode  { return info.mode }
-func (info launchTestFileInfo) ModTime() time.Time { return time.Time{} }
-func (info launchTestFileInfo) IsDir() bool        { return info.mode.IsDir() }
-func (info launchTestFileInfo) Sys() any           { return nil }
+	directory := "/work"
+	launcher := &launcherStub{result: fleet.ShimLaunchResult{Directory: directory, TotalRoles: 2}}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"launch", "--session", "fleet", "--roles", "planner:claude,coder:codex", "--models", "coder:gpt-5.6-sol", "--dir", directory,
+	}, &stdout, &stderr, dependencies{launcher: launcher})
+	wantFleet := config.FleetConfig{Roles: []config.RoleConfig{{Name: "planner", Harness: config.HarnessClaude}, {Name: "coder", Harness: config.HarnessCodex, Model: "gpt-5.6-sol"}}}
+	if code != exitOK || launcher.session != "fleet" || !reflect.DeepEqual(launcher.fleet, wantFleet) || launcher.presentation != fleet.PresentationDetached || launcher.directory == nil || *launcher.directory != directory {
+		t.Fatalf("code=%d session=%q fleet=%#v directory=%v stderr=%q", code, launcher.session, launcher.fleet, launcher.directory, stderr.String())
+	}
+	if stderr.String() != "agentctl: launched session \"fleet\" detached; 2 roles are ready\n"+
+		"agentctl: attach a role with: agentctl attach --session fleet ROLE\n" {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
 
-func TestRunLaunchRejectsInvalidConfigurationBeforeRunner(t *testing.T) {
-	for _, tt := range []struct {
+func TestRunLaunchPresentationFlagsSelectExactModeAndHint(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		flag         string
+		presentation fleet.Presentation
+		want         string
+	}{
+		{name: "detached", flag: "--detached", presentation: fleet.PresentationDetached, want: "agentctl: launched session \"fleet\" detached; 1 roles are ready\nagentctl: attach a role with: agentctl attach --session fleet ROLE\n"},
+		{name: "tmux", flag: "--tmux", presentation: fleet.PresentationTmux, want: "agentctl: launched session \"fleet\"; 1 roles are ready\nagentctl: attach the fleet with: agentctl attach --session fleet\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			launcher := &launcherStub{result: fleet.ShimLaunchResult{Directory: "/work", TotalRoles: 1}}
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude", test.flag}, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+			if code != exitOK || launcher.presentation != test.presentation || stderr.String() != test.want {
+				t.Fatalf("code=%d presentation=%q stderr=%q, want %d %q %q", code, launcher.presentation, stderr.String(), exitOK, test.presentation, test.want)
+			}
+		})
+	}
+}
+
+func TestRunLaunchRefusesConflictingPresentationFlagsBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	launcher := &launcherStub{}
+	var stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--detached", "--tmux"}, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher})
+	if code != exitUsage || launcher.called || stderr.String() != "agentctl: --detached and --tmux are mutually exclusive\n" {
+		t.Fatalf("code=%d called=%t stderr=%q", code, launcher.called, stderr.String())
+	}
+}
+
+func TestRunLaunchMapsClosedPreownershipAndCommitOutcomes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
 		name string
-		args []string
+		err  error
+		code int
 		want string
 	}{
-		{name: "empty session", args: []string{"launch", "--roles", "planner:claude"}, want: "invalid session \"\""},
-		{name: "empty roles", args: []string{"launch", "--session", "fleet"}, want: "invalid --roles value \"\": must not be empty"},
-		{name: "invalid session", args: []string{"launch", "--session", "Invalid", "--roles", "planner:claude"}, want: "invalid session \"Invalid\""},
-		{name: "invalid fleet", args: []string{"launch", "--session", "fleet", "--roles", "planner:unknown"}, want: "unknown harness \"unknown\""},
-		{name: "explicitly empty models", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--models="}, want: "--models value \"\": must not be empty"},
-		{name: "explicitly empty efforts", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts="}, want: "--efforts value \"\": must not be empty"},
-		{name: "invalid effort charset", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "planner:high=evil"}, want: "effort \"high=evil\" must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$"},
-		{name: "effort for undefined role", args: []string{"launch", "--session", "fleet", "--roles", "planner:claude", "--efforts", "worker:high"}, want: "effort references undefined role \"worker\""},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner()
-			var stdout, stderr bytes.Buffer
-
-			code := runWith(tt.args, &stdout, &stderr, launchTestDependencies(runner))
-
-			if code != exitUsage {
-				t.Fatalf("runWith(%q) = %d, want %d", tt.args, code, exitUsage)
-			}
-			if got := stderr.String(); !bytes.Contains([]byte(got), []byte(tt.want)) || !bytes.Contains([]byte(got), []byte(commandUsage["launch"])) {
-				t.Fatalf("stderr = %q, want configuration error %q and usage", got, tt.want)
-			}
-			if len(runner.Calls) != 0 {
-				t.Fatalf("runner calls = %#v, want none", runner.Calls)
+		{name: "missing executable", err: &preflight.MissingExecutableError{Name: "codex"}, code: exitMissingExecutable, want: "agentctl: required executable \"codex\" was not found; no role was mutated\n"},
+		{name: "fleet exists", err: &fleet.ShimFleetExistsError{Session: "fleet"}, code: exitSession, want: "agentctl: refusing to launch session \"fleet\"; durable fleet configuration already exists (fleet-config-exists)\n"},
+		{name: "uncertain fleet config", err: &shim.RecordCommitUncertainError{Err: errors.New("sync failed")}, code: exitLaunchUnproven, want: "agentctl: role \"planner\" in session \"fleet\" has an uncertain durable fleet-config record commit: \"durable record replacement is visible but commit is uncertain: sync failed\"; the record was retained and the role was not reported absent (record-commit-uncertain)\n"},
+		{name: "ambiguous ownership remains unclassified", err: &fleet.ShimLaunchRollbackError{Session: "fleet", Role: "planner", Cause: errors.New("presentation result indeterminate"), CleanupErr: errors.New("ownership absence unproved")}, code: exitUnclassified, want: "agentctl: launch failed for session \"fleet\": \"shim launch failed for role \\\"planner\\\" in session \\\"fleet\\\": presentation result indeterminate; owned rollback incomplete: ownership absence unproved\" (unclassified)\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &bytes.Buffer{}, &stderr, dependencies{launcher: &launcherStub{err: test.err}})
+			if code != test.code || stderr.String() != test.want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
 			}
 		})
 	}
 }
 
-func TestRunLaunchMissingDependencyDoesNotCallRunner(t *testing.T) {
-	runner := tmuxx.NewFakeRunner()
-	deps := launchTestDependencies(runner)
-	deps.fleet.LookPath = func(name string) (string, error) {
-		if name == "amq" {
-			return "", errors.New("not found")
-		}
-		return "/bin/" + name, nil
-	}
-	var stdout, stderr bytes.Buffer
+// This catches detached typed outcomes falling through the generic launch
+// renderer and losing their observed PID, cleanup, or uncertainty facts.
+func TestRunLaunchRendersDetachedStartOutcomesExactly(t *testing.T) {
+	t.Parallel()
 
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, deps)
-
-	if code != exitMissingExecutable {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitMissingExecutable, stderr.String())
-	}
-	if got, want := stderr.String(), "agentctl: required executable \"amq\" not found\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("runner calls = %#v, want none", runner.Calls)
-	}
-}
-
-func TestRunLaunchRejectsInvalidDirectoryBeforeRunner(t *testing.T) {
-	for _, tt := range []struct {
+	for _, test := range []struct {
 		name string
-		stat func(string) (fs.FileInfo, error)
+		err  error
+		code int
+		want string
 	}{
-		{name: "missing", stat: func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }},
-		{name: "regular file", stat: func(string) (fs.FileInfo, error) { return launchTestFileInfo{mode: 0o644}, nil }},
+		{name: "failed", err: &fleet.ShimDetachedStartFailedError{Session: "fleet", Role: "planner", Cause: errors.New("exec denied")}, code: exitLaunch, want: "agentctl: could not start a detached shim for role \"planner\" in session \"fleet\": exec denied; no child was started and cleanup removed every artifact owned by this invocation (detached-start-failed)\n"},
+		// This catches rendering a later no-child detached start failure with
+		// incomplete earlier-role cleanup as generic or complete cleanup.
+		{name: "failed retained", err: &fleet.ShimDetachedStartFailedError{Session: "fleet", Role: "coder", Cause: errors.New("exec denied"), Remaining: "role planner and durable fleet record", CleanupErr: errors.New("planner retained")}, code: exitLaunchUnproven, want: "agentctl: could not start a detached shim for role \"coder\" in session \"fleet\": exec denied; cleanup left role planner and durable fleet record: planner retained (detached-start-retained)\n"},
+		{name: "rolled back", err: &fleet.ShimDetachedStartRolledBackError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("exited")}, code: exitLaunch, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" failed before readiness: exited; cleanup observed child absence and removed every artifact owned by this invocation (detached-start-rolled-back)\n"},
+		{name: "retained", err: &fleet.ShimDetachedStartRetainedError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("exited"), CleanupErr: errors.New("lock remained")}, code: exitLaunchUnproven, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" failed before readiness: exited; cleanup left retained artifacts: lock remained (detached-start-retained)\n"},
+		{name: "uncertain", err: &fleet.ShimDetachedStartUncertainError{Session: "fleet", Role: "planner", CreatedPID: 41, Cause: errors.New("deadline")}, code: exitLaunchUnproven, want: "agentctl: detached shim PID 41 for role \"planner\" in session \"fleet\" neither became ready nor was observed to exit; nothing was removed and the durable record was retained (detached-start-uncertain)\n"},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner()
-			deps := launchTestDependencies(runner)
-			deps.fleet.Stat = tt.stat
-			var stdout, stderr bytes.Buffer
-
-			code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir", "/bad"}, &stdout, &stderr, deps)
-
-			if code != exitUsage {
-				t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitUsage, stderr.String())
-			}
-			if len(runner.Calls) != 0 {
-				t.Fatalf("runner calls = %#v, want none", runner.Calls)
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &bytes.Buffer{}, &stderr, dependencies{launcher: &launcherStub{err: test.err}})
+			if code != test.code || stderr.String() != test.want {
+				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
 			}
 		})
 	}
 }
 
-func TestRunLaunchRejectsExplicitEmptyDirectoryBeforeRunner(t *testing.T) {
-	runner := tmuxx.NewFakeRunner()
-	deps := launchTestDependencies(runner)
-	deps.fleet.Stat = func(path string) (fs.FileInfo, error) {
-		if path != "" {
-			t.Fatalf("Stat path = %q, want explicit empty path", path)
-		}
-		return nil, fs.ErrNotExist
-	}
-	var stdout, stderr bytes.Buffer
+func TestRunLaunchRejectsInvalidConfigurationBeforeShimLauncher(t *testing.T) {
+	t.Parallel()
 
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude", "--dir="}, &stdout, &stderr, deps)
-
-	if code != exitUsage {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitUsage, stderr.String())
-	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("runner calls = %#v, want none", runner.Calls)
-	}
-}
-
-func TestRunLaunchSuccessRendersObservedStatus(t *testing.T) {
-	responses := append(launchOneRoleResponses(""), healthyPostLaunchResponses()...)
-	runner := tmuxx.NewFakeRunner(responses...)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitOK {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-	}
-	want := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
-		"fleet    planner  claude   default  default  %42   claude   running\n"
-	if got := stdout.String(); got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
-	}
-	if got, want := runner.Calls[0], (tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("first runner call = %#v, want %#v", got, want)
-	}
-	wantPostLaunch := postLaunchStatusCalls()
-	if len(runner.Calls) < len(wantPostLaunch) {
-		t.Fatalf("runner calls = %#v, want post-launch suffix %#v", runner.Calls, wantPostLaunch)
-	}
-	if got := runner.Calls[len(runner.Calls)-len(wantPostLaunch):]; !reflect.DeepEqual(got, wantPostLaunch) {
-		t.Fatalf("post-launch runner calls = %#v, want %#v", got, wantPostLaunch)
-	}
-}
-
-func TestRunLaunchWithUnprovenRoleReportsObservationAndSummaryRendersStatusAndExitsNine(t *testing.T) {
-	responses := launchOneRoleTimeoutResponses()
-	responses = append(responses,
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\t\n")},
-		tmuxx.Response{Stdout: []byte("%42\t4242\t0\t1\n")},
-	)
-	runner := tmuxx.NewFakeRunner(responses...)
-	deps := launchTestDependencies(runner)
-	useInstantLaunchClock(&deps)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, deps)
-
-	if code != exitLaunchUnproven {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitLaunchUnproven, stderr.String())
-	}
-	wantStdout := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
-		"fleet    planner  claude   default  default  %42            no-baseline\n"
-	if got := stdout.String(); got != wantStdout {
-		t.Fatalf("stdout = %q, want %q", got, wantStdout)
-	}
-	wantStderr := "agentctl: planner: no process baseline recorded; pane %42 did not yield two consecutive identical non-amq observations within 5s (last observed: \"env\", not repeated); window @23 was left in place\n" +
-		"agentctl: session \"fleet\" launched; 1 of 1 roles unproven: planner; nothing was rolled back; control commands refuse an unproven role; \"agentctl relaunch ROLE\" recovers planner\n"
-	if got := stderr.String(); got != wantStderr {
-		t.Fatalf("stderr = %q, want %q", got, wantStderr)
-	}
-	assertNoKillCall(t, runner)
-	processCalls := 0
-	for _, call := range runner.Calls {
-		if call.Executable == "ps" {
-			processCalls++
-		}
-	}
-	if processCalls != 51 {
-		t.Fatalf("process calls = %d, want 51 launch attempts and no post-launch probe; calls=%#v", processCalls, runner.Calls)
-	}
-}
-
-func TestConfirmLaunchKeepsExitNineWhenStatusCannotBeConfirmed(t *testing.T) {
-	collector := selectedStatusCollectorStub{err: errors.New("observation failed")}
-	result := fleet.LaunchResult{
-		Session:          tmuxx.Session{ID: "$17", Name: "fleet"},
-		TotalRoles:       2,
-		UnprovenRoles:    []string{"planner", "reviewer"},
-		RecoverableRoles: []string{"planner"},
-	}
-	var stdout, stderr bytes.Buffer
-
-	code := confirmLaunch(context.Background(), &stdout, &stderr, collector, result)
-
-	if code != exitLaunchUnproven {
-		t.Fatalf("confirmLaunch() = %d, want %d", code, exitLaunchUnproven)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
-	}
-	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role; \"agentctl relaunch ROLE\" recovers planner; no abandonment record was stamped for reviewer, which can only be recovered by recreating the fleet\n" +
-		"agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: observation failed\n"
-	if got := stderr.String(); got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-}
-
-func TestConfirmLaunchReportsOnlyFleetRecreationWhenNoAbandonmentRecordWasStamped(t *testing.T) {
-	collector := selectedStatusCollectorStub{report: status.Report{Session: "fleet", Managed: true}}
-	result := fleet.LaunchResult{
-		Session:       tmuxx.Session{ID: "$17", Name: "fleet"},
-		TotalRoles:    2,
-		UnprovenRoles: []string{"planner", "reviewer"},
-	}
-	var stdout, stderr bytes.Buffer
-
-	code := confirmLaunch(context.Background(), &stdout, &stderr, collector, result)
-
-	if code != exitLaunchUnproven {
-		t.Fatalf("confirmLaunch() = %d, want %d", code, exitLaunchUnproven)
-	}
-	want := "agentctl: session \"fleet\" launched; 2 of 2 roles unproven: planner, reviewer; nothing was rolled back; control commands refuse an unproven role; no abandonment record was stamped for planner, reviewer, which can only be recovered by recreating the fleet\n"
-	if got := stderr.String(); got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-}
-
-func TestRunLaunchRendersObservedMissingRoleWithoutChangingSuccess(t *testing.T) {
-	responses := append(launchOneRoleResponses(""),
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("1\n")},
-		tmuxx.Response{Stdout: []byte("planner\n")},
-		tmuxx.Response{},
-	)
-	runner := tmuxx.NewFakeRunner(responses...)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitOK {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-	}
-	want := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
-		"fleet    planner           default  default                 missing\n"
-	if got := stdout.String(); got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
-	}
-}
-
-func TestRunLaunchReportsUnverifiedConfirmationWithoutChangingSuccess(t *testing.T) {
-	responses := append(launchOneRoleResponses(""), tmuxx.Response{Err: errors.New("observation failed")})
-	runner := tmuxx.NewFakeRunner(responses...)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitOK {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
-	}
-	want := "agentctl: session \"fleet\" launched, but post-launch status could not be confirmed: tmux show session option: observation failed\n"
-	if got := stderr.String(); got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-}
-
-func TestRunLaunchReportsSessionEnvironmentClearFailureButStillSucceeds(t *testing.T) {
-	responses := launchOneRoleResponses("")
-	responses[16] = tmuxx.Response{Err: errors.New("permission denied")}
-	responses = append(responses, healthyPostLaunchResponses()...)
-	runner := tmuxx.NewFakeRunner(responses...)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitOK {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-	}
-	wantStatus := "SESSION  ROLE     HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
-		"fleet    planner  claude   default  default  %42   claude   running\n"
-	if got := stdout.String(); got != wantStatus {
-		t.Fatalf("stdout = %q, want %q", got, wantStatus)
-	}
-	want := "agentctl: could not clear AGENTCTL_ROLE from the tmux session environment; windows created by hand may inherit the first role's identity: tmux clear session environment: permission denied\n"
-	if got := stderr.String(); got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-	assertNoKillCall(t, runner)
-}
-
-func TestRunLaunchMapsSessionCollisionWithoutKilling(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(tmuxx.Response{Stdout: []byte("$3\tfleet\n")})
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitSession {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
-	}
-	if got, want := stderr.String(), "agentctl: session \"fleet\" already exists\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-	assertNoKillCall(t, runner)
-}
-
-func TestRunLaunchMapsCreationErrorWithMayExistWarningAndNoKill(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(tmuxx.Response{}, tmuxx.Response{Stdout: []byte("malformed\n")})
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitTmux {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
-	}
-	const warning = "a session named fleet may exist; inspect with tmux ls"
-	if got := stderr.String(); !bytes.Contains([]byte(got), []byte(warning)) {
-		t.Fatalf("stderr = %q, want operator warning %q", got, warning)
-	}
-	assertNoKillCall(t, runner)
-}
-
-func TestRunLaunchMapsOrdinaryTmuxErrorToExitTmux(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(
-		tmuxx.Response{},
-		tmuxx.Response{Err: errors.New("create failed")},
-	)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitTmux {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
-	}
-	if got, want := stderr.String(), "agentctl: tmux create session: create failed\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-}
-
-func TestRunLaunchClassifiesDuplicateSessionRace(t *testing.T) {
-	runner := tmuxx.NewFakeRunner(
-		tmuxx.Response{Err: errors.New("no tmux server")},
-		tmuxx.Response{Err: launchExitError(t, 1, "duplicate session: fleet")},
-	)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitSession {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
-	}
-	if got, want := stderr.String(), "agentctl: tmux create session: exit status 1: duplicate session: fleet\n"; got != want {
-		t.Fatalf("stderr = %q, want %q", got, want)
-	}
-	assertLaunchCalls(t, runner,
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/invocation", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude'"}},
-	)
-}
-
-func TestRunLaunchBoundsDuplicateSessionRaceClassification(t *testing.T) {
-	tests := []struct {
-		name     string
-		exitCode int
-		message  string
-	}{
-		{name: "matching words inside unrelated stderr", exitCode: 1, message: "permission denied: duplicate session: fleet"},
-		{name: "duplicate refusal has an unrelated suffix", exitCode: 1, message: "duplicate session: fleet: permission denied"},
-		{name: "matching stderr from a different exit status", exitCode: 23, message: "duplicate session: fleet"},
-		{name: "duplicate refusal names a different session", exitCode: 1, message: "duplicate session: other"},
-		{name: "duplicate refusal has an extra stderr line", exitCode: 1, message: "duplicate session: fleet\npermission denied"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner(
-				tmuxx.Response{},
-				tmuxx.Response{Err: launchExitError(t, tt.exitCode, tt.message)},
-			)
-			var stdout, stderr bytes.Buffer
-
-			code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-			if code != exitTmux {
-				t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
-			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q, want empty", stdout.String())
-			}
-			if got, want := stderr.String(), fmt.Sprintf("agentctl: tmux create session: exit status %d: %s\n", tt.exitCode, tt.message); got != want {
-				t.Fatalf("stderr = %q, want %q", got, want)
-			}
-			assertNoKillCall(t, runner)
-		})
-	}
-}
-
-func TestRunLaunchClassifiesDuplicateSessionRaceLineEndings(t *testing.T) {
-	tests := []struct {
-		name       string
-		terminator string
-	}{
-		{name: "no terminator"},
-		{name: "CRLF", terminator: "\r\n"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner(
-				tmuxx.Response{},
-				tmuxx.Response{Err: launchExitErrorWithTerminator(t, 1, "duplicate session: fleet", tt.terminator)},
-			)
-			var stdout, stderr bytes.Buffer
-
-			code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-			if code != exitSession {
-				t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitSession, stderr.String())
-			}
-			if stdout.Len() != 0 {
-				t.Fatalf("stdout = %q, want empty", stdout.String())
-			}
-			if got, want := stderr.String(), "agentctl: tmux create session: exit status 1: duplicate session: fleet\n"; got != want {
-				t.Fatalf("stderr = %q, want %q", got, want)
-			}
-			assertNoKillCall(t, runner)
-		})
-	}
-}
-
-func launchExitError(t *testing.T, exitCode int, message string) error {
-	t.Helper()
-	return launchExitErrorWithTerminator(t, exitCode, message, "\n")
-}
-
-func launchExitErrorWithTerminator(t *testing.T, exitCode int, message, terminator string) error {
-	t.Helper()
-	command := exec.Command(os.Args[0], "-test.run=^TestLaunchExitErrorHelper$")
-	command.Env = append(os.Environ(),
-		"GO_WANT_LAUNCH_EXIT_ERROR_HELPER=1",
-		"LAUNCH_EXIT_CODE="+strconv.Itoa(exitCode),
-		"LAUNCH_EXIT_STDERR="+message,
-		"LAUNCH_EXIT_TERMINATOR="+terminator,
-	)
-	_, err := command.Output()
-	if err == nil {
-		t.Fatal("launch exit-error helper returned nil, want nonzero exit")
-	}
-	return err
-}
-
-func TestLaunchExitErrorHelper(t *testing.T) {
-	if os.Getenv("GO_WANT_LAUNCH_EXIT_ERROR_HELPER") != "1" {
-		return
-	}
-	fmt.Fprint(os.Stderr, os.Getenv("LAUNCH_EXIT_STDERR"), os.Getenv("LAUNCH_EXIT_TERMINATOR"))
-	exitCode, err := strconv.Atoi(os.Getenv("LAUNCH_EXIT_CODE"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-	os.Exit(exitCode)
-}
-
-func TestRunNonLaunchCommandsKeepNoServerFailure(t *testing.T) {
-	tests := []struct {
-		name   string
-		args   []string
-		lookup map[string]string
-	}{
-		{name: "status", args: []string{"status", "--session", "fleet", "--json"}},
-		{name: "kill", args: []string{"kill", "--session", "fleet"}},
-		{name: "attach", args: []string{"attach", "--session", "fleet"}, lookup: map[string]string{"TERM_PROGRAM": "iTerm.app"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: launchExitError(t, 23, "no server running")})
-			var stdout, stderr bytes.Buffer
-
-			code := runWithRunner(context.Background(), tt.args, &stdout, &stderr, runner, lookupValues(tt.lookup))
-
-			if code != exitTmux {
-				t.Fatalf("runWithRunner() = %d, want %d; stderr = %q", code, exitTmux, stderr.String())
-			}
-			if got, want := stderr.String(), "agentctl: tmux list sessions: exit status 23: no server running\n"; got != want {
-				t.Fatalf("stderr = %q, want %q", got, want)
-			}
-			if got, want := runner.Calls, []tmuxx.Call{{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}}}; !reflect.DeepEqual(got, want) {
-				t.Fatalf("Runner calls = %#v, want plain non-launch list-sessions %#v", got, want)
-			}
-		})
-	}
-}
-
-func TestRunLaunchReportsCleanupOutcomeVerbatim(t *testing.T) {
-	cause := errors.New("metadata failed")
-	cleanupCause := errors.New("cleanup failed")
-	for _, tt := range []struct {
-		name      string
-		responses []tmuxx.Response
-		want      string
-	}{
-		{
-			name:      "cleanup succeeds",
-			responses: []tmuxx.Response{{}, {Stdout: []byte("$17\t@23\t%42\t4242\n")}, {Err: cause}, {}},
-			want:      "agentctl: failed to launch planner; removed incomplete session fleet: tmux set session option: metadata failed\n",
-		},
-		{
-			name:      "cleanup fails",
-			responses: []tmuxx.Response{{}, {Stdout: []byte("$17\t@23\t%42\t4242\n")}, {Err: cause}, {Err: cleanupCause}},
-			want:      "agentctl: failed to launch planner; failed to remove incomplete session fleet: tmux kill session: cleanup failed (launch failure: tmux set session option: metadata failed)\n",
-		},
+	for _, arguments := range [][]string{
+		{"launch", "--roles", "planner:claude"},
+		{"launch", "--session", "fleet"},
+		{"launch", "--session", "Invalid", "--roles", "planner:claude"},
+		{"launch", "--session", "fleet", "--roles", "planner:unknown"},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			runner := tmuxx.NewFakeRunner(tt.responses...)
-			var stdout, stderr bytes.Buffer
-
-			code := runWith([]string{"launch", "--session", "fleet", "--roles", "planner:claude"}, &stdout, &stderr, launchTestDependencies(runner))
-
-			if code != exitLaunch {
-				t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitLaunch, stderr.String())
-			}
-			if got := stderr.String(); got != tt.want {
-				t.Fatalf("stderr = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRunLaunchMultiRoleTranscriptUsesValidatedRosterAndReturnedIDs(t *testing.T) {
-	responses := append(launchTwoRoleResponses(), healthyMultiRolePostLaunchResponses()...)
-	runner := tmuxx.NewFakeRunner(responses...)
-	var stdout, stderr bytes.Buffer
-
-	code := runWith([]string{
-		"launch", "--session", "fleet", "--roles", "planner:claude,reviewer:codex",
-		"--models", "reviewer:gpt-5.6", "--efforts", "planner:high", "--dir", "/fleet workspace",
-	}, &stdout, &stderr, launchTestDependencies(runner))
-
-	if code != exitOK {
-		t.Fatalf("runWith() = %d, want %d; stderr = %q", code, exitOK, stderr.String())
-	}
-	wantStatus := "SESSION  ROLE      HARNESS  MODEL    EFFORT   PANE  PROCESS  STATE\n" +
-		"fleet    planner   claude   default  high     %42   claude   running\n" +
-		"fleet    reviewer  codex    gpt-5.6  default  %87   codex    running\n"
-	if got := stdout.String(); got != wantStatus {
-		t.Fatalf("stdout = %q, want %q", got, wantStatus)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want empty", stderr.String())
-	}
-	assertLaunchCalls(t, runner,
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-sessions", "-F", "#{session_id}\t#{session_name}"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-session", "-d", "-s", "fleet", "-n", "planner", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=planner", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'planner' 'claude' '--' '--effort' 'high'"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_managed", "1"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_version", "1"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_roles", "planner,reviewer"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_fleet", "planner:claude::high,reviewer:codex:gpt-5.6:"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-t", "$17", "@agentctl_dir", "/fleet workspace"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_managed", "1"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_role", "planner"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_harness", "claude"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_model", ""}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_effort", "high"}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@23", "@agentctl_process", "claude"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_SESSION"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_ROLE"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-environment", "-t", "$17", "-u", "AGENTCTL_MANAGED"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"new-window", "-d", "-t", "$17", "-n", "reviewer", "-c", "/fleet workspace", "-e", "AGENTCTL_SESSION=fleet", "-e", "AGENTCTL_ROLE=reviewer", "-e", "AGENTCTL_MANAGED=1", "-P", "-F", "#{window_id}\t#{pane_id}\t#{pane_pid}", "--", "exec 'amq' 'coop' 'exec' '--session' 'fleet' '--me' 'reviewer' 'codex' '--' '--model' 'gpt-5.6'"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_managed", "1"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_role", "reviewer"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_harness", "codex"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_model", "gpt-5.6"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_effort", ""}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"set-option", "-w", "-t", "@65", "@agentctl_process", "codex"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
-		tmuxx.Call{Executable: "tmux", Args: []string{"list-panes", "-t", "@65", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
-		tmuxx.Call{Executable: "ps", Args: []string{"-o", "comm=", "-p", "8686"}},
-	)
-}
-
-func launchTestDependencies(runner tmuxx.Runner) launchDependencies {
-	return launchDependencies{runner: runner, fleet: fleet.Dependencies{
-		LookPath: func(name string) (string, error) { return "/bin/" + name, nil },
-		Getwd:    func() (string, error) { return "/invocation", nil },
-		Stat: func(string) (fs.FileInfo, error) {
-			return launchTestFileInfo{mode: fs.ModeDir | 0o755}, nil
-		},
-	}}
-}
-
-func launchOneRoleResponses(sessions string) []tmuxx.Response {
-	return []tmuxx.Response{
-		{Stdout: []byte(sessions)},
-		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {}, {}, {}, {},
-		{Stdout: []byte("claude\n")}, {Stdout: []byte("claude\n")}, {},
-		{}, {}, {},
-	}
-}
-
-func launchOneRoleTimeoutResponses() []tmuxx.Response {
-	responses := append([]tmuxx.Response(nil), launchOneRoleResponses("")[:12]...)
-	for index := range 51 {
-		process := "env\n"
-		if index%2 == 1 {
-			process = "claude\n"
-		}
-		responses = append(responses, tmuxx.Response{Stdout: []byte(process)})
-	}
-	return append(responses, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{}, tmuxx.Response{})
-}
-
-func useInstantLaunchClock(deps *launchDependencies) {
-	var elapsed time.Duration
-	base := time.Unix(0, 0)
-	deps.fleet.Now = func() time.Time { return base.Add(elapsed) }
-	deps.fleet.Sleep = func(duration time.Duration) { elapsed += duration }
-}
-
-func launchTwoRoleResponses() []tmuxx.Response {
-	return []tmuxx.Response{
-		{},
-		{Stdout: []byte("$17\t@23\t%42\t4242\n")},
-		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {Stdout: []byte("claude\n")}, {Stdout: []byte("claude\n")}, {},
-		{}, {}, {},
-		{Stdout: []byte("@65\t%87\t8686\n")},
-		{}, {}, {}, {}, {}, {Stdout: []byte("codex\n")}, {Stdout: []byte("codex\n")}, {},
-	}
-}
-
-func healthyPostLaunchResponses() []tmuxx.Response {
-	return []tmuxx.Response{
-		{Stdout: []byte("1\n")},
-		{Stdout: []byte("1\n")},
-		{Stdout: []byte("planner\n")},
-		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\t\t\tclaude\n")},
-		{Stdout: []byte("%42\t4242\t0\t1\n")},
-		{Stdout: []byte("claude\n")},
-	}
-}
-
-func healthyMultiRolePostLaunchResponses() []tmuxx.Response {
-	return []tmuxx.Response{
-		{Stdout: []byte("1\n")},
-		{Stdout: []byte("1\n")},
-		{Stdout: []byte("planner,reviewer\n")},
-		{Stdout: []byte("@23\tplanner\tplanner\tclaude\t\thigh\t\tclaude\n@65\treviewer\treviewer\tcodex\tgpt-5.6\t\t\tcodex\n")},
-		{Stdout: []byte("%42\t4242\t0\t1\n")},
-		{Stdout: []byte("claude\n")},
-		{Stdout: []byte("%87\t8686\t0\t1\n")},
-		{Stdout: []byte("codex\n")},
-	}
-}
-
-func postLaunchStatusCalls() []tmuxx.Call {
-	return []tmuxx.Call{
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_managed"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_version"}},
-		{Executable: "tmux", Args: []string{"show-options", "-qv", "-t", "$17", "@agentctl_roles"}},
-		{Executable: "tmux", Args: []string{"list-windows", "-t", "$17", "-F", "#{window_id}\t#{window_name}\t#{@agentctl_role}\t#{@agentctl_harness}\t#{@agentctl_model}\t#{@agentctl_effort}\t#{@agentctl_unproven}\t#{@agentctl_process}"}},
-		{Executable: "tmux", Args: []string{"list-panes", "-t", "@23", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{window_panes}"}},
-		{Executable: "ps", Args: []string{"-o", "comm=", "-p", "4242"}},
-	}
-}
-
-func assertNoKillCall(t *testing.T, runner *tmuxx.FakeRunner) {
-	t.Helper()
-	for _, call := range runner.Calls {
-		if call.Executable == "tmux" && len(call.Args) != 0 && call.Args[0] == "kill-session" {
-			t.Fatalf("runner calls = %#v, want no kill-session", runner.Calls)
+		launcher := &launcherStub{err: errors.New("must not call")}
+		var stderr bytes.Buffer
+		if code := runWithDependencies(context.Background(), arguments, &bytes.Buffer{}, &stderr, dependencies{launcher: launcher}); code != exitUsage || launcher.called {
+			t.Fatalf("arguments=%q code=%d called=%t stderr=%q", arguments, code, launcher.called, stderr.String())
 		}
 	}
 }
 
-func assertLaunchCalls(t *testing.T, runner *tmuxx.FakeRunner, want ...tmuxx.Call) {
-	t.Helper()
-	if !reflect.DeepEqual(runner.Calls, want) {
-		t.Fatalf("runner calls = %#v, want %#v", runner.Calls, want)
-	}
+type launcherStub struct {
+	result       fleet.ShimLaunchResult
+	err          error
+	called       bool
+	session      string
+	fleet        config.FleetConfig
+	presentation fleet.Presentation
+	directory    *string
+}
+
+func (l *launcherStub) Launch(_ context.Context, sessionName string, fleetConfig config.FleetConfig, presentation fleet.Presentation, directory *string) (fleet.ShimLaunchResult, error) {
+	l.called = true
+	l.session, l.fleet, l.presentation, l.directory = sessionName, fleetConfig, presentation, directory
+	return l.result, l.err
 }

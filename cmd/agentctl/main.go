@@ -8,19 +8,19 @@ import (
 	"io"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/mnbf9rca/agentctl/internal/attach"
 	"github.com/mnbf9rca/agentctl/internal/buildinfo"
 	"github.com/mnbf9rca/agentctl/internal/cliflags"
 	"github.com/mnbf9rca/agentctl/internal/config"
-	"github.com/mnbf9rca/agentctl/internal/control"
 	"github.com/mnbf9rca/agentctl/internal/fleet"
 	"github.com/mnbf9rca/agentctl/internal/kill"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/session"
+	"github.com/mnbf9rca/agentctl/internal/shim"
 	"github.com/mnbf9rca/agentctl/internal/skillinstall"
 	statuspkg "github.com/mnbf9rca/agentctl/internal/status"
-	"github.com/mnbf9rca/agentctl/internal/target"
 	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 	"github.com/mnbf9rca/agentctl/skills"
 )
@@ -42,7 +42,8 @@ var globalUsage = `Usage: agentctl COMMAND [OPTIONS]
 
 Commands:
   launch    create an agent fleet
-  relaunch  recreate an absent role or an eligible no-baseline window
+  run       run one foreground role without tmux
+  relaunch  recreate a runtime-observed absent role
   attach    attach an agent fleet in iTerm2
   status    report fleet status
   clear     deliver /clear to a role
@@ -53,16 +54,18 @@ Commands:
 `
 
 var commandUsage = map[string]string{
-	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n" +
-		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH]\n",
+	"launch": "Usage: agentctl launch --session SESSION --roles ROLE:HARNESS,... [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH] [--detached | --tmux]\n" +
+		"   or: agentctl launch --session SESSION --from-template FILE [--roles ROLE:HARNESS,...] [--models ROLE:MODEL,...] [--efforts ROLE:LEVEL,...] [--dir PATH] [--detached | --tmux]\n",
+	"run": "Usage: agentctl run --session SESSION --role ROLE --harness HARNESS [--model MODEL] [--effort LEVEL]\n" +
+		"   or: agentctl run --session SESSION --from-template FILE --role ROLE\n",
 	"relaunch": "Usage: agentctl relaunch [--session SESSION] [--harness HARNESS] [--model MODEL] [--effort LEVEL] [--dir PATH] ROLE\n\n" +
-		"Recreates a role window that is absent or recovers one live managed window with no process baseline when another window keeps the session alive.\n" +
-		"It refuses every other existing-window state and reports configuration provenance.\n",
+		"Recreates only a missing role or an ESRCH-backed stale durable child record.\n" +
+		"It refuses every state that may still have a live child and persists successful overrides after readiness.\n",
 	"attach": "Usage: agentctl attach [--session SESSION]\n",
 	"status": "Usage: agentctl status [--session SESSION] [--json]\n\n" +
-		"Without --session, status reports every session; ambient session sources never narrow the listing.\n" +
+		"Without --session, status reports every durable fleet; ambient session sources never narrow the listing.\n" +
 		"A leading * marks the caller's session when agentctl can determine it from tmux.\n" +
-		"Exited agents normally report missing, not dead, because managed windows do not use remain-on-exit.\n",
+		"Runtime state and anchored/unanchored confidence remain separate from optional tmux presentation.\n",
 	"clear":   "Usage: agentctl clear [--session SESSION] ROLE\n",
 	"compact": "Usage: agentctl compact [--session SESSION] ROLE\n",
 	"kill":    "Usage: agentctl kill [--session SESSION]\n",
@@ -84,49 +87,112 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 }
 
 type launchDependencies struct {
-	runner       tmuxx.Runner
-	fleet        fleet.Dependencies
 	skillHome    func() (string, error)
 	skillVersion func() string
 }
 
 type sessionResolver interface {
-	Resolve(context.Context, *string) (tmuxx.Session, error)
+	Select(context.Context, *string) (string, error)
 }
 
+type fixedSessionResolver string
+
+func (r fixedSessionResolver) Select(context.Context, *string) (string, error) { return string(r), nil }
+
 type sessionKiller interface {
-	Execute(context.Context, tmuxx.Session) error
+	Execute(context.Context, string) (kill.ShimKillResult, error)
 }
 
 type statusCollector interface {
-	Collect(context.Context, string, tmuxx.SessionID) (statuspkg.Report, error)
-	CollectAll(context.Context) (*statuspkg.SessionsReport, error)
+	Collect(context.Context, string) (statuspkg.ShimReport, error)
+	CollectAll(context.Context) (statuspkg.ShimSessionsReport, error)
 }
 
 type controlExecutor interface {
-	Execute(context.Context, string, tmuxx.Session, string) error
+	Execute(context.Context, string, string, string) (shim.Response, error)
+}
+
+type stateRootGuard interface {
+	CheckRole(string, string) error
+	CheckSession(string) (string, error)
 }
 
 type sessionAttacher interface {
 	CheckEnvironment() error
-	Execute(context.Context, tmuxx.Session, io.Writer) error
+	ExecutePresentation(context.Context, string, io.Writer) (tmuxx.Session, error)
 	StillRunning(context.Context, tmuxx.Session) (bool, error)
 }
 
+type roleAttacher interface {
+	Execute(context.Context, string, string) (attach.RoleResult, error)
+	Report(func(attach.DiagnosticSink, bool) int) int
+}
+
+type attachDiagnosticWriter struct {
+	sink    attach.DiagnosticSink
+	bounded bool
+}
+
+func (w attachDiagnosticWriter) Write(value []byte) (int, error) {
+	ctx := context.Background()
+	cancel := func() {}
+	if w.bounded {
+		ctx, cancel = context.WithTimeout(ctx, attach.AttachReportTimeout)
+	}
+	defer cancel()
+	return w.sink.Attempt(ctx, value)
+}
+
 type roleRelauncher interface {
-	Relaunch(context.Context, tmuxx.Session, fleet.RelaunchRequest) (fleet.RelaunchResult, error)
+	Relaunch(context.Context, string, fleet.RelaunchRequest) (fleet.ShimRelaunchResult, error)
+}
+
+type shimFleetLauncher interface {
+	Launch(context.Context, string, config.FleetConfig, fleet.Presentation, *string) (fleet.ShimLaunchResult, error)
+}
+
+type hiddenShimCommand interface {
+	Run(context.Context, []string, io.Writer, io.Writer) int
+}
+
+type hiddenShimCommandFunc func(context.Context, []string, io.Writer, io.Writer) int
+
+func (f hiddenShimCommandFunc) Run(ctx context.Context, arguments []string, stdout, stderr io.Writer) int {
+	return f(ctx, arguments, stdout, stderr)
+}
+
+type foregroundExecutor interface {
+	Execute(context.Context, string, config.RoleConfig, string) error
 }
 
 // dependencies collects the seams every subcommand is wired through, so tests
 // can supply exactly the ones the command under test uses.
 type dependencies struct {
-	launch     launchDependencies
-	resolver   sessionResolver
-	collector  statusCollector
-	killer     sessionKiller
-	controller controlExecutor
-	attacher   sessionAttacher
-	relauncher roleRelauncher
+	launch       launchDependencies
+	launcher     shimFleetLauncher
+	resolver     sessionResolver
+	collector    statusCollector
+	killer       sessionKiller
+	controller   controlExecutor
+	rootGuard    stateRootGuard
+	attacher     sessionAttacher
+	roleAttacher roleAttacher
+	relauncher   roleRelauncher
+	hiddenShim   hiddenShimCommand
+	foreground   foregroundExecutor
+	getwd        func() (string, error)
+}
+
+type presentationFlagConflictError struct{}
+
+func (*presentationFlagConflictError) Error() string {
+	return "--detached and --tmux are mutually exclusive"
+}
+
+type runTemplateFlagConflictError struct{}
+
+func (*runTemplateFlagConflictError) Error() string {
+	return "--from-template excludes --harness, --model, and --effort"
 }
 
 func runWithRunner(
@@ -139,24 +205,178 @@ func runWithRunner(
 	if handled, code := runVersion(arguments, stdout, stderr); handled {
 		return code
 	}
-	client := tmuxx.New(runner)
-	resolver := session.New(client, lookupEnv)
-	collector := statuspkg.NewCollector(client).WithLookupEnv(statuspkg.LookupEnv(lookupEnv))
-	targetResolver := target.New(client, target.LookupEnv(lookupEnv))
-	attacher := attach.New(client, attach.LookupEnv(lookupEnv))
-	return runWithDependencies(ctx, arguments, stdout, stderr, dependencies{
-		launch: launchDependencies{
-			runner:       runner,
-			skillHome:    os.UserHomeDir,
-			skillVersion: skillBinaryVersion,
-		},
-		resolver:   resolver,
-		collector:  collector,
-		killer:     kill.New(client),
-		controller: control.New(targetResolver, client),
-		attacher:   attacher,
-		relauncher: fleet.New(runner, fleet.Dependencies{}),
-	})
+	if len(arguments) == 0 || arguments[0] == "-h" || arguments[0] == "--help" || arguments[0] == "skill" || arguments[0] == "__shim" {
+		return runWithDependencies(ctx, arguments, stdout, stderr, dependencies{
+			launch: launchDependenciesForCLI(), hiddenShim: newProductionHiddenShimCommand(), getwd: os.Getwd,
+		})
+	}
+	if _, known := commandUsage[arguments[0]]; !known {
+		return runWithDependencies(ctx, arguments, stdout, stderr, dependencies{})
+	}
+	if handled, code := validateBeforeRuntime(arguments, stdout, stderr); handled {
+		return code
+	}
+	var preparedRole *attach.PreparedRoleTerminal
+	var preparedForeground *preparedForegroundTerminal
+	var selectedRoleSession string
+	var err error
+	if arguments[0] == "attach" {
+		options, parseErr := parseCommand("attach", arguments[1:])
+		if parseErr == nil && options.role != "" {
+			preparedRole, err = attach.PrepareRoleTerminal(os.Stdin, os.Stdout, os.Stderr)
+			if err != nil {
+				selectedRoleSession = options.session
+				if !options.sessionSet {
+					candidate, set := lookupEnv("AGENTCTL_SESSION")
+					if set && config.ValidateSessionName(candidate) == nil {
+						selectedRoleSession = candidate
+					}
+				}
+				if selectedRoleSession == "" {
+					resolved, resolveErr := session.New(tmuxx.New(runner), lookupEnv).Select(ctx, nil)
+					if resolveErr == nil {
+						selectedRoleSession = resolved
+					}
+				}
+				report := io.Writer(io.Discard)
+				diagnostic, diagnosticErr := attach.NewDiagnosticSink(os.Stderr)
+				if diagnosticErr == nil {
+					defer func() { _ = diagnostic.Close() }()
+					report = attachDiagnosticWriter{sink: diagnostic}
+				}
+				return roleAttachError(report, selectedRoleSession, options.role, err)
+			}
+			var explicit *string
+			if options.sessionSet {
+				explicit = &options.session
+			}
+			selectedRoleSession, err = session.New(tmuxx.New(runner), lookupEnv).Select(ctx, explicit)
+			if err != nil {
+				return resolverError(stderr, commandUsage["attach"], err)
+			}
+		}
+	}
+	if arguments[0] == "run" {
+		options, parseErr := parseCommand("run", arguments[1:])
+		if parseErr == nil {
+			preparedForeground, err = prepareForegroundTerminal(os.Stdin, os.Stdout)
+			if err != nil {
+				return foregroundError(stderr, options.session, options.role, err)
+			}
+		}
+	}
+	deps, closeRuntime, err := buildShimDependencies(runner, lookupEnv, preparedRole, preparedForeground)
+	if err != nil {
+		return shimSetupError(stderr, arguments[0], err)
+	}
+	if selectedRoleSession != "" {
+		deps.resolver = fixedSessionResolver(selectedRoleSession)
+	}
+	defer func() { _ = closeRuntime() }()
+	return runWithDependencies(ctx, arguments, stdout, stderr, deps)
+}
+
+// validateBeforeRuntime keeps argument and value failures ahead of namespace
+// construction. Opening the runtime creates private state directories, so a
+// malformed command must be rejected before that boundary is crossed.
+func validateBeforeRuntime(arguments []string, stdout, stderr io.Writer) (bool, int) {
+	command := arguments[0]
+	usage := commandUsage[command]
+	var err error
+	switch command {
+	case "launch":
+		_, _, err = parseLaunchInvocation(arguments[1:])
+	case "run":
+		_, _, err = parseRunInvocation(arguments[1:])
+	default:
+		var options commandOptions
+		options, err = parseCommand(command, arguments[1:])
+		if err == nil && (command == "clear" || command == "compact" || command == "relaunch" || command == "attach" && options.role != "") {
+			err = config.ValidateRoleName(options.role)
+		}
+		if err == nil && command == "relaunch" {
+			err = validateRelaunchOverrides(options)
+		}
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		fmt.Fprint(stdout, usage)
+		return true, exitOK
+	}
+	if err != nil {
+		return true, commandValidationError(stderr, err, usage)
+	}
+	return false, exitOK
+}
+
+func parseRunInvocation(arguments []string) (commandOptions, config.RoleConfig, error) {
+	options, err := parseCommand("run", arguments)
+	if err != nil {
+		return commandOptions{}, config.RoleConfig{}, err
+	}
+	if !options.sessionSet {
+		return commandOptions{}, config.RoleConfig{}, errors.New("run requires --session")
+	}
+	if options.role == "" {
+		return commandOptions{}, config.RoleConfig{}, errors.New("run requires --role")
+	}
+	if err := config.ValidateSessionName(options.session); err != nil {
+		return commandOptions{}, config.RoleConfig{}, err
+	}
+	if err := config.ValidateRoleName(options.role); err != nil {
+		return commandOptions{}, config.RoleConfig{}, err
+	}
+	if options.fromTemplate != nil {
+		if options.harness != nil || options.model != nil || options.effort != nil {
+			return commandOptions{}, config.RoleConfig{}, &runTemplateFlagConflictError{}
+		}
+		role, err := selectRunTemplateRole(*options.fromTemplate, options.role)
+		return options, role, err
+	}
+	if options.harness == nil {
+		return commandOptions{}, config.RoleConfig{}, errors.New("run requires --harness")
+	}
+	harnessName, err := config.ParseHarness(*options.harness)
+	if err != nil {
+		return commandOptions{}, config.RoleConfig{}, err
+	}
+	role := config.RoleConfig{Name: options.role, Harness: harnessName}
+	if options.model != nil {
+		if err := config.ValidateModelName(*options.model); err != nil {
+			return commandOptions{}, config.RoleConfig{}, err
+		}
+		role.Model = *options.model
+	}
+	if options.effort != nil {
+		if err := config.ValidateEffort(*options.effort); err != nil {
+			return commandOptions{}, config.RoleConfig{}, err
+		}
+		role.Effort = *options.effort
+	}
+	return options, role, nil
+}
+
+func parseLaunchInvocation(arguments []string) (launchOptions, launchConfiguration, error) {
+	options, err := parseLaunch(arguments)
+	if err != nil {
+		return launchOptions{}, launchConfiguration{}, err
+	}
+	document, err := decodeLaunchTemplate(options.fromTemplate)
+	if err != nil {
+		return launchOptions{}, launchConfiguration{}, err
+	}
+	if err := config.ValidateSessionName(options.session); err != nil {
+		return launchOptions{}, launchConfiguration{}, err
+	}
+	configuration := launchConfiguration{directory: options.directory, presentation: resolveLaunchPresentation(nil, options)}
+	if document == nil {
+		configuration.fleet, err = config.ParseFleet(options.roles, options.models, options.efforts)
+	} else {
+		configuration, err = mergeLaunchTemplate(*document, options)
+	}
+	if err != nil {
+		return launchOptions{}, launchConfiguration{}, err
+	}
+	return options, configuration, nil
 }
 
 func runVersion(arguments []string, stdout, stderr io.Writer) (bool, int) {
@@ -174,15 +394,6 @@ func runVersion(arguments []string, stdout, stderr io.Writer) (bool, int) {
 	return true, exitOK
 }
 
-func runWith(arguments []string, stdout, stderr io.Writer, launch launchDependencies) int {
-	client := tmuxx.New(launch.runner)
-	return runWithDependencies(context.Background(), arguments, stdout, stderr, dependencies{
-		launch:    launch,
-		resolver:  session.New(client, nil),
-		collector: statuspkg.NewCollector(client),
-	})
-}
-
 func runWithDependencies(
 	ctx context.Context,
 	arguments []string,
@@ -196,6 +407,13 @@ func runWithDependencies(
 		fmt.Fprint(stdout, globalUsage)
 		return exitOK
 	}
+	if arguments[0] == "__shim" {
+		if deps.hiddenShim == nil {
+			fmt.Fprintln(stderr, "agentctl: hidden shim handler is unavailable")
+			return exitUnclassified
+		}
+		return deps.hiddenShim.Run(ctx, arguments[1:], stdout, stderr)
+	}
 
 	command := arguments[0]
 	usage, ok := commandUsage[command]
@@ -205,41 +423,62 @@ func runWithDependencies(
 	if command == "skill" {
 		return runSkill(arguments[1:], stdout, stderr, usage)
 	}
-
-	if command == "launch" {
-		options, err := parseLaunch(arguments[1:])
+	if command == "run" {
+		options, role, err := parseRunInvocation(arguments[1:])
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
 			return exitOK
 		}
 		if err != nil {
-			return usageError(stderr, err.Error(), usage)
+			return commandValidationError(stderr, err, usage)
 		}
-		document, err := decodeLaunchTemplate(options.fromTemplate)
+		if deps.foreground == nil {
+			fmt.Fprintln(stderr, "agentctl: run failed for session \""+options.session+"\": \"foreground lifecycle is unavailable\" (unclassified)")
+			return exitUnclassified
+		}
+		getwd := deps.getwd
+		if getwd == nil {
+			getwd = os.Getwd
+		}
+		directory, err := getwd()
 		if err != nil {
-			return usageError(stderr, err.Error(), usage)
+			fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", options.session, err.Error())
+			return exitUnclassified
 		}
-		if err := config.ValidateSessionName(options.session); err != nil {
-			return usageError(stderr, err.Error(), usage)
-		}
-		launchConfig := launchConfiguration{directory: options.directory}
-		if document == nil {
-			launchConfig.fleet, err = config.ParseFleet(options.roles, options.models, options.efforts)
-		} else {
-			launchConfig, err = mergeLaunchTemplate(*document, options)
-		}
-		if err != nil {
-			return usageError(stderr, err.Error(), usage)
-		}
-		deps.launch.fleet.Stderr = stderr
-		launched, err := fleet.New(deps.launch.runner, deps.launch.fleet).Launch(ctx, options.session, launchConfig.fleet, launchConfig.directory)
-		if code := launchResult(stderr, err, usage); code != exitOK {
+		if guarded, code := checkRoleStateRoot(stderr, deps.rootGuard, "run", options.session, options.role); guarded {
 			return code
 		}
+		if err := deps.foreground.Execute(ctx, options.session, role, directory); err != nil {
+			return foregroundError(stderr, options.session, options.role, err)
+		}
+		fmt.Fprintf(stderr, "agentctl: foreground role %q in session %q exited with status 0\n", options.role, options.session)
+		return exitOK
+	}
+
+	if command == "launch" {
+		options, launchConfig, err := parseLaunchInvocation(arguments[1:])
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, usage)
+			return exitOK
+		}
+		if err != nil {
+			return commandValidationError(stderr, err, usage)
+		}
+		if deps.launcher == nil {
+			fmt.Fprintf(stderr, "agentctl: launch failed for session %q: %q (unclassified)\n", options.session, "shim launcher is unavailable")
+			return exitUnclassified
+		}
+		if guarded, code := checkSessionStateRoot(stderr, deps.rootGuard, "launch", options.session); guarded {
+			return code
+		}
+		launched, err := deps.launcher.Launch(ctx, options.session, launchConfig.fleet, launchConfig.presentation, launchConfig.directory)
+		if err != nil {
+			return shimLaunchError(stderr, options.session, launchConfig.fleet.Roles[0].Name, err)
+		}
 		writeLaunchTemplateProvenance(stdout, options.session, launchConfig, launched.Directory)
-		code := confirmLaunch(ctx, stdout, stderr, deps.collector, launched)
+		writeLaunchComplete(stderr, options.session, launched.TotalRoles, launchConfig.presentation)
 		writeSkillLaunchNotices(stderr, deps.launch.skillHome, deps.launch.skillVersion)
-		return code
+		return exitOK
 	}
 
 	options, err := parseCommand(command, arguments[1:])
@@ -250,7 +489,7 @@ func runWithDependencies(
 	if err != nil {
 		return usageError(stderr, err.Error(), usage)
 	}
-	if command == "clear" || command == "compact" || command == "relaunch" {
+	if command == "clear" || command == "compact" || command == "relaunch" || command == "attach" && options.role != "" {
 		if err := config.ValidateRoleName(options.role); err != nil {
 			return usageError(stderr, err.Error(), usage)
 		}
@@ -260,50 +499,84 @@ func runWithDependencies(
 			return usageError(stderr, err.Error(), usage)
 		}
 	}
-	if command == "attach" {
+	if command == "attach" && options.role == "" {
 		if err := deps.attacher.CheckEnvironment(); err != nil {
 			return attachError(stderr, err)
 		}
 	}
 	if command == "status" && !options.sessionSet {
-		return statusAll(ctx, stdout, stderr, deps.collector, options.json)
+		return shimStatusAll(ctx, stdout, stderr, deps.collector, options.json)
 	}
 	var explicit *string
 	if options.sessionSet {
 		explicit = &options.session
 	}
-	resolved, err := deps.resolver.Resolve(ctx, explicit)
+	resolved, err := deps.resolver.Select(ctx, explicit)
 	if err != nil {
 		return resolverError(stderr, usage, err)
 	}
+	if command == "attach" && options.role != "" {
+		// Direct attach owns terminal checks before its target/root preflight.
+	} else if command == "clear" || command == "compact" || command == "relaunch" {
+		if guarded, code := checkRoleStateRoot(stderr, deps.rootGuard, command, resolved, options.role); guarded {
+			return code
+		}
+	} else {
+		if guarded, code := checkSessionStateRoot(stderr, deps.rootGuard, command, resolved); guarded {
+			return code
+		}
+	}
 	if command == "status" {
-		if err := writeSelectedStatus(ctx, stdout, deps.collector, resolved, options.json); err != nil {
-			return statusError(stderr, err)
+		if err := writeSelectedShimStatus(ctx, stdout, deps.collector, resolved, options.json); err != nil {
+			return statusError(stderr, resolved, err)
 		}
 		return exitOK
 	}
 	if command == "kill" {
-		if err := deps.killer.Execute(ctx, resolved); err != nil {
-			return killError(stderr, err)
+		result, err := deps.killer.Execute(ctx, resolved)
+		if err != nil {
+			return shimKillError(stderr, resolved, err)
 		}
+		fmt.Fprintf(stderr, "agentctl: killed session %q; every recorded child was observed absent\n", result.Session)
 		return exitOK
 	}
 	if command == "attach" {
-		if err := deps.attacher.Execute(ctx, resolved, stdout); err != nil {
+		if options.role != "" {
+			if deps.roleAttacher == nil {
+				fmt.Fprintf(stderr, "agentctl: attach transport for role %s in session %s failed during hello: role attach client is unavailable (attach-transport-failed)\n", options.role, resolved)
+				return exitTmux
+			}
+			result, err := deps.roleAttacher.Execute(ctx, resolved, options.role)
+			return deps.roleAttacher.Report(func(diagnostic attach.DiagnosticSink, diagnosticSharesTerminal bool) int {
+				report := stderr
+				if diagnostic != nil {
+					report = attachDiagnosticWriter{sink: diagnostic, bounded: diagnosticSharesTerminal}
+				}
+				if err != nil {
+					var stalled *attach.TerminalOutputError
+					if errors.As(err, &stalled) && stalled.Stalled && diagnosticSharesTerminal {
+						report = io.Discard
+					}
+					return roleAttachError(report, resolved, options.role, err)
+				}
+				return writeRoleAttachResult(report, resolved, options.role, result)
+			})
+		}
+		attached, err := deps.attacher.ExecutePresentation(ctx, resolved, stdout)
+		if err != nil {
 			return attachError(stderr, err)
 		}
-		observation, state := attachSessionState(ctx, deps.attacher, resolved)
-		fmt.Fprintf(stdout, "Attachment to session %q ended (tmux exit 0). %s\n", resolved.Name, state)
-		writeAttachNextSteps(stdout, observation, resolved)
+		observation, state := attachSessionState(ctx, deps.attacher, attached)
+		fmt.Fprintf(stdout, "Attachment to session %q ended (tmux exit 0). %s\n", attached.Name, state)
+		writeAttachNextSteps(stdout, observation, attached)
 		return exitOK
 	}
 	if command == "clear" || command == "compact" {
-		if err := deps.controller.Execute(ctx, command, resolved, options.role); err != nil {
-			return controlError(stderr, command, usage, err)
+		response, err := deps.controller.Execute(ctx, command, resolved, options.role)
+		if err != nil {
+			return shimOperationError(stderr, command, resolved, options.role, err)
 		}
-		registered, _ := control.Lookup(command)
-		fmt.Fprintf(stdout, "agentctl: delivered %s to %s:%s\n", registered.Payload, resolved.Name, options.role)
-		return exitOK
+		return shimResponseResult(stderr, command, resolved, options.role, response)
 	}
 	if command == "relaunch" {
 		result, err := deps.relauncher.Relaunch(ctx, resolved, fleet.RelaunchRequest{
@@ -314,13 +587,34 @@ func runWithDependencies(
 			Directory: options.directory,
 		})
 		if err != nil {
-			return relaunchError(stderr, options.role, usage, err)
+			return shimRelaunchError(stderr, resolved, options.role, err)
 		}
-		writeRelaunchResult(stdout, result)
+		fmt.Fprintf(stderr, "agentctl: relaunched role %q in session %q; the shim is ready\n", result.Role, result.Session)
 		return exitOK
 	}
 
 	panic(fmt.Sprintf("unreachable command dispatch for %q", command))
+}
+
+func checkRoleStateRoot(stderr io.Writer, guard stateRootGuard, operation, sessionName, role string) (bool, int) {
+	if guard == nil {
+		return false, exitOK
+	}
+	if err := guard.CheckRole(sessionName, role); err != nil {
+		return true, shimOperationError(stderr, operation, sessionName, role, err)
+	}
+	return false, exitOK
+}
+
+func checkSessionStateRoot(stderr io.Writer, guard stateRootGuard, operation, sessionName string) (bool, int) {
+	if guard == nil {
+		return false, exitOK
+	}
+	role, err := guard.CheckSession(sessionName)
+	if err != nil {
+		return true, shimOperationError(stderr, operation, sessionName, role, err)
+	}
+	return false, exitOK
 }
 
 func runSkill(arguments []string, stdout, stderr io.Writer, usage string) int {
@@ -448,84 +742,29 @@ func parseSkill(arguments []string) (string, bool, error) {
 	}
 }
 
-// confirmLaunch reports the fleet state observed after creation. Confirmation
-// is advisory: once Launch succeeds, a later observation failure cannot
-// truthfully reclassify the fleet launch as failed.
-func confirmLaunch(
-	ctx context.Context,
-	stdout, stderr io.Writer,
-	collector statusCollector,
-	result fleet.LaunchResult,
-) int {
-	if len(result.UnprovenRoles) > 0 {
-		fmt.Fprintf(stderr,
-			"agentctl: session %q launched; %d of %d roles unproven: %s; nothing was rolled back; control commands refuse an unproven role",
-			result.Session.Name, len(result.UnprovenRoles), result.TotalRoles, strings.Join(result.UnprovenRoles, ", "),
-		)
-		if len(result.RecoverableRoles) > 0 {
-			fmt.Fprintf(stderr, "; \"agentctl relaunch ROLE\" recovers %s", strings.Join(result.RecoverableRoles, ", "))
-		}
-		recoverable := make(map[string]struct{}, len(result.RecoverableRoles))
-		for _, role := range result.RecoverableRoles {
-			recoverable[role] = struct{}{}
-		}
-		unrecorded := make([]string, 0, len(result.UnprovenRoles)-len(result.RecoverableRoles))
-		for _, role := range result.UnprovenRoles {
-			if _, ok := recoverable[role]; !ok {
-				unrecorded = append(unrecorded, role)
-			}
-		}
-		if len(unrecorded) > 0 {
-			fmt.Fprintf(stderr, "; no abandonment record was stamped for %s, which can only be recovered by recreating the fleet", strings.Join(unrecorded, ", "))
-		}
-		fmt.Fprintln(stderr)
-	}
-	err := writeSelectedStatus(ctx, stdout, collector, result.Session, false)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentctl: session %q launched, but post-launch status could not be confirmed: %v\n", result.Session.Name, err)
-	}
-	if len(result.UnprovenRoles) > 0 {
-		return exitLaunchUnproven
-	}
-	return exitOK
-}
-
-// writeSelectedStatus is the single-session collection and rendering path
-// shared by status --session and post-launch confirmation.
-func writeSelectedStatus(
-	ctx context.Context,
-	stdout io.Writer,
-	collector statusCollector,
-	target tmuxx.Session,
-	asJSON bool,
-) error {
-	report, err := collector.Collect(ctx, target.Name, target.ID)
+func writeSelectedShimStatus(ctx context.Context, stdout io.Writer, collector statusCollector, sessionName string, asJSON bool) error {
+	report, err := collector.Collect(ctx, sessionName)
 	if err != nil {
 		return err
 	}
 	if asJSON {
-		return statuspkg.WriteJSON(stdout, report)
+		return statuspkg.WriteShimJSON(stdout, report)
 	}
-	return statuspkg.WriteTable(stdout, report)
+	return statuspkg.WriteShimTable(stdout, report)
 }
 
-// statusAll reports every session for a status command without --session.
-func statusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCollector, asJSON bool) int {
-	report, collectErr := collector.CollectAll(ctx)
-	if report == nil {
-		return statusError(stderr, collectErr)
+func shimStatusAll(ctx context.Context, stdout, stderr io.Writer, collector statusCollector, asJSON bool) int {
+	report, err := collector.CollectAll(ctx)
+	if err != nil {
+		return statusError(stderr, "", err)
 	}
-	var err error
 	if asJSON {
-		err = statuspkg.WriteSessionsJSON(stdout, *report)
+		err = statuspkg.WriteShimSessionsJSON(stdout, report)
 	} else {
-		err = statuspkg.WriteSessionsTable(stdout, *report)
+		err = statuspkg.WriteShimSessionsTable(stdout, report)
 	}
 	if err != nil {
-		return statusError(stderr, err)
-	}
-	if collectErr != nil {
-		return statusError(stderr, collectErr)
+		return statusError(stderr, "", err)
 	}
 	return exitOK
 }
@@ -566,6 +805,15 @@ func writeAttachNextSteps(out io.Writer, observation attachObservation, target t
 }
 
 func attachError(stderr io.Writer, err error) int {
+	var missingFleet *fleet.ShimFleetMissingError
+	if errors.As(err, &missingFleet) {
+		fmt.Fprintf(stderr, "agentctl: session %q has no durable fleet configuration\n", missingFleet.Session)
+		return exitSession
+	}
+	var noPresentation *attach.NoPresentationError
+	if errors.As(err, &noPresentation) {
+		return attachNoPresentationError(stderr, noPresentation)
+	}
 	var environment *attach.EnvironmentError
 	if errors.As(err, &environment) {
 		fmt.Fprintf(stderr, "agentctl: %v\n", err)
@@ -593,6 +841,7 @@ type launchOptions struct {
 	models       *string
 	efforts      *string
 	directory    *string
+	presentation fleet.Presentation
 }
 
 func parseLaunch(arguments []string) (launchOptions, error) {
@@ -603,12 +852,17 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 	models := flags.String("models", "", "role and model assignments")
 	efforts := flags.String("efforts", "", "role and effort assignments")
 	directory := flags.String("dir", "", "working directory")
+	detached := flags.Bool("detached", false, "launch without tmux presentation")
+	tmux := flags.Bool("tmux", false, "launch with tmux presentation")
 
 	if err := flags.Parse(arguments); err != nil {
 		return launchOptions{}, err
 	}
 	if len(flags.Args()) != 0 {
 		return launchOptions{}, errors.New("launch accepts no positional arguments")
+	}
+	if *detached && *tmux {
+		return launchOptions{}, &presentationFlagConflictError{}
 	}
 
 	options := launchOptions{session: *session, roles: *roles, rolesSet: flags.WasSet("roles")}
@@ -628,60 +882,35 @@ func parseLaunch(arguments []string) (launchOptions, error) {
 		directoryValue := *directory
 		options.directory = &directoryValue
 	}
+	if *detached {
+		options.presentation = fleet.PresentationDetached
+	}
+	if *tmux {
+		options.presentation = fleet.PresentationTmux
+	}
 	return options, nil
 }
 
-func launchResult(stderr io.Writer, err error, usage string) int {
-	if err == nil {
-		return exitOK
+func writeLaunchComplete(stderr io.Writer, sessionName string, totalRoles int, presentation fleet.Presentation) {
+	if presentation == fleet.PresentationTmux {
+		fmt.Fprintf(stderr, "agentctl: launched session %q; %d roles are ready\n", sessionName, totalRoles)
+		fmt.Fprintf(stderr, "agentctl: attach the fleet with: agentctl attach --session %s\n", sessionName)
+		return
 	}
-
-	var directoryError *fleet.DirectoryError
-	if errors.As(err, &directoryError) {
-		return usageError(stderr, err.Error(), usage)
-	}
-	var missing *preflight.MissingExecutableError
-	if errors.As(err, &missing) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitMissingExecutable
-	}
-	var exists *fleet.SessionExistsError
-	if errors.As(err, &exists) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitSession
-	}
-	var launchError *fleet.LaunchError
-	if errors.As(err, &launchError) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitLaunch
-	}
-
-	fmt.Fprintf(stderr, "agentctl: %v\n", tmuxx.ClassifyError(err))
-	return exitTmux
-}
-
-func killError(stderr io.Writer, err error) int {
-	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	var refusal *kill.RefusalError
-	if errors.As(err, &refusal) {
-		return exitSession
-	}
-	var tmuxFailure *tmuxx.TmuxError
-	if errors.As(err, &tmuxFailure) {
-		return exitTmux
-	}
-	return exitUnclassified
+	fmt.Fprintf(stderr, "agentctl: launched session %q detached; %d roles are ready\n", sessionName, totalRoles)
+	fmt.Fprintf(stderr, "agentctl: attach a role with: agentctl attach --session %s ROLE\n", sessionName)
 }
 
 type commandOptions struct {
-	session    string
-	sessionSet bool
-	json       bool
-	role       string
-	harness    *string
-	model      *string
-	effort     *string
-	directory  *string
+	session      string
+	sessionSet   bool
+	json         bool
+	role         string
+	harness      *string
+	model        *string
+	effort       *string
+	directory    *string
+	fromTemplate *string
 }
 
 type parsedCommandSpec struct {
@@ -712,6 +941,9 @@ var parsedCommandRegistry = map[string]parsedCommandSpec{
 	"relaunch": {
 		flags: []string{"session", "harness", "model", "effort", "dir"},
 	},
+	"run": {
+		flags: []string{"session", "role", "harness", "model", "effort", "from-template"},
+	},
 	"version": {},
 }
 
@@ -721,7 +953,7 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, fmt.Errorf("unknown parsed command %q", command)
 	}
 	flags := cliflags.New(command)
-	var sessionName, harnessName, modelName, effortName, directory *string
+	var sessionName, roleName, harnessName, modelName, effortName, directory, fromTemplate *string
 	var jsonOutput *bool
 	for _, registered := range specification.flags {
 		switch registered {
@@ -731,12 +963,16 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 			jsonOutput = flags.Bool(registered, false, "emit JSON")
 		case "harness":
 			harnessName = flags.String(registered, "", "harness override")
+		case "role":
+			roleName = flags.String(registered, "", "role name")
 		case "model":
 			modelName = flags.String(registered, "", "model override")
 		case "effort":
 			effortName = flags.String(registered, "", "effort override")
 		case "dir":
 			directory = flags.String(registered, "", "working directory override")
+		case "from-template":
+			fromTemplate = flags.String(registered, "", "JSON launch template")
 		default:
 			return commandOptions{}, fmt.Errorf("command %q has unsupported registered flag --%s", command, registered)
 		}
@@ -746,14 +982,18 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 		return commandOptions{}, err
 	}
 	options := commandOptions{
-		harness:   suppliedValue(flags, "harness", harnessName),
-		model:     suppliedValue(flags, "model", modelName),
-		effort:    suppliedValue(flags, "effort", effortName),
-		directory: suppliedValue(flags, "dir", directory),
+		harness:      suppliedValue(flags, "harness", harnessName),
+		model:        suppliedValue(flags, "model", modelName),
+		effort:       suppliedValue(flags, "effort", effortName),
+		directory:    suppliedValue(flags, "dir", directory),
+		fromTemplate: suppliedValue(flags, "from-template", fromTemplate),
 	}
 	if sessionName != nil {
 		options.session = *sessionName
 		options.sessionSet = flags.WasSet("session")
+	}
+	if roleName != nil {
+		options.role = *roleName
 	}
 	if jsonOutput != nil {
 		options.json = *jsonOutput
@@ -766,9 +1006,16 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 			return commandOptions{}, fmt.Errorf("%s requires exactly one ROLE", command)
 		}
 		options.role = positional[0]
-	case "status":
+	case "status", "run":
 		if len(positional) != 0 {
-			return commandOptions{}, errors.New("status accepts no positional arguments")
+			return commandOptions{}, fmt.Errorf("%s accepts no positional arguments", command)
+		}
+	case "attach":
+		if len(positional) > 1 {
+			return commandOptions{}, errors.New("attach accepts at most one ROLE")
+		}
+		if len(positional) == 1 {
+			options.role = positional[0]
 		}
 	default:
 		if len(positional) != 0 {
@@ -777,6 +1024,124 @@ func parseCommand(command string, arguments []string) (commandOptions, error) {
 	}
 
 	return options, nil
+}
+
+func foregroundError(stderr io.Writer, sessionName, role string, err error) int {
+	var notTerminal *foregroundNotTerminalError
+	if errors.As(err, &notTerminal) {
+		fmt.Fprintf(stderr, "agentctl: refusing to run role %q in session %q; standard input and output must both be terminals (run-not-a-terminal)\n", role, sessionName)
+		return exitUsage
+	}
+	var observation *foregroundTerminalObservationError
+	if errors.As(err, &observation) {
+		fmt.Fprintf(stderr, "agentctl: could not observe the foreground terminal for role %q in session %q: %q; no role was started (run-terminal-observation-failed)\n", role, sessionName, observation.Cause.Error())
+		return exitTmux
+	}
+	var restore *foregroundTerminalRestoreError
+	if errors.As(err, &restore) {
+		fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, restore.Error())
+		return exitUnclassified
+	}
+	var mismatch *fleet.ShimForegroundDirectoryMismatchError
+	if errors.As(err, &mismatch) {
+		fmt.Fprintf(stderr, "agentctl: refusing to run role %q in session %q; durable fleet directory %q differs from current working directory %q; no role was started or durable record mutated (fleet-directory-disagreement)\n", role, sessionName, mismatch.Stored, mismatch.Current)
+		return exitUnsafe
+	}
+	var rollback *fleet.ShimForegroundRollbackError
+	if errors.As(err, &rollback) {
+		fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, rollback.Error())
+		return exitUnclassified
+	}
+	var lifecycle *shim.LifecycleRunError
+	if errors.As(err, &lifecycle) {
+		if lifecycle.CleanupObservation == shim.ProcessAbsent && lifecycle.CleanupErr != nil {
+			if len(lifecycle.Remaining) > 0 {
+				fmt.Fprintf(stderr, "agentctl: run failed for role %q in session %q: %q; cleanup left %s: %q (owned-rollback-incomplete)\n", role, sessionName, errorText(lifecycle.Cause), strings.Join(lifecycle.Remaining, ", "), errorText(lifecycle.CleanupErr))
+				return exitLaunch
+			}
+			fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, lifecycle.Error())
+			return exitUnclassified
+		}
+		cleaned := lifecycle.CleanupObservation == shim.ProcessAbsent && lifecycle.CleanupErr == nil
+		if cleaned {
+			switch lifecycle.Outcome {
+			case shim.OutcomeReadinessTimeout:
+				fmt.Fprintf(stderr, "agentctl: role %q in session %q was not ready after 5s; final tty flags were ICANON=%t ECHO=%t; cleanup observed child absence and removed every artifact owned by this invocation (readiness-timeout)\n", role, sessionName, lifecycle.FinalICANON, lifecycle.FinalECHO)
+			case shim.OutcomeReadinessObservationFailed:
+				fmt.Fprintf(stderr, "agentctl: could not observe harness tty readiness for role %q in session %q: %q; cleanup observed child absence and removed every artifact owned by this invocation (readiness-observation-failed)\n", role, sessionName, errorText(lifecycle.Cause))
+			case shim.OutcomeChildExitedBeforeReady:
+				fmt.Fprintf(stderr, "agentctl: child PID %d exited before harness tty readiness for role %q in session %q; cleanup observed absence and removed every artifact owned by this invocation (child-exited-before-ready)\n", lifecycle.ChildPID, role, sessionName)
+			default:
+				fmt.Fprintf(stderr, "agentctl: run failed for role %q in session %q: %q; cleanup observed child absence and removed every artifact owned by this invocation (owned-rollback-complete)\n", role, sessionName, errorText(lifecycle.Cause))
+			}
+			return exitLaunch
+		}
+		if lifecycle.Outcome == shim.OutcomeReadinessTimeout {
+			fmt.Fprintf(stderr, "agentctl: role %q in session %q was not ready after 5s; final tty flags were ICANON=%t ECHO=%t; child PID %d was not observed absent, so ownership and the durable record were retained (readiness-timeout)\n", role, sessionName, lifecycle.FinalICANON, lifecycle.FinalECHO, lifecycle.ChildPID)
+		} else {
+			fmt.Fprintf(stderr, "agentctl: role %q in session %q failed after child PID %d started: %q; cleanup observation was %s, so ownership and the durable record were retained (ownership-retained)\n", role, sessionName, lifecycle.ChildPID, errorText(lifecycle.Cause), lifecycle.CleanupObservation)
+		}
+		return exitLaunchUnproven
+	}
+	var lifecycleCommit *shim.LifecycleCommitUncertainError
+	if errors.As(err, &lifecycleCommit) {
+		fmt.Fprintf(stderr, "agentctl: role %q in session %q has an uncertain durable %s record commit: %q; the record was retained and the role was not reported absent (record-commit-uncertain)\n", role, sessionName, lifecycleCommit.Phase, lifecycleCommit.Error())
+		return exitLaunchUnproven
+	}
+	var recordCommit *shim.RecordCommitUncertainError
+	if errors.As(err, &recordCommit) {
+		fmt.Fprintf(stderr, "agentctl: role %q in session %q has an uncertain durable fleet-config record commit: %q; the record was retained and the role was not reported absent (record-commit-uncertain)\n", role, sessionName, recordCommit.Error())
+		return exitLaunchUnproven
+	}
+	var retained *shim.LifecycleOwnershipRetainedError
+	if errors.As(err, &retained) {
+		fmt.Fprintf(stderr, "agentctl: role %q in session %q failed after child PID %d started: %q; cleanup observation was %s, so ownership and the durable record were retained (ownership-retained)\n", role, sessionName, retained.ChildPID, errorText(retained.Cause), retained.Observation)
+		return exitLaunchUnproven
+	}
+	var refusal *fleet.ShimRelaunchRefusalError
+	if errors.As(err, &refusal) {
+		return shimObservationResult(stderr, "run", sessionName, role, refusal.Observation)
+	}
+	var missing *preflight.MissingExecutableError
+	if errors.As(err, &missing) {
+		fmt.Fprintf(stderr, "agentctl: required executable %q was not found; no role was mutated\n", missing.Name)
+		return exitMissingExecutable
+	}
+	var child *shim.ForegroundChildExitError
+	if errors.As(err, &child) {
+		if child.Signal != 0 {
+			fmt.Fprintf(stderr, "agentctl: foreground role %q in session %q terminated by signal %s (child-signal)\n", role, sessionName, canonicalSignal(child.Signal))
+		} else {
+			fmt.Fprintf(stderr, "agentctl: foreground role %q in session %q exited with status %d (child-exit)\n", role, sessionName, child.Status)
+		}
+		return exitUnclassified
+	}
+	fmt.Fprintf(stderr, "agentctl: run failed for session %q: %q (unclassified)\n", sessionName, err.Error())
+	return exitUnclassified
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func canonicalSignal(signal syscall.Signal) string {
+	switch signal {
+	case syscall.SIGHUP:
+		return "SIGHUP"
+	case syscall.SIGINT:
+		return "SIGINT"
+	case syscall.SIGQUIT:
+		return "SIGQUIT"
+	case syscall.SIGKILL:
+		return "SIGKILL"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	default:
+		return fmt.Sprintf("SIG%d", signal)
+	}
 }
 
 // suppliedValue distinguishes an omitted option from one explicitly set, so a
@@ -810,24 +1175,6 @@ func validateRelaunchOverrides(options commandOptions) error {
 	return nil
 }
 
-func writeRelaunchResult(stdout io.Writer, result fleet.RelaunchResult) {
-	fmt.Fprintf(stdout, "agentctl: relaunched %s in %s: window %s, pane %s, harness %s (%s), model %s (%s), effort %s (%s), dir %s (%s)\n",
-		result.Role, result.Session, result.WindowID, result.PaneID,
-		result.Harness, result.HarnessFrom,
-		renderModel(result.Model), result.ModelFrom,
-		renderEffort(result.Effort), result.EffortFrom,
-		result.Directory, result.DirectoryFrom,
-	)
-	if result.StoredDirectory != "" {
-		fmt.Fprintf(stdout, "agentctl: %s now runs in %s; the fleet's recorded directory %s is unchanged\n",
-			result.Role, result.Directory, result.StoredDirectory)
-	}
-	if result.RecoveredWindowID != "" {
-		fmt.Fprintf(stdout, "recovered: removed window %s, which carried no @agentctl_process baseline, and recreated %s\n",
-			result.RecoveredWindowID, result.Role)
-	}
-}
-
 func renderEffort(effort string) string {
 	if effort == "" {
 		return "default"
@@ -842,159 +1189,6 @@ func renderModel(model string) string {
 		return "default"
 	}
 	return model
-}
-
-func relaunchError(stderr io.Writer, role, usage string, err error) int {
-	code := relaunchCauseError(stderr, role, usage, err)
-	var recovered *fleet.RecoveredWindowError
-	if errors.As(err, &recovered) {
-		fmt.Fprintf(stderr, "recovered: removed window %s, which carried no @agentctl_process baseline; %s was not recreated\n",
-			recovered.WindowID, recovered.Role)
-	}
-	return code
-}
-
-func relaunchCauseError(stderr io.Writer, role, usage string, err error) int {
-	var validation *config.ValidationError
-	if errors.As(err, &validation) {
-		return usageError(stderr, err.Error(), usage)
-	}
-	var directoryError *fleet.DirectoryError
-	if errors.As(err, &directoryError) {
-		return usageError(stderr, err.Error(), usage)
-	}
-	var missing *preflight.MissingExecutableError
-	if errors.As(err, &missing) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitMissingExecutable
-	}
-	var creation *fleet.WindowCreationError
-	if errors.As(err, &creation) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitTmux
-	}
-	var relaunchFailure *fleet.RelaunchError
-	if errors.As(err, &relaunchFailure) {
-		var conflict *fleet.PostCreateWindowConflictError
-		if errors.As(err, &conflict) {
-			if relaunchFailure.CleanupErr != nil {
-				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; failed to remove window %s: %v\n",
-					role, conflict, relaunchFailure.WindowID, relaunchFailure.CleanupErr)
-			} else {
-				fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v; removed window %s\n",
-					role, conflict, relaunchFailure.WindowID)
-			}
-			return exitLaunch
-		}
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitLaunch
-	}
-
-	var gate *fleet.SessionGateError
-	var roster *fleet.RosterError
-	var metadata *fleet.MetadataError
-	var legacy *fleet.LegacySessionError
-	var storedDirectory *fleet.StoredDirectoryError
-	if errors.As(err, &gate) || errors.As(err, &roster) || errors.As(err, &metadata) ||
-		errors.As(err, &legacy) || errors.As(err, &storedDirectory) {
-		relaunchRefusal(stderr, role, err)
-		return exitSession
-	}
-	var unknownRole *fleet.UnknownRoleError
-	var present *fleet.WindowPresentError
-	var soleWindow *fleet.SoleWindowRecoveryError
-	var unmarkedWindow *fleet.UnmarkedWindowRecoveryError
-	if errors.As(err, &unknownRole) || errors.As(err, &present) || errors.As(err, &soleWindow) || errors.As(err, &unmarkedWindow) {
-		relaunchRefusal(stderr, role, err)
-		return exitRole
-	}
-
-	var tmuxFailure *tmuxx.TmuxError
-	if errors.As(err, &tmuxFailure) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitTmux
-	}
-	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	return exitUnclassified
-}
-
-func relaunchRefusal(stderr io.Writer, role string, err error) {
-	fmt.Fprintf(stderr, "agentctl: refusing to relaunch %s; %v\n", role, err)
-}
-
-func controlError(stderr io.Writer, operation, usage string, err error) int {
-	var unknown *control.UnknownOperationError
-	if errors.As(err, &unknown) {
-		return usageError(stderr, err.Error(), usage)
-	}
-	var sessionMetadata *target.SessionMetadataError
-	if errors.As(err, &sessionMetadata) {
-		controlRefusal(stderr, operation, "session %s has %s=%q; expected %q", sessionMetadata.Session.Name, sessionMetadata.Option, sessionMetadata.Value, "1")
-		return exitSession
-	}
-	var roleResolution *target.RoleResolutionError
-	if errors.As(err, &roleResolution) {
-		if len(roleResolution.WindowIDs) == 0 {
-			controlRefusal(stderr, operation, "role %s matches no windows in %s", roleResolution.Role, roleResolution.Session.Name)
-		} else {
-			ids := make([]string, len(roleResolution.WindowIDs))
-			for index, id := range roleResolution.WindowIDs {
-				ids[index] = string(id)
-			}
-			controlRefusal(stderr, operation, "role %s matches %d windows in %s (%s)", roleResolution.Role, len(ids), roleResolution.Session.Name, strings.Join(ids, ", "))
-		}
-		return exitRole
-	}
-	var windowMetadata *target.WindowMetadataError
-	if errors.As(err, &windowMetadata) {
-		controlRefusal(stderr, operation, "window %s named %s has stored role %q; expected %q", windowMetadata.Window.ID, windowMetadata.Window.Name, windowMetadata.Window.Role, windowMetadata.Role)
-		return exitRole
-	}
-	var paneState *target.PaneStateError
-	if errors.As(err, &paneState) {
-		switch {
-		case len(paneState.Panes) != 1:
-			controlRefusal(stderr, operation, "window %s for %s:%s contains %d panes; expected 1", paneState.Window.ID, paneState.Session.Name, paneState.Role, len(paneState.Panes))
-		case paneState.Panes[0].WindowPanes != 1:
-			controlRefusal(stderr, operation, "pane %s reports %d panes in window %s; expected 1", paneState.Panes[0].ID, paneState.Panes[0].WindowPanes, paneState.Window.ID)
-		default:
-			controlRefusal(stderr, operation, "%s:%s pane %s is dead", paneState.Session.Name, paneState.Role, paneState.Panes[0].ID)
-		}
-		return exitUnsafe
-	}
-	var processIdentity *target.ProcessIdentityError
-	if errors.As(err, &processIdentity) {
-		switch {
-		case processIdentity.Window.Process == "":
-			fmt.Fprintf(stderr,
-				"agentctl: refusing to %s %s; window %s has no @agentctl_process baseline; recover the role with \"agentctl relaunch %s\"\n",
-				operation, processIdentity.Role, processIdentity.Window.ID, processIdentity.Role,
-			)
-		case processIdentity.Err != nil:
-			controlRefusal(stderr, operation, "%s:%s process identity is unavailable for pane %s: %v", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.Err)
-		default:
-			controlRefusal(stderr, operation, "%s:%s pane %s is running %q; recorded process is %q", processIdentity.Session.Name, processIdentity.Role, processIdentity.Pane.ID, processIdentity.ActualProcess, processIdentity.Window.Process)
-		}
-		return exitUnsafe
-	}
-	var selfTarget *target.SelfTargetError
-	if errors.As(err, &selfTarget) {
-		controlRefusal(stderr, operation, "%s:%s is the calling pane %s", selfTarget.Session.Name, selfTarget.Role, selfTarget.CallerPane)
-		return exitUnsafe
-	}
-	var tmuxFailure *tmuxx.TmuxError
-	if errors.As(err, &tmuxFailure) {
-		fmt.Fprintf(stderr, "agentctl: %v\n", err)
-		return exitTmux
-	}
-	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	return exitUnclassified
-}
-
-func controlRefusal(stderr io.Writer, operation, format string, arguments ...any) {
-	fmt.Fprintf(stderr, "agentctl: refusing to send %s; ", operation)
-	fmt.Fprintf(stderr, format, arguments...)
-	fmt.Fprintln(stderr)
 }
 
 func resolverError(stderr io.Writer, usage string, err error) int {
@@ -1014,16 +1208,13 @@ func resolverError(stderr io.Writer, usage string, err error) int {
 	return exitUnclassified
 }
 
-func statusError(stderr io.Writer, err error) int {
+func statusError(stderr io.Writer, sessionName string, err error) int {
+	var missing *fleet.ShimFleetMissingError
+	if errors.As(err, &missing) {
+		fmt.Fprintf(stderr, "agentctl: session %q has no durable fleet configuration\n", missing.Session)
+		return exitSession
+	}
 	fmt.Fprintf(stderr, "agentctl: %v\n", err)
-	var versionFailure *statuspkg.VersionError
-	if errors.As(err, &versionFailure) {
-		return exitSession
-	}
-	var rosterFailure *statuspkg.RosterError
-	if errors.As(err, &rosterFailure) {
-		return exitSession
-	}
 	var tmuxFailure *tmuxx.TmuxError
 	if errors.As(err, &tmuxFailure) {
 		return exitTmux
@@ -1034,4 +1225,17 @@ func statusError(stderr io.Writer, err error) int {
 func usageError(stderr io.Writer, message, usage string) int {
 	fmt.Fprintf(stderr, "agentctl: %s\n%s", message, usage)
 	return exitUsage
+}
+
+func commandValidationError(stderr io.Writer, err error, usage string) int {
+	var presentationConflict *presentationFlagConflictError
+	var runConflict *runTemplateFlagConflictError
+	var absent *runTemplateRoleAbsentError
+	var duplicate *runTemplateRoleDuplicateError
+	if errors.As(err, &presentationConflict) || errors.As(err, &runConflict) ||
+		errors.As(err, &absent) || errors.As(err, &duplicate) {
+		fmt.Fprintf(stderr, "agentctl: %s\n", err.Error())
+		return exitUsage
+	}
+	return usageError(stderr, err.Error(), usage)
 }

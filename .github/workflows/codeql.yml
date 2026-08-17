@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     timeout-minutes: 15
     permissions:
       contents: read
@@ -21,6 +21,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.6"
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:

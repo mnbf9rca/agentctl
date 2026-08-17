@@ -92,6 +92,31 @@ func TestJoin(t *testing.T) {
 	}
 }
 
+func TestJoinPreservesHiddenShimArgvBoundaries(t *testing.T) {
+	t.Parallel()
+
+	argv := []string{
+		"/Applications/Agent Ctl/agentctl", "__shim",
+		"--session", "fleet one", "--role", "planner",
+		"--harness", "claude", "--model", "model'quoted", "--effort", "max",
+	}
+	joined := Join(argv)
+	wantJoined := `'/Applications/Agent Ctl/agentctl' '__shim' '--session' 'fleet one' '--role' 'planner' '--harness' 'claude' '--model' 'model'"'"'quoted' '--effort' 'max'`
+	if joined != wantJoined {
+		t.Fatalf("Join(hidden shim argv) = %q, want %q", joined, wantJoined)
+	}
+
+	script := "set -- " + joined + `; printf '%s\000' "$@"`
+	got, err := exec.Command("sh", "-c", script).Output()
+	if err != nil {
+		t.Fatalf("hidden shim argv round-trip command failed: %v", err)
+	}
+	want := []byte(strings.Join(argv, "\x00") + "\x00")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("hidden shim argv round trip = %q, want %q", got, want)
+	}
+}
+
 func FuzzQuoteRoundTrip(f *testing.F) {
 	for _, seed := range []string{
 		"",

@@ -80,6 +80,20 @@ jobs:
           MACOS_NOTARY_KEY_ID: ${{ vars.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ vars.MACOS_NOTARY_ISSUER_ID }}
         run: goreleaser release --clean
+      - name: Inject and verify required draft release notes
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_before="$RUNNER_TEMP/release-before.json"
+          release_after="$RUNNER_TEMP/release-after.json"
+          release_notes="$RUNNER_TEMP/release-notes.md"
+          gh release view "v${{ steps.version.outputs.version }}" --json body,isDraft,tagName > "$release_before"
+          hack/release-notes.sh inject "${{ steps.version.outputs.version }}" "$release_before" > "$release_notes"
+          gh release edit "v${{ steps.version.outputs.version }}" --notes-file "$release_notes"
+          gh release view "v${{ steps.version.outputs.version }}" --json body,isDraft,tagName > "$release_after"
+          hack/release-notes.sh verify "${{ steps.version.outputs.version }}" "$release_after"
       - name: Build snapshot (dry run)
         if: env.DRY_RUN == 'true'
         run: goreleaser release --snapshot --clean --skip=notarize

@@ -1,5 +1,6 @@
 date_utc=2026-08-03T14:10:00Z
 mode=verify-live
+evidence_scope=retired pre-0.5 Parts A-C fixture; not 0.5 release evidence
 harness=both
 probes=all four completed, no surviving throwaway server
 part_a_result=PASS — automated probes and isolation checks completed
@@ -9,7 +10,7 @@ attach_attestation=y
 claude_clear_attestation=y
 codex_clear_attestation=y
 compact_attestation=y
-relaunch_check=PASS (stored codex/default/high provenance; pane ID changed)
+relaunch_check=PASS (stored claude/default/default provenance; pane ID changed)
 relaunch_attestation=y
 part_b_detach_attestation=y
 part_c_auth_mode=codex-seeded

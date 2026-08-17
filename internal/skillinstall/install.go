@@ -127,14 +127,8 @@ func installTarget(tree fs.FS, root string, next Manifest, target Target, force 
 			outcome.Detail = describeWriteFailure(failure, writePaths, outcome.Written)
 			return outcome, failure
 		}
-		if err := os.WriteFile(filename, content, 0o644); err != nil {
+		if err := replaceSkillFile(filename, content); err != nil {
 			failure := fmt.Errorf("write skill file %q: %w", filename, err)
-			outcome.Action = "failed"
-			outcome.Detail = describeWriteFailure(failure, writePaths, outcome.Written)
-			return outcome, failure
-		}
-		if err := os.Chmod(filename, 0o644); err != nil {
-			failure := fmt.Errorf("set skill file permissions %q: %w", filename, err)
 			outcome.Action = "failed"
 			outcome.Detail = describeWriteFailure(failure, writePaths, outcome.Written)
 			return outcome, failure
@@ -221,6 +215,9 @@ func validateOwnedFiles(dir string, existing, next Manifest) error {
 		}
 		if entry.IsDir() || filename == filepath.Join(dir, ManifestName) {
 			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("%s: target entry is not a regular file: %w", filename, ErrUnowned)
 		}
 		relative, err := filepath.Rel(dir, filename)
 		if err != nil {
@@ -320,4 +317,36 @@ func actionForError(err error) string {
 		return "refused"
 	}
 	return "failed"
+}
+
+// replaceSkillFile writes content through a same-directory temporary file and
+// renames it over the target, mirroring how the manifest is committed. Rename
+// replaces the directory entry rather than writing through it, so any other
+// name for the previous file - a hard link, or a symlink chain reached another
+// way - keeps its own content. That is what makes the declared write boundary
+// true for every alias case rather than only the ones ownership validation
+// enumerates.
+func replaceSkillFile(filename string, content []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(filename), ".agentctl-skill.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary skill file: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer func() { _ = os.Remove(temporaryName) }()
+
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("set temporary skill file permissions: %w", err)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary skill file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary skill file: %w", err)
+	}
+	if err := os.Rename(temporaryName, filename); err != nil {
+		return fmt.Errorf("replace skill file: %w", err)
+	}
+	return nil
 }

@@ -9,8 +9,10 @@ import (
 
 func TestOperationsExposeOnlyRatifiedArgumentFreePayloads(t *testing.T) {
 	want := []Command{
-		{Operation: "clear", Payload: "/clear"},
-		{Operation: "compact", Payload: "/compact"},
+		{Operation: "clear", Kind: OperationPayload, Payload: "/clear"},
+		{Operation: "compact", Kind: OperationPayload, Payload: "/compact"},
+		{Operation: "observe", Kind: OperationControl},
+		{Operation: "stop", Kind: OperationControl},
 	}
 
 	if got := Operations(); !reflect.DeepEqual(got, want) {
@@ -22,6 +24,18 @@ func TestOperationsExposeOnlyRatifiedArgumentFreePayloads(t *testing.T) {
 		}
 		if strings.ContainsAny(command.Payload, " \t\r\n") {
 			t.Errorf("payload for %q = %q, want one argument-free literal with no formatting verb", command.Operation, command.Payload)
+		}
+	}
+}
+
+func TestControlOperationsCannotRepresentPTYInput(t *testing.T) {
+	for _, operation := range []string{"observe", "stop"} {
+		command, err := Lookup(operation)
+		if err != nil {
+			t.Fatalf("Lookup(%q) error = %v", operation, err)
+		}
+		if command.Kind != OperationControl || command.Payload != "" {
+			t.Fatalf("Lookup(%q) = %#v, want control operation with no payload", operation, command)
 		}
 	}
 }

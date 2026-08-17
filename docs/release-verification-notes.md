@@ -4,6 +4,12 @@ See `docs/release-checklist.md` for the runbook this supports.
 
 ## Why this checklist exists
 
+For 0.5.0, the shim cutover replaces the old human Parts A–C walkthrough with
+the Task 8 automated release-candidate fixture. Kernel, PTY, Unix-socket, tmux
+layout, installed-skill, and cleanup observations are captured as named
+artifacts. The historical explanation below describes why the pre-0.5
+walkthrough existed; its results remain history, not evidence for 0.5 or later.
+
 Automated tests cannot cover the states this checklist covers, and the reason is
 structural rather than a matter of effort.
 
@@ -30,7 +36,237 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-17
+
+- agentctl: `agentctl c853520`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.BGYnDV/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_bgyndv`
+- Part B AMQ mode: temporary (verifier-owned .amqrc and root)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-16
+
+- agentctl: `agentctl be35584`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.VmXXGB/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_vmxxgb`
+- Part B AMQ mode: temporary (verifier-owned .amqrc and root)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-16
+
+- agentctl: `agentctl 7a2ff00`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.vASPnH/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_vaspnh`
+- Part B AMQ mode: temporary (verifier-owned .amqrc and root)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-15
+
+- agentctl: `agentctl b0cea10`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.mB9VUj/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_mb9vuj`
+- Part B AMQ mode: temporary (verifier-owned .amqrc and root)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-15
+
+- agentctl: `agentctl 2bd91cd`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.Jmk27g/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10
+- Part B session: `relverify_jmk27g`
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 explicit role attachments: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 viewer terminals closed: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-15
+
+- agentctl: `agentctl 9441d19`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.sOZSK1/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10
+- Part B session: `relverify_sozsk1`
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 explicit role attachments: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 viewer terminals closed: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-15
+
+- agentctl: `agentctl 25764cb`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.233 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.LjdUVE/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: explicit role attach, delivery, runtime-record relaunch, reattach, and viewer-close checkpoints B.C1-B.C10
+- Part B session: `relverify_ljduve`
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 explicit role attachments: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (old child absent; replacement runtime identities observed; explicit role reattach confirmed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 viewer terminals closed: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+
+### 2026-08-12
+
+- agentctl: `agentctl 21cfecf`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.228 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.Ui9Fw8/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
+- Part C: PASS — operator confirmed: authentication, skill inventory, and status-meaning checkpoints C.C1-C.C3
+- Probes: all four completed, no surviving throwaway server
+- Checkpoint B.C1 attach narration: operator confirmed: y
+- Checkpoint B.C3 Claude clear outcome: operator confirmed: y
+- Checkpoint B.C5 Codex clear outcome: operator confirmed: y
+- Checkpoint B.C7 Claude compact outcome: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y
+- Checkpoint B.C10 detach: operator confirmed: y
+- Checkpoint C.C1 authentication (keychain-linked, codex-seeded): operator confirmed: y
+- Checkpoint C.C2 skill inventory: operator confirmed: y
+- Checkpoint C.C3 status meaning: operator confirmed: y
+- Teardown status: exit 3 (session absent; other tmux sessions remained)
+- Teardown check: PASS
+
+### 2026-08-11
+
+Issue #182 Task 8 implementation evidence (pre-PR release-candidate run):
+
+- Candidate: `agentctl 9b3ecd78ca8b129c90c7c0bda1b4f2d03672f065`; SHA-256
+  `1b20f9c5c7204908c33c749e10e488053f58e41b3d2e3273f6ca4ceb927370a0`.
+- Foreign fixture: `foreign-protocol-v2`; SHA-256
+  `0fcdb1861fa469b43d82e5f1af91c272cff120efa1adde26627eb8afc00b3d0b`.
+- All six matrix legs passed: the current client rejected foreign and absent
+  `connected shim hello` versions; foreign and absent clients were rejected
+  from `client request`; matching hello/request controls reached their next
+  typed runtime gates.
+- Candidate-backed, fixture-owned integration tests attested the candidate
+  path/hash and passed no-tmux foreground operation,
+  `join-pane`/`break-pane`/`swap-pane`/`move-window` identity preservation,
+  delivery, roster extension/directory refusal, unanchored status, divergent
+  state roots, attach refusal, shim-crash/relaunch, and child-exit-before-cleanup
+  (`9.040s`).
+- Live kernel tests observed a reaped child as ESRCH/absent; the EPERM, other
+  kill-error, and post-presence token-read failure table refused absence. Raw
+  start-token legs passed under `TZ=UTC, LC_ALL=C` and
+  `TZ=Pacific/Auckland, LC_ALL=en_US.UTF-8`.
+- Deterministic TERM injection at all nine walkthrough phases used an actual
+  `setsid` descendant that ignored TERM/HUP, preserved exit 143, cleaned
+  exactly once, and never printed PASS. The owned-process sweep required
+  peer-verified shim identity or matching PID/start-token identity before
+  cleanup and then observed ESRCH; cleanup-failure injection preserved the
+  signal status.
+- The candidate installed matching Claude and Codex skill trees into an
+  isolated HOME. R23's agent-facing surface and R23a's production
+  `RuntimeStates` pairing were verified by their landed drift tests; they were
+  not reimplemented.
+- Structural and archive-license fixtures passed. Both actual Darwin snapshot
+  archives contained the x/sys license and all prior required license material;
+  `go version -m` recorded `golang.org/x/sys v0.47.0`.
+- Cleanup recorded the owned Task 8 root absent. The run retained evidence
+  only under `/private/tmp/agentctl-task8-final.20ncWP`; this path is
+  run-local and this summary is the durable record.
+
 ### 2026-08-10
+
+Issue #182 pre-cutover evidence (separate from the release-verifier block below):
+
+- `hack/probe-shim-sighup.sh` used isolated mode-`0700` homes and nested `/usr/bin/script` PTYs; it invoked no tmux
+  command and signaled only each invocation's recorded shim PID.
+- Claude Code `2.1.226 (Claude Code)`: shim PID 55862, direct child PID 55866 on `ttys006`, observed command
+  `/Users/rob/.local/bin/claude`; child observed terminated after shim SIGHUP.
+- codex-cli `0.147.0`: shim PID 56309, direct child PID 56313 on `ttys006`, observed command
+  `/Users/rob/.local/bin/codex`; child observed terminated after shim SIGHUP.
+- The command field exactly matched the selected harness path in each live leg. The fixture suite separately refuses a
+  PTY-bearing intermediate direct child and observes cleanup without signaling an unrelated sentinel.
+- Full records and safety boundary:
+  [`docs/security/2026-08-10-issue-182-shim-probe-evidence.md`](security/2026-08-10-issue-182-shim-probe-evidence.md).
+  These observations inform teardown but do not replace `kill(pid,0)` ESRCH-only absence.
+- The committed incident replay was byte-identical to build2's full report, SHA-256
+  `d9c14f10df03ec7e7de36adcdd9225b26946c64b9d7f26ec50777b41182f7a01`.
 
 - agentctl: `agentctl 25fe900`
 - tmux: `tmux 3.7b`

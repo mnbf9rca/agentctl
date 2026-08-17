@@ -5,6 +5,7 @@
 - Claude Code: `2.1.220 (Claude Code)`
 - codex-cli: `codex-cli 0.146.0 (research preview)`
 - Mode: `verify-live`; harness: `both`
+- Scope: retired pre-0.5 Parts A-C fixture; not 0.5 release evidence
 - Artifact: `testdata/release-verify-live-artifact`
 - Part A: PASS — automated probes and isolation checks completed
 - Part B: PASS — operator confirmed: numbered attach, delivery, relaunch, and detach checkpoints B.C1-B.C10
@@ -14,7 +15,7 @@
 - Checkpoint B.C3 Claude clear outcome: operator confirmed: y
 - Checkpoint B.C5 Codex clear outcome: operator confirmed: y
 - Checkpoint B.C7 Claude compact outcome: operator confirmed: y
-- Checkpoint B.C9 relaunch: PASS (stored codex/default/high provenance; pane ID changed); fresh codex input with no junk: operator confirmed: y
+- Checkpoint B.C9 relaunch: PASS (stored claude/default/default provenance; pane ID changed); fresh claude input with no junk: operator confirmed: y
 - Checkpoint B.C10 detach: operator confirmed: y
 - Checkpoint C.C1 authentication (codex-seeded): operator confirmed: y
 - Checkpoint C.C2 skill inventory: operator confirmed: y

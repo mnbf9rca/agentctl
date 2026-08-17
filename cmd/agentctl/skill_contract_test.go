@@ -226,18 +226,18 @@ func parseExitCodeTable(lines []string) (map[string]int, error) {
 	return documented, nil
 }
 
-func parseStatusStateTable(lines []string) (map[status.State]struct{}, error) {
+func parseStatusStateTable(lines []string) (map[status.RuntimeState]struct{}, error) {
 	rows, err := strictTableRows(lines, []string{"Order", "State", "The claim it makes", "What it does not claim"})
 	if err != nil {
 		return nil, err
 	}
-	documented := make(map[status.State]struct{}, len(rows))
+	documented := make(map[status.RuntimeState]struct{}, len(rows))
 	for _, cells := range rows {
 		stateName, err := backtickedCell(cells[1])
 		if err != nil {
 			return nil, fmt.Errorf("status State cell: %w", err)
 		}
-		state := status.State(stateName)
+		state := status.RuntimeState(stateName)
 		if _, duplicate := documented[state]; duplicate {
 			return nil, fmt.Errorf("duplicate status state %q", state)
 		}
@@ -503,16 +503,16 @@ func exitConstantsFromSource(t *testing.T) map[string]int {
 	return constants
 }
 
-func stateConstantsFromSource(t *testing.T) map[string]status.State {
+func stateConstantsFromSource(t *testing.T) map[string]status.RuntimeState {
 	t.Helper()
 	_, statusDirectory := sourceDirectories(t)
-	declared, err := packageConstants(statusDirectory, "State")
+	declared, err := packageConstants(statusDirectory, "RuntimeState")
 	if err != nil {
 		t.Fatal(err)
 	}
-	constants := make(map[string]status.State, len(declared))
+	constants := make(map[string]status.RuntimeState, len(declared))
 	for _, constant := range declared {
-		constants[constant.name] = status.State(constant.value)
+		constants[constant.name] = status.RuntimeState(constant.value)
 	}
 	return constants
 }
@@ -586,12 +586,12 @@ func compareExitConstants(declared, documented map[string]int) []string {
 	return mismatches
 }
 
-func compareStateConstants(declared map[string]status.State, accessor []status.State, documented map[status.State]struct{}) []string {
+func compareStateConstants(declared map[string]status.RuntimeState, accessor []status.RuntimeState, documented map[status.RuntimeState]struct{}) []string {
 	var mismatches []string
-	declaredValues := make(map[status.State]string)
+	declaredValues := make(map[status.RuntimeState]string)
 	for name, state := range declared {
 		if first, duplicate := declaredValues[state]; duplicate {
-			mismatches = append(mismatches, fmt.Sprintf("State constants %s and %s both declare %q", first, name, state))
+			mismatches = append(mismatches, fmt.Sprintf("RuntimeState constants %s and %s both declare %q", first, name, state))
 			continue
 		}
 		declaredValues[state] = name
@@ -605,20 +605,20 @@ func compareStateConstants(declared map[string]status.State, accessor []status.S
 		}
 	}
 
-	accessorValues := make(map[status.State]struct{}, len(accessor))
+	accessorValues := make(map[status.RuntimeState]struct{}, len(accessor))
 	for _, state := range accessor {
 		if _, duplicate := accessorValues[state]; duplicate {
-			mismatches = append(mismatches, fmt.Sprintf("status.States() reports duplicate state %q", state))
+			mismatches = append(mismatches, fmt.Sprintf("status.RuntimeStates() reports duplicate state %q", state))
 			continue
 		}
 		accessorValues[state] = struct{}{}
 		if _, ok := declaredValues[state]; !ok {
-			mismatches = append(mismatches, fmt.Sprintf("status.States() returns undeclared state %q", state))
+			mismatches = append(mismatches, fmt.Sprintf("status.RuntimeStates() returns undeclared state %q", state))
 		}
 	}
 	for state, name := range declaredValues {
 		if _, ok := accessorValues[state]; !ok {
-			mismatches = append(mismatches, fmt.Sprintf("State constant %s=%q is missing from status.States()", name, state))
+			mismatches = append(mismatches, fmt.Sprintf("RuntimeState constant %s=%q is missing from status.RuntimeStates()", name, state))
 		}
 	}
 	return mismatches
@@ -642,6 +642,26 @@ func TestSkillVersionParses(t *testing.T) {
 			t.Fatal("metadata.version is empty")
 		}
 	})
+}
+
+func TestSkillDescribesDetachedDefaultAndBothAttachForms(t *testing.T) {
+	raw, err := skills.Tree.ReadFile(skills.Root + "/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"Passing neither `--detached` nor `--tmux` launches detached",
+		"`attach ROLE` streams a detached role directly",
+		"Bare `attach` remains the fleet-level tmux presentation route",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SKILL.md is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "attach requires an observed tmux presentation") {
+		t.Fatal("SKILL.md still makes the obsolete tmux-only attach claim")
+	}
 }
 
 func TestMetadataVersionParsingRejectsInvalidFrontmatter(t *testing.T) {
@@ -733,17 +753,17 @@ func TestSourceConstantInventoryIncludesSyntheticDeclarations(t *testing.T) {
 	})
 
 	t.Run("synthetic state enters comparisons", func(t *testing.T) {
-		constants, err := sourceConstants("status.go", []byte("package status\ntype State string\nconst (\nStateRunning State = \"running\"\nStateSynthetic State = \"synthetic\"\n)\n"), "State")
+		constants, err := sourceConstants("status.go", []byte("package status\ntype RuntimeState string\nconst (\nRuntimeStateRunning RuntimeState = \"running\"\nRuntimeStateSynthetic RuntimeState = \"synthetic\"\n)\n"), "RuntimeState")
 		if err != nil {
 			t.Fatal(err)
 		}
-		declared := make(map[string]status.State)
+		declared := make(map[string]status.RuntimeState)
 		for _, constant := range constants {
-			declared[constant.name] = status.State(constant.value)
+			declared[constant.name] = status.RuntimeState(constant.value)
 		}
-		mismatches := compareStateConstants(declared, []status.State{status.StateRunning}, map[status.State]struct{}{status.StateRunning: {}})
-		if !containsMismatch(mismatches, `declared state StateSynthetic="synthetic" is undocumented`) ||
-			!containsMismatch(mismatches, `State constant StateSynthetic="synthetic" is missing from status.States()`) {
+		mismatches := compareStateConstants(declared, []status.RuntimeState{status.RuntimeStateRunning}, map[status.RuntimeState]struct{}{status.RuntimeStateRunning: {}})
+		if !containsMismatch(mismatches, `declared state RuntimeStateSynthetic="synthetic" is undocumented`) ||
+			!containsMismatch(mismatches, `RuntimeState constant RuntimeStateSynthetic="synthetic" is missing from status.RuntimeStates()`) {
 			t.Fatalf("compareStateConstants() = %#v, want synthetic declaration drift", mismatches)
 		}
 	})
@@ -974,17 +994,17 @@ func TestStatusStatesMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		states := status.States()
+		states := status.RuntimeStates()
 		if len(states) == 0 {
-			t.Fatal("status.States() returned no states")
+			t.Fatal("status.RuntimeStates() returned no states")
 		}
 		first := states[0]
 		states[0] = ""
-		if fresh := status.States(); fresh[0] != first {
-			t.Fatalf("status.States() returned shared mutable storage: fresh first state = %q, want %q", fresh[0], first)
+		if fresh := status.RuntimeStates(); fresh[0] != first {
+			t.Fatalf("status.RuntimeStates() returned shared mutable storage: fresh first state = %q, want %q", fresh[0], first)
 		}
 
-		for _, mismatch := range compareStateConstants(stateConstantsFromSource(t), status.States(), documented) {
+		for _, mismatch := range compareStateConstants(stateConstantsFromSource(t), status.RuntimeStates(), documented) {
 			t.Error(mismatch)
 		}
 	})

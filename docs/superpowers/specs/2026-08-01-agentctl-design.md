@@ -140,7 +140,8 @@ further is printed.
 ```
 agentctl launch  --session S --roles R:H,... [--models R:M,...] [--efforts R:L,...] [--dir PATH]
 agentctl launch  --session S --from-template FILE [--roles R:H,...] [--models R:M,...] [--efforts R:L,...] [--dir PATH]
-agentctl relaunch [--session S] [--harness H] [--model M] [--dir PATH] ROLE
+agentctl run --session S --role R --harness H [--model M] [--effort L]
+agentctl relaunch [--session S] [--harness H] [--model M] [--effort L] [--dir PATH] ROLE
 agentctl attach   [--session S]
 agentctl status   [--session S | --all] [--json]
 agentctl clear    [--session S] ROLE
@@ -157,7 +158,10 @@ flag may add roles beside it (§6.9). Without a template, `--roles` remains requ
 are written separately above rather than as one line with everything bracketed, because a single line cannot express
 "one of these two is required" without saying it in prose anyway.
 
-**`status` never narrows silently.** Bare `agentctl status` reports **every** session on the tmux server (§6.3.1).
+At the §15 cutover, `run` is the exact foreground, no-tmux form above. All three identity flags are required and
+`--dir` is rejected; the observed cwd is the session-wide durable fleet directory (§15.7).
+
+**`status` never narrows silently.** Bare `agentctl status` reports **every durable fleet** (§15.6).
 Ambient context — `AGENTCTL_SESSION`, or the tmux session the caller happens to be sitting in — does not select a
 target for `status` and never reduces its output to one fleet; it may only *mark* which session the caller is in.
 Only an explicit `--session S` narrows the report to one session, because only that is the operator saying which fleet
@@ -167,13 +171,18 @@ There is no `--all` flag. It existed to make the listing reachable from inside t
 always resolved; a bare `status` that always lists makes it redundant, and a flag that changes nothing invites the
 reader to believe it changes something.
 
-`clear`, `compact`, `kill` and `attach` are unaffected: each acts on exactly one target, so each still resolves one
+`relaunch`, `clear`, `compact`, `kill` and `attach` each act on exactly one target, so each resolves one
 through the full §4.1 chain.
 
 ### 4.1 Session resolution
 
-Precedence for non-launch commands: explicit `--session` > `AGENTCTL_SESSION` > the current tmux session. `launch`
-always requires an explicit `--session` and never invokes the resolver at all.
+Precedence for acting commands other than `launch`/`run`: explicit `--session` > `AGENTCTL_SESSION` > the current tmux
+session. `launch` and `run` always require an explicit `--session` and never invoke the resolver.
+
+At the §15 cutover, explicit and environment sources are validated selection facts and do not require a tmux session
+of the same name. Only the current-tmux fallback calls `display-message` for the validated `TMUX_PANE`; its returned
+validated name is selected directly. Runtime commands subsequently open the durable fleet and role namespace. The
+pre-cutover list/exact-match rules below remain historical detail for §§1–14 and are superseded by this paragraph.
 
 **Empty is not the same as absent.** `--session=` (explicitly supplied, empty) is a usage error → exit 2, with **no**
 fallback: the user named the source, so falling through would substitute a session they did not ask for.
@@ -199,7 +208,7 @@ Session-name candidates are validated by `config.ValidateSessionName` — one va
 sources. `TMUX_PANE` is the exception in *what* is checked, not in how it is classified: it carries a pane ID rather
 than a session name, so it is validated as one, and an invalid value is still an invalid source the user set.
 
-**`status` does not consult the ambient sources at all.** The matrix above governs `clear`, `compact`, `kill` and
+**`status` does not consult the ambient sources at all.** The matrix above governs `relaunch`, `clear`, `compact`, `kill` and
 `attach` — commands that must end up holding exactly one target. `status` describes rather than acts, so it takes only
 an explicit `--session`; `AGENTCTL_SESSION` and the current tmux session neither select for it nor fail it. When no
 `--session` is given it reports the listing (§6.3.1), whatever the environment says.
@@ -1249,7 +1258,9 @@ the write side.
 ## 7. Validation rules (consolidated)
 
 - Session names and flag/control role names: `^[a-z0-9][a-z0-9_-]*$`. Template role names carry the same pattern in
-  the embedded schema, which alone owns that file-local rule.
+  the embedded schema, which alone owns that file-local rule. Session and role names are each capped at **32 ASCII
+  bytes**; the regex makes characters one byte, so byte and character counts cannot diverge. The cap is enforced by
+  `internal/config` for every flag, environment, template-union, stored-record, and control-role input.
 - Model and effort identifiers: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (catalogue-free; charset-bound), implemented by one shared compiled expression. Effort rejection names the rejected value and the charset; a well-formed value is left for the selected harness to accept or reject (§3.2.1).
 - `--efforts` shares every structural rule with `--models`: optional, non-nil-but-empty is a usage error, entries are `ROLE:VALUE`, duplicate role entries and entries for undefined roles are rejected, and empty list entries name the raw list and the entry index.
 - Harnesses: `claude` | `codex` only.
@@ -1332,6 +1343,16 @@ guard against accidents, not an authentication mechanism or an idleness proof: a
 or match by renaming an executable.
 
 ## 9. Exit codes
+
+At the 0.5.0 atomic cutover, §15.8 is the complete public exit map, including foreground child outcomes,
+runtime/shim refusal classes, retained ownership, and `fleet-directory-disagreement`. The pre-cutover derivation below
+is retained only as history where §15 does not supersede it.
+
+`invalid-root` exit 2 covers those declared-root, fixed-path traversal/creation, and private-boundary failures reported
+as `InvalidRootError`. Descriptor observation and substitution failures retain the existing `unclassified` exit-1 row;
+during setup its `SESSION` substitution is exactly `""`. A durable ancestor with a mode other than `0700`, including
+`$HOME` or the `os.UserConfigDir()` result, selects neither branch and emits no refusal; §15.2 makes the final state
+directory the validated durable boundary.
 
 The brief's table verbatim (0, 2–8). `kill` uses 3 for unresolvable/missing/unmanaged sessions and 6 for tmux failures.
 Exit 8's claim extends from "the session this invocation created was removed" to "**what this invocation created**
@@ -1437,7 +1458,11 @@ One epic, five sequential waves; issues within a wave are parallelizable across 
 
 Authoritative answers to implementation questions raised during Wave 1. These bind all packages and reviews.
 
-1. **Window-command assembly site.** Exactly one place assembles the window command: `internal/fleet`, as the string `"exec " + shellq.Join(harness.AgentArgv(...))`. `harness` returns argv (starting at `amq`); `shellq` quotes and joins; `fleet` prepends the unquoted `exec` shell keyword and passes the string to `tmuxx`. No other package may compose shell-interpreted strings.
+1. **Window-command assembly site.** Assembly remains confined to `internal/fleet` as the string
+   `"exec " + shellq.Join(argv)`: `shellq` quotes and joins, `fleet` prepends the unquoted `exec` shell keyword, and
+   the result is passed to `tmuxx`. The shipped authorized set is exactly one site:
+   `internal/fleet/shim.go:shimWindowCommand` for the hidden-shim argv. The structural guard pins that named site and
+   rejects a second, indirection, or a move/rename. No other package may compose shell-interpreted strings.
 2. **`shellq.Quote` is total.** Safe for arbitrary bytes with no validated-input precondition (defense in depth, independent of `internal/config`). Sole documented exclusion: NUL, which cannot exist in an argv element; the fuzz round-trip property skips inputs containing `\x00`.
 3. **Canonical tmux argv table.** `internal/tmuxx` owns one canonical argv per tmux operation. The table is §13; any change to it is a spec change.
 4. **Exact targeting everywhere.** Names are never passed to `-t`. Sessions, windows and panes are resolved to tmux IDs by listing and comparing exactly in Go, and every subsequent operation addresses the ID. This is a security invariant; reviews fail PRs on it. Superseded in mechanism by §13.1, which records the tmux behaviour that makes the original `=`-prefix formulation unimplementable for `set-option`/`show-options`; the intent — no name matching, ever — is unchanged and strengthened.
@@ -1708,3 +1733,1672 @@ Everything in the brief's Out of scope list, plus `--if-missing` (deferred, §2 
 `no-baseline` recovery in §6.8 (which refuses `dead` rather than folding it into `missing`, and refuses every other
 present-window state; a general `restart` command would be filed separately if demand appears). `status` deliberately does not read
 `@agentctl_fleet` or `@agentctl_dir`: consistency checking is not its job. The brief's acceptance criteria apply, extended by: `agentctl kill` refuses unmanaged sessions; model and effort charset enforcement; deterministic cwd propagation; process-identity baseline recorded and enforced; self-target guard on control commands.
+
+## 15. Approved 0.5.0 per-agent shim contract
+
+This section supersedes the tmux-window identity and direct `send-keys` parts of §§1–14. The atomic 0.5.0 public
+cutover is shipped: runtime shims are the sole production identity and delivery plane, while tmux is optional
+presentation. The
+[options paper](2026-08-09-issue-182-identity-delivery-options.md) is rationale and evidence only. Option S is selected
+and no behavioral branch remains open. An empirical invalidation would require a new approved design delta before the
+paper's Option A fallback could replace this contract.
+
+### 15.1 Authority, architecture, and command surface
+
+The runtime plane is authoritative for role identity, liveness, status, and control. One resident agentctl shim owns
+one role, holds its kernel claim, runs the unchanged `amq coop exec ... HARNESS` argv on a nested PTY, and serves one
+versioned local socket. The request's only delivery instruction is one closed-registry operation name; its other
+permitted values are framing/version and validated session/role identity, and the response carries only
+framing/version and typed objective facts. The server resolves the operation through `internal/control`; no request or
+decoder field can represent payload bytes, raw keys, slash commands, arguments, model values, environment values, or
+caller text. The exact §15.5 schema is not broadened. The shim is the sole writer to the harness PTY, serializing
+relayed operator input and registered control bytes at one point.
+
+tmux is optional presentation and fleet-launch plumbing. `launch` may create tmux windows whose command starts
+the shim, fleet-level `attach` is tmux-only while per-role `attach ROLE` requires no tmux (§15.11), and tmux
+observations may enrich status, but no tmux session/window/pane name,
+option, layout, or process row establishes role identity or permits delivery. `agentctl run` starts one foreground
+role without tmux. The internal shim entrypoint is hidden from public help, `commandUsage`, the embedded skill, and
+agent-facing inventories. No migration or dual dialect is supported; the public production paths switch atomically
+and protocol version skew fails closed.
+
+The public foreground syntax is exactly one of:
+
+```text
+agentctl run --session SESSION --role ROLE --harness HARNESS [--model MODEL] [--effort EFFORT]
+agentctl run --session SESSION --role ROLE --from-template FILE
+```
+
+`--from-template` excludes `--harness`, `--model`, and `--effort`; supplying any of them with it is a usage refusal
+naming both. In the template form `run` reads only the named role's harness, model, and effort. It ignores the file's
+`presentation` and `dir` members entirely — the foreground path has no presentation, and §15.7's cwd rule is
+unchanged. A role absent from the template, or named more than once in it, is a refusal before any runtime mutation.
+In the flag form all three identity flags are required. `--dir`, positional child commands, payloads, raw keys, and environment
+overrides are rejected. The runner uses the caller's already-observed cwd and the same lifecycle server as tmux launch.
+
+The hidden argv is exactly:
+
+```text
+agentctl __shim --session SESSION --role ROLE --harness HARNESS [--model MODEL] [--effort EFFORT]
+```
+
+It accepts no positional child command, payload, raw key, environment override, directory, or arbitrary argument.
+The handler validates every supplied value, reconstructs the unchanged child argv through `harness.AgentArgv`, and
+inherits its already-selected working directory and environment. Fleet wiring starts the current executable through
+this route; it is not a public lifecycle command and does not appear in any command inventory.
+
+| Package | Approved responsibility |
+|---|---|
+| `internal/shim` | namespace roots; lifetime `flock`; advisory lockfile; durable role records; version-first codec; `LOCAL_PEERPID`; raw process observation; server/client boundary |
+| `internal/ptyx` | standard-library Darwin nested PTY, child launch, relay, resize/termios observation, readiness, serialized writes |
+| detached spawn boundary | typed parent-specified `os/exec` spawn of the hidden shim command for detached launch (§15.11.6); recording fake in tests; no shell |
+| `internal/fleet` | tmux-backed shim launch or foreground composition, roster/config persistence, rollback, relaunch, kill |
+| `internal/status` | runtime-first enumeration and §15.6 precedence; tmux presentation is additive only |
+| `internal/control` | closed operation registry and shim client dispatch; no caller-payload-bearing delivery API |
+| `internal/tmuxx` | optional presentation/create/attach/kill operations only; production payload delivery is removed |
+| `internal/target` | removed; no production or compatibility target-chain package remains |
+
+`launch`, `relaunch`, `kill`, `status`, `clear`, and `compact` do not use tmux as identity or delivery evidence.
+Fleet-level `attach` requires an observed tmux presentation; per-role `attach ROLE` requires the role's attach
+stream instead and is categorically refused for a tmux-presented role (§15.11.1).
+
+### 15.2 Namespace, declared roots, and length predicates
+
+For decimal uid `UID`, the production volatile root is `/tmp/agentctl-UID/v1`. Per-role artifacts are:
+
+```text
+/tmp/agentctl-UID/v1/<session>/<role>.lock
+/tmp/agentctl-UID/v1/<session>/<role>.sock
+/tmp/agentctl-UID/v1/<session>/<role>.attach
+```
+
+`UID` is treated at its worst case of 10 decimal bytes. With the §7 caps, the longest production socket pathname is the
+attach stream, whose suffix is two bytes longer than the control socket's:
+`/tmp/agentctl-<10-digit-uid>/v1/<32-byte-session>/<32-byte-role>.attach`: **100 pathname bytes, 101 including NUL**,
+within Darwin `sun_path[104]` with three bytes to spare. The control socket's worst case is 98 bytes, 99 including NUL.
+Every resolved socket path is checked against the ceiling, and the attach path is the one the boundary tests use. The resolved socket path is still checked and refused before claim or role mutation when it is
+104 bytes or longer. `AGENTCTL_RUNTIME_ROOT` is a test/release-verification override, not a trust anchor; it must be
+absolute, at most 1024 bytes, and pass the same descriptor and ownership checks. The name caps are necessary but not
+sufficient for an override: the independent resolved-path check always runs.
+
+The production durable root is `os.UserConfigDir()/agentctl/state-v1`; `AGENTCTL_STATE_ROOT` is its declared
+test/release-verification override. `$HOME`, the `os.UserConfigDir()` result, and `AGENTCTL_STATE_ROOT` remain bounded
+declared inputs: each supplied path must be nonempty, absolute, clean, and at most 1024 bytes. The final resolved
+`state-v1` directory is the durable private boundary: it is opened descriptor-relatively and verified as a nonsymlink,
+same-user, mode-`0700` directory. Ancestor directory modes, including `$HOME`, the `os.UserConfigDir()` result, and a
+pre-existing `agentctl` directory, do not gate execution. A missing `agentctl` ancestor and final `state-v1` directory
+are each created mode `0700`; a pre-existing ancestor is not repaired. Traversal and creation must still succeed, and
+the fixed `agentctl` component must be a directory rather than a symlink. The state-root override receives the same
+final directory validation. Both overrides and `$HOME` are same-user-selectable residual surfaces, never
+authentication.
+
+The volatile tree keeps its separate, stricter discipline: every created component is `0700`, and unsafe type, owner,
+mode, symlink, or descriptor substitution refuses. Socket, lock, and record files are `0600`. Predictable pre-creation
+of `/tmp/agentctl-UID` can deny service; agentctl refuses and never adopts or repairs an unsafe tree. This is a
+refusal-only denial surface.
+
+The durable role record is exactly:
+
+```text
+<resolved-state-root>/sessions/<session>/roles/<role>.json
+```
+
+It holds reservation/child/config facts and survives volatile-tree deletion and reboot. The uid-anchored lockfile body
+records the shim PID, nonce, fully resolved state root, and protocol metadata as advisory facts. A client first reads
+that root and compares it with its independently resolved root. A mismatch is `state-root-disagreement`; it never
+enumerates the alternate tree or reports `missing`.
+
+R19 extends the existing version-1 role record before the 0.5.0 release as a pre-release flag-day schema change. Its
+`state` is exactly `child-starting`, `child-recorded`, or `cleanup-failed`. The first two retain their existing closed
+fields. `cleanup-failed` requires the existing version/session/role/shim PID/nonce fields and `child_pid`, permits
+`child_start_token` only when it was observed, and adds exactly one `cleanup` object:
+
+```json
+{"cause":"CAUSE","observation":"present-match","remaining":["child","socket","record","lock"]}
+```
+
+`cause` is a nonempty observed failure string. `observation` is exactly `present-match`,
+`present-token-disagreement`, `present-not-ours`, or `could-not-observe`. `remaining` is nonempty, contains each
+applicable value from the closed `child`, `socket`, `attach`, `record`, `lock` vocabulary at most once, and uses that
+fixed order. The nested object rejects duplicate, unknown, missing, wrongly typed, and unknown-valued fields. A cleanup
+object on another state, a missing cleanup object on `cleanup-failed`, or any unknown state is malformed record
+content and therefore `invalid-record`. Filesystem, permission, descriptor-substitution, and other failures to read a
+record are observations that could not be completed, not malformed content. Provenance: planner R19,
+2026-08-10/11.
+
+Launch owns a separate session-level durable fleet record; it does not extend the per-role record above. Its path is
+exactly:
+
+```text
+<resolved-state-root>/sessions/<session>/fleet.json
+```
+
+Its version-1 JSON schema is exactly:
+
+```json
+{"version":1,"session":"SESSION","directory":"DIRECTORY","presentation":"PRESENTATION","roster":["ROLE"],"roles":{"ROLE":{"harness":"HARNESS","model":"MODEL","effort":"EFFORT"}}}
+```
+
+`presentation` is required and is exactly `detached` or `tmux`. It records the launch decision of §15.11.1 so a later
+command can distinguish a detached role from a tmux role whose presentation has disappeared — a distinction no runtime
+observation can recover. Any other value, or its absence, is `invalid-record`. Foreground `run` creating a new
+one-role fleet stores `detached`; `run` adding or replacing a role in an existing fleet neither reads nor changes the
+stored value, and that role is relaunched in the fleet's stored presentation like any other.
+
+`roster` is the nonempty declaration-order list. `roles` is an object keyed by role, contains exactly the roster keys,
+and each value requires exactly `harness`, `model`, and `effort`; empty model and effort strings retain their existing
+default semantics. `session`, every roster entry and role key, harness, model, effort, and the absolute directory pass
+their existing validators. The stored session must equal the session selected by the path. The top-level writer order
+is `version`, `session`, `directory`, `presentation`, `roster`, `roles`; role-object keys encode in lexical order and their field order
+is `harness`, `model`, `effort`. A trailing newline is written. The complete file including that newline is at most
+65536 bytes. The decoder performs a version-only pre-pass before interpreting any other field, then rejects duplicate,
+unknown, missing, wrongly typed, inconsistent, or trailing data at the top level and inside every role object. The file
+is a nonsymlink, same-user, mode-`0600` regular file beneath retained mode-`0700` session directories.
+
+Creating `<session>` with one exclusive `mkdir` serializes concurrent fleet launches: one caller creates and commits
+the complete record; an `EEXIST` contender is `fleet-config-exists` and mutates nothing. The fleet record uses a
+same-directory mode-`0600` temporary file, complete write, file sync, close, rename to `fleet.json`, session-directory
+sync, and `sessions`-directory sync. A failure before rename removes only that invocation's empty session reservation
+and synchronizes `sessions`; no role start has been attempted. A failure after rename or either following directory
+sync is `RecordCommitUncertainError`: the visible record is retained, no role starts, and no retry or absence inference
+is permitted.
+
+An overriding `relaunch` changes this record only after the replacement shim has answered ready with the created shim
+PID. It acquires `flock(LOCK_EX|LOCK_NB)` on the retained session directory only for a version-checked read/modify/write,
+preserves version/session/roster, and replaces the directory and selected role configuration atomically. Contention or
+a record differing from the caller's prior read is `fleet-mutation-conflict`; it never overwrites the peer value.
+A definite replacement failure writes no fleet change and enters the owned-role rollback rules below. A post-rename
+sync failure is `RecordCommitUncertainError` with phase `fleet-config`: the ready role, presentation, and visible fleet
+record are retained, with no retry or cleanup. This session mutation flock is not role ownership; only the role
+lockfile's lifetime flock establishes role ownership.
+
+Foreground `run` composes the same record without tmux. For an absent session it creates the complete one-role fleet
+record before starting the role. For an existing fleet it reads the record first and requires the caller's observed
+cwd to equal the record's one session-wide `directory` byte-for-byte. A mismatch refuses before role start, claim,
+presentation, or record mutation and renders both paths through the `fleet-directory-disagreement` row. The version-1
+schema continues to have exactly one session-wide directory; per-role directories require a future approved schema
+and behavior delta.
+
+When the directory agrees, `run` starts the requested role and waits for the same readiness fact as tmux launch. Only
+after readiness does it use the session mutation flock to extend an absent roster role in declaration order or replace
+that role's stored harness/model/effort. A definite fleet-record mutation failure stops only the newly owned role and
+uses the ordinary owned-cleanup rules. A `fleet-config` commit uncertainty retains the ready role and visible record,
+performs no stop/retry/removal, and waits for the foreground child before returning the uncertainty. A failure before
+readiness leaves an existing fleet record unchanged; if this invocation created the one-role fleet record, cleanup
+removes it only after owned role absence is observed.
+
+### 15.3 Ownership instant and complete failure/rollback rules
+
+Role ownership begins at exactly one instant: successful `flock(LOCK_EX)` on the role lockfile. The lock is held for
+the shim lifetime and is the only ownership arbiter. The file body and socket are advisory; bare socket bind and
+probe-connect/unlink/rebind reclaim are forbidden. POSIX record locks are forbidden because closing an unrelated
+descriptor can release them. Reclaim after death is lock acquisition, never socket probing.
+
+Startup order is fixed:
+
+1. Validate every name, root, descriptor, resolved path length, argv, and durable config before role mutation.
+2. Open safely and acquire `flock(LOCK_EX)` once. This is the ownership instant.
+3. Write the advisory lockfile body and atomically persist `child-starting` with shim PID and a fresh nonce before
+   child fork/start.
+4. Create the nested PTY and start the unchanged harness argv through the injected non-shell child boundary.
+5. After `os/exec.Start` reports success, observe child PID and raw `kinfo_proc.p_starttime` timeval and atomically
+   upgrade the durable record.
+6. Bind/listen while the claim remains held, start relay, and run the exact readiness observation below. No control is
+   accepted.
+7. Publish ready only after listener, relay, durable child identity, and the readiness predicate all exist.
+
+The readiness constants and predicate are fixed:
+
+| Constant | Value |
+|---|---:|
+| `ShimReadinessPollInterval` | `50ms` |
+| `ShimReadinessTimeout` | `5s` |
+| `ShimReadinessLocalFlagMask` | `ICANON | ECHO` |
+| `ShimOwnedTeardownPollInterval` | `50ms` |
+| `ShimOwnedTeardownTimeout` | `5s` |
+
+The shim calls `TIOCGETA` on the retained PTY master; on Darwin that snapshot observes the slave's shared line
+discipline. The first observation is at `t=0`, subsequent observations are on fixed 50ms boundaries, and a final
+observation is guaranteed at `t=5s` (101 scheduled observations including both boundaries). The harness tty is ready
+only when one snapshot has both `ICANON == 0` and `ECHO == 0`, while the listener and relay remain live and the
+recorded child has not exited. Terminal contents, prompts, timing since the last byte, and harness-specific strings are
+never readiness evidence.
+
+`EINTR` retries `TIOCGETA` immediately within the same scheduled observation; another ioctl error is
+`readiness-observation-failed` immediately. If repeated `EINTR` consumes the final deadline, the same outcome carries
+the exact cause `TIOCGETA remained interrupted through the 5s readiness deadline`; it is not called a cooked-mode
+timeout because no final flag snapshot was observed. An observed child exit before readiness is
+`child-exited-before-ready`. If the final successful snapshot still has either masked bit set, the typed cause is
+`readiness-timeout` and records the two final booleans exactly as `ICANON=true|false ECHO=true|false`. Every one of
+these post-start failures enters the cleanup/absence rules below; none publishes ready.
+
+Failure before step 2 owns no role: remove only artifacts created by this invocation, signal no process, and report
+the observed input/tool fact. Failure after ownership but before a successful child start removes this invocation's
+socket and `child-starting`, releases the lock, and returns to absence because failed start proves no child started.
+Failure after successful child start closes readiness/listening, sends SIGHUP to the owned PTY/process group, and
+applies §15.4 immediately, every 50ms, and at the inclusive 5s boundary. Observed `ESRCH` ends the poll. The final
+non-ESRCH observation is retained and rendered through the exit-9 row; there is no automatic SIGTERM/SIGKILL
+escalation or extra grace period. Version-pinned SIGHUP evidence informs teardown but never proves absence.
+
+Only observed `ESRCH` permits deleting the durable child record or reporting absent/relaunchable. Matching live child,
+`EPERM`, token disagreement, token-reader failure, or another observation retains the record and reports the exact
+orphan/indeterminate/cleanup fact. If child start succeeded but PID/token upgrade failed, retain `child-starting`.
+Listener, readiness, relay, cancellation, and cleanup failures after child start follow the same rule. Fleet rollback
+removes only roles/sessions created by that invocation, in child-before-shim order; it never destroys a peer or calls
+an uncertain child absent.
+
+Before releasing a still-owned claim after a non-ESRCH cleanup observation, the lifecycle atomically replaces its
+existing role record with the R19 `cleanup-failed` form. It records only the child and socket/record/lock artifacts it
+observed remaining. This makes the state reachable from both startup rollback and normal server teardown; a write
+failure remains a reported cleanup error and never licenses absence. If initial start-token observation failed,
+cleanup repeats only `kill(pid,0)`: nil proves presence but cannot prove identity, so the durable observation is
+`could-not-observe` and `child_start_token` is omitted. It never compares against a zero or invented token.
+
+The launch-owned fleet record precedes every presentation command and role start. A presentation creation result that
+does not return valid typed owner IDs cannot prove whether the command started a shim: launch retains the fleet record,
+every presentation, and every prior ready role, and attempts no stop or removal. Once typed created IDs exist, a later
+readiness/start failure stops this invocation's roles in reverse roster order. Only a response carrying all three
+separate facts `signal_attempted=true`, `signal=SIGHUP`, and `child_exit_observed=true` permits exact owned
+presentation removal followed by fleet-record removal. Any stop error, survivor, absent signal-attempt fact, absent
+exit-observation fact, presentation cleanup error, record uncertainty, or remaining durable role artifact retains the
+fleet record; no rollback may delete it while any role child might live.
+
+Every lifecycle start first reads the durable role path and refuses an existing record before claim or fork; only the
+later relaunch/absence path may remove one after §15.4 returns ESRCH. Atomic record writes rename a complete temporary
+file and then synchronize the containing directory. If rename succeeded but directory synchronization failed,
+`RecordCommitUncertainError` reports that the replacement is visible while crash durability is unproved. Its first
+consumer must stop that lifecycle phase, retain the visible record, and refuse to infer whether the prior or
+replacement record survives a crash. For `child-starting`, no fork follows. For `child-recorded`, teardown still uses
+§15.4, but the uncertain record is not silently overwritten or described as absent. The exact CLI-visible result is
+`record-commit-uncertain` in §15.8. Provenance: the standing PR-2 reviewer gate rider, carried at its first consumer in
+PR 4 and confirmed by the planner's 2026-08-10 R16 response.
+
+A dead shim plus `child-starting` has no timeout and never self-resolves. For manual recovery, read
+`<recorded-state-root>` from the lockfile body—not the current environment—and, only after independently verifying no
+child remains, manually remove:
+
+```text
+<recorded-state-root>/sessions/<session>/roles/<role>.json
+```
+
+No production path automatically removes that indeterminate record.
+
+### 15.4 Sole absence oracle and child identity
+
+`kill(pid, 0)` is the sole child presence/absence oracle:
+
+| Observation | Factual result | May report absent or relaunch? |
+|---|---|---|
+| `ESRCH` | child absent | yes; the only permitting result |
+| nil | child present; read raw start token next | no |
+| `EPERM` | child present-not-ours | no |
+| any other error | could-not-observe | no |
+
+After nil, read Darwin `kinfo_proc` through `sysctl(KERN_PROC_PID)` and compare raw `p_starttime` timevals. Equality is
+`present-match`; inequality is `present-token-disagreement`; a syscall failure, short result, or malformed result is
+`could-not-observe`. A token-reader error never substitutes for absence. Formatted `ps`, locale, timezone, child
+environment, and wall-clock conversion do not participate.
+
+### 15.5 Socket enforcement and target-chain disposition
+
+A client resolves the validated session/role path, reads the advisory lockfile, connects, and checks protocol version
+before parsing any other field. The protocol constants are:
+
+| Constant | Value |
+|---|---:|
+| `ShimProtocolVersion` | `1` |
+| `ShimFrameHeaderBytes` | `4` |
+| `ShimFrameMaxPayloadBytes` | `4096` |
+| `ShimProtocolIOTimeout` | `2s` |
+
+Each frame is a four-byte unsigned big-endian payload length followed by exactly that many UTF-8 JSON bytes. Lengths
+from 1 through 4096 are accepted; zero, a value above 4096, EOF after any header/payload byte, invalid UTF-8, trailing
+bytes inside a single JSON value, and a non-object top level are `protocol-frame-read-invalid`. A zero-byte EOF before
+the client request is a nonfatal peer abort because clients close at that boundary after skew, answerer, or ancestry
+refusal. A connection carries,
+in order, exactly one server hello, one client request, and one server response, then the server closes it. The hello
+payload encoded by version 1 is exactly `{"version":1}`. The request schema contains only `version`, `session`,
+`role`, and `operation`; `operation` is one closed registry name. Ruling R16 (planner answer to the PR-4 builder,
+2026-08-10, reviewer-gated in PR 4) divides that registry into the following exact, argument-free kinds:
+
+| Operation | Kind | PTY effect | Exact response outcomes |
+|---|---|---|---|
+| `clear` | payload | closed clear bytes, registered `/clear` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
+| `compact` | payload | closed clear bytes, registered `/compact` bytes, fixed 1s delay, closed submit bytes | `delivery-submitted`, `delivery-cancelled-clean`, `delivery-cancelled-with-residue` |
+| `observe` | control | none; it never calls the PTY writer | one applicable §15.6 state outcome with its required recorded/process facts, plus `stopping` or `stopped` during serialized stop |
+| `stop` | control | none; it never calls the PTY writer | `stop-child-exited`, `stop-child-retained`, or `stop-already-stopping` |
+
+`observe` applies the §15.4 kill/token oracle and returns advisory-record, child, answerer, and confidence facts only
+at their specified provenance. `stop` attempts the closed `SIGHUP` process-group signal and reports
+`signal_attempted` separately from `child_exit_observed`; a signal attempt is never exit evidence, and a survivor is
+retained. A non-wire signal/file side channel is inadmissible because it cannot return those §1.1 observations. The
+versioned socket round trip is the one control channel for all four operations. A partial client frame, timeout, or
+non-closure read/write transport failure is not discarded: the server surfaces its typed direction and peer, exits
+through the applicable §15.8 client row, and performs the normal owned-runtime cleanup. Zero-byte pre-request closure
+and peer closure while writing a response are nonfatal aborts; this preserves safety refusals and cancellation without
+claiming request success or tearing down the resident role. A hello-write failure is always typed/fatal, including a
+zero- or partial-progress peer closure, because no client refusal has yet been established.
+
+Payload delivery and stop share one serialization gate that remains held through their response write. Stop first
+changes the closed phase from `active` to `stopping`, then waits for any already-admitted payload operation to finish
+and report its response; only after that response write releases the gate may stop attempt SIGHUP. A `clear` or
+`compact` arriving in phase `stopping` or `stopped` returns `shim-stopping` with `state`, `shim_pid`, and `child_pid`
+and writes no PTY byte. `observe` bypasses this mutation gate and remains admitted: it returns `stopping` while stop is
+pending, or `stopped` after child exit has been observed and before owned teardown finishes, with the same three facts.
+A second stop in either phase returns `stop-already-stopping` with `signal_attempted=false`; it attempts no second
+signal and makes no PTY write. A stop survivor remains `stopping` through its response write, then returns to `active`;
+an observed child exit changes to `stopped` before its response write and never returns to `active`.
+
+The response schema contains only `version`,
+`outcome`, and the following typed objective fields: `state`, `shim_pid`, `child_pid`, `bytes_written`,
+`submit_observed`, `cause`, `cleanup`, `record_path`, `local_root`, `recorded_root`, `recorded_token`, `observed_token`,
+`caller_pid`, `target_pid`, `final_icanon`, `final_echo`, `signal_attempted`, `signal`, and
+`child_exit_observed`. `signal` is the closed literal `SIGHUP`; it is not caller text. Each outcome's strict decoder admits only its defined
+subset; an irrelevant otherwise-known field is rejected. Neither schema has an extension map or arbitrary
+input/payload field.
+
+Each frame read or write sets one absolute two-second deadline covering both header and payload. A partial transfer at
+the deadline is reported with its observed byte count; a zero-byte timeout is not EOF. No phase inherits unused time
+from the prior phase, and no retry extends a deadline.
+
+Parsing order is normative in both directions. After framing and JSON lexical validity, a token pre-pass examines only
+the top-level `version` member. A missing version, a duplicate version member, a non-integer version, or an integer
+other than `ShimProtocolVersion` returns `protocol-skew` before unknown fields, schema fields, operation lookup, state
+lookup, or side effects. The rendered observed version is respectively `absent`, `duplicate`, the raw JSON token, or
+the decimal integer. Only an exact integer `1` permits a second strict pass, which rejects duplicate or unknown fields,
+missing required fields, an unknown operation, or the wrong JSON type. Thus a foreign-version frame with otherwise
+unknown fields always reports skew; it is never partially interpreted. The server hello lets a current client reject
+a foreign shim before sending a request, and the request's version lets a current shim reject a foreign client before
+reading its session, role, or operation. A client-side skew diagnostic therefore names the `connected shim hello`
+version and may use the client's already validated operation/session/role. A shim-side skew diagnostic names the
+`client request` version and cannot name operation/session/role because those fields were not interpreted. There is no
+negotiation, downgrade, migration dialect, newline framing, or best-effort decode.
+
+After the current client accepts the hello, Darwin `LOCAL_PEERPID` supplies the kernel-observed answerer PID. It must
+equal the advisory shim PID; disagreement is `answerer-disagreement`, not a kernel-vs-kernel claim. Same-user
+unlink/rebind stays outside the threat model, while status reports the observable disagreement.
+
+For control, take one typed `ps -eo pid=,ppid=` snapshot through the Runner. Starting at the caller's PID, walk parent
+links looking for the `LOCAL_PEERPID` shim. A complete walk finding it is `observed-self-target`. Missing links,
+malformed rows, duplicate/looping ancestry, or process-inspection failure are `ancestry-undetermined`. Both refuse,
+separately. `TMUX_PANE`, `AGENTCTL_SESSION`, `AGENTCTL_ROLE`, and `AGENTCTL_MANAGED` are never ancestry inputs.
+
+| Current `internal/target` check | 0.5.0 disposition |
+|---|---|
+| role charset | retained in `internal/config`, with 32-byte cap |
+| session managed/version tmux options | retired; runtime claim plus version-first protocol replace them |
+| exact role-window resolution and stored window role | retired; validated role namespace plus `flock` replace them |
+| exactly one live pane | moot for identity/delivery; tmux layout is optional presentation |
+| pane-root baseline equality | replaced by child PID, `kill(pid,0)`, and raw start-token observation |
+| `$TMUX_PANE` self-target guard | replaced by fail-closed snapshot ancestry from `LOCAL_PEERPID` |
+| tmux `DeliverPayload` | retired; operation name crosses the socket and shim writes registry bytes to its PTY |
+
+### 15.6 Status vocabulary, confidence, precedence, and interim diagnostic
+
+Status enumerates runtime claims first and durable records second, with or without tmux. A volatile lockfile anchors
+recorded state root and owner observations. Durable records enumerated without an anchor carry
+`"confidence":"unanchored"` on every row and derived absence; they never receive anchored confidence. Anchored rows
+carry `"confidence":"anchored"`. Tmux presentation is `present`, `gone`, or `unavailable` and never changes runtime
+identity.
+
+Held-claim observation is non-acquiring only: status opens the existing lockfile and issues `F_GETLK` for a write
+lock. Darwin reports a conflicting BSD `flock` as `F_WRLCK` with `pid=-1`; `F_UNLCK` means no observed holder.
+Status never attempts `LOCK_EX|LOCK_NB`, because owner death between observation steps must not let a diagnostic seize
+the role. A held claim with a temporarily absent socket is `starting`, while a socket with no held claim is
+`answerer-disagreement`.
+
+Fleet-record harness/model/effort and directory values are operator-claim provenance. The shim response, role record,
+answerer, process observation, and readiness are shim-runtime provenance. Status joins those sources without replacing
+one with the other: a fleet value never becomes runtime evidence, and a live shim observation never silently rewrites
+the fleet claim. The anchored/unanchored vocabulary continues to describe the runtime/durable identity join, not the
+trustworthiness of an operator-selected fleet value.
+
+Within one role, first match wins:
+
+| Order | State | Observation |
+|---|---|---|
+| 1 | `invalid-record` | required volatile/durable data malformed |
+| 2 | `state-root-disagreement` | local root differs from lockfile-recorded root |
+| 3 | `protocol-skew` | answerer version absent/different, before other response parsing |
+| 4 | `answerer-disagreement` | advisory shim PID differs from `LOCAL_PEERPID`, or socket/claim topology conflicts |
+| 5 | `cleanup-failed` | prior owned cleanup durably recorded incomplete |
+| 6 | `concurrent-contender` | an owner explicitly reports a competing owner decision; status never invents this from a losing launch, which leaves no durable status fact |
+| 7 | `starting` | live claimed shim plus `child-starting`, or child recorded but not ready |
+| 7a | `stopping` | live claimed shim has begun serialized stop and has not yet reported its stop response |
+| 7b | `stopped` | live claimed shim observed child exit and owned teardown is pending |
+| 8 | `indeterminate-child-starting` | dead shim plus `child-starting` |
+| 9 | `running` | live shim, matching child/answerer, ready protocol |
+| 10 | `orphan` | dead shim and child `present-match` |
+| 11 | `present-token-disagreement` | PID present but raw token differs |
+| 12 | `present-not-ours` | `kill(pid,0)` returned `EPERM` |
+| 13 | `could-not-observe` | other presence error or token observation failed after nil |
+| 14 | `stale-record` | durable child record and observed `ESRCH` |
+| 15 | `missing` | no role record at the applicable confidence |
+
+`tmux-presentation-gone` renders as presentation `gone` beside runtime state, never role absence. Only
+`stale-record`/`missing` backed by ESRCH or actual record absence can enter relaunch; disagreements and uncertainty
+refuse.
+
+Disagreement output renders both observed sides: advisory and connected answerer PIDs, advisory and durable-record
+shim PIDs, or local and recorded roots as applicable. A same-user concurrent loser contributes no separate contender
+row; already-observed answerer or state-root disagreement remains the factual family. Provenance: planner R19,
+2026-08-10/11.
+
+The runtime collector's optional presentation observer preserves one objective report field/table line from the
+pre-cutover incident diagnostic. Trigger only when every
+roster role is `missing`, exactly one window has empty `@agentctl_role`, and that window has exactly N panes where N is
+roster size. Below, above, multiple role-less windows, or any window whose actual name matches a roster role suppress
+it. Stale `@agentctl_role` metadata on a differently named window is presentation metadata and does not establish such
+a match. Exact human text:
+
+```text
+note: all N roster roles are missing; unmanaged window "W" has N panes
+```
+
+The human table emits this exact note immediately after the corresponding session's last row, before any later
+session's rows. JSON carries the same optional `"note"` on that session object. This names no cause: a role-less
+roster-sized window is not proof that panes were joined or that it contains the missing harnesses.
+
+The shipped path uses `RuntimeShimRoleSource`, `ShimCollector`, `RuntimePresentationSource`, `WriteShimTable`, and
+`WriteShimJSON`. The runtime source opens the volatile role side before the durable side; its no-lockfile fallback is
+unanchored by construction. `ShimStatusFleetReader` adapts the durable fleet roster without converting its
+operator-selected fields into runtime evidence. The legacy tmux identity collector and renderer are removed.
+
+### 15.7 Command outcomes and attach limitation
+
+`launch` persists roster/config before absence can be reported, starts shims in roster order, and waits for readiness.
+Tmux launch uses the single §12.1 shell site to start the hidden shim; foreground `run` invokes typed argv directly.
+`relaunch` requires §15.4 absence permission and never starts beside orphan, indeterminate, disagreement, or
+could-not-observe. An explicit relaunch `--dir` is resolved to an absolute path and validated before presentation or
+runtime mutation; the stored fleet directory is already absolute by §15.2. `kill` signals child/process group first,
+observes §15.4, then lets shim release its claim; partial cleanup remains reported.
+
+Foreground `run` creates or extends the durable fleet according to §15.2, starts the same resident server and harness
+argv as tmux launch, and connects the caller's terminal streams directly to the nested PTY. It creates no shell,
+viewer, tmux server, session, window, or pane. The command remains in the foreground through child exit and forwards
+terminal signal/resize behavior through the shared PTY lifecycle. Once the nested terminal reaches ready, the outer
+terminal copies its observed mode with only `ISIG` cleared so control characters reach the relay as bytes; the nested
+PTY retains its own `ISIG` policy and delivers the resulting signal to the harness process group. Its exact syntax is
+§15.1; the cwd is observed before runtime mutation and is not caller-overridable.
+
+After command and value validation, foreground `run` read-only observes both standard input and standard output as
+terminals before cwd observation, shim namespace or fleet-store construction, target observation, or mutation. If
+either descriptor is not a terminal it selects `run-not-a-terminal`; any other failure of either terminal observation
+selects `run-terminal-observation-failed`. Neither refusal creates the runtime root, state root, or `sessions/`
+entry. Foreground `run` does not require standard input and standard output to identify the same terminal.
+
+For an existing fleet whose stored directory differs from that cwd, the exact refusal is:
+
+```text
+agentctl: refusing to run role "ROLE" in session "SESSION"; durable fleet directory "STORED" differs from current working directory "CURRENT"; no role was started or durable record mutated (fleet-directory-disagreement)
+```
+
+`kill` observes optional presentation by exact session name before role mutation and retains that observation's typed
+session ID. After each `stop-child-exited`, it polls every 25ms through the inclusive 5s boundary until the role
+inspector reports `missing`; transient `stopped`/`stale-record` artifacts are not fleet-cleanup permission. Any other
+state, observation failure, cancellation, or timeout retains the fleet record. Only after every required child
+exit/absence and role-artifact cleanup fact does it attempt `kill-session -t SID` exactly once. Tmux
+normally removes the last non-`remain-on-exit` shim window and its session as the shim exits, so that exact-ID removal
+can race a presentation that has already disappeared. The closed post-removal table is:
+
+| Initial presentation | Exact-ID removal | One post-failure exact-name observation | Result facts | Fleet record |
+|---|---|---|---|---|
+| gone | not attempted | not attempted | `PresentationRemoved=false`, `PresentationGone=true` | remove after child cleanup |
+| present | success | not attempted | `PresentationRemoved=true`, `PresentationGone=false` | remove after child cleanup |
+| present | error | gone | `PresentationRemoved=false`, `PresentationGone=true` | remove after child cleanup |
+| present | error | present (same or different typed ID) | both facts `false` | retain and return typed error |
+| present | error | unavailable/error | both facts `false` | retain and return typed error |
+
+The post-failure observation is attempted exactly once; there is no second removal. The two result booleans are never
+both true. `PresentationRemoved` means the exact typed removal command succeeded; a presentation observed already gone
+is never called removed. The typed retained errors have exactly these internal literals, with `%q` substitutions:
+
+```text
+shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation %q remained present
+shim kill retained fleet record for session %q: exact-ID presentation removal of %q failed: %q; post-removal presentation observation failed: %q
+```
+
+Optional presentation lookup treats only tmux 3.7b's exact single-line `no server running on PATH` and
+`error connecting to PATH (No such file or directory)` diagnostics as presentation `gone`; any prefix, suffix,
+additional line, different exit diagnostic, or runner failure remains an error. This classification never implies
+runtime-role or fleet absence.
+
+The only delivery instruction at the control boundary is the operation name after version, answerer, ancestry, child
+identity, and readiness pass. The request's other permitted values are the protocol version and validated
+session/role identity pinned in §15.5; the response contains only its protocol version and typed objective facts. The
+shim reports only accepted request, bytes written, submit observed, cancellation residue, child exit, and cleanup
+facts. It never reports harness execution from a PTY write. `attach` first proves that the selected session has a
+durable fleet configuration, then requires an exactly observed tmux presentation by name and attaches only its typed
+session ID. It never treats a same-named presentation as fleet identity. Without a presentation:
+
+The exact literal is §15.8's `attach-no-presentation` row, which is one of the three multi-line templates: the refusal
+line followed by one `  agentctl attach --session SESSION ROLE` line per roster role. It is not paraphrased here.
+
+### 15.8 Shim-plane exit map
+
+Every diagnostic is one line on stderr with the `agentctl: ` prefix and trailing newline. In the templates below,
+uppercase words are typed substitutions, not discretionary prose. `SESSION`, `ROLE`, every path/root/executable/flag,
+`CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
+integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
+`EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
+`SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
+`SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
+`Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
+pinned rather than described because Darwin aliases numbers: 6 is both `SIGABRT` and `SIGIOT`, and "the platform's
+uppercase name" would let two conforming implementations print different exact rows. `SignalName` resolves 6 to
+`SIGABRT`, and returns the empty string for a number it does not map; **only** that empty result renders as
+`SIGNAL_NUMBER_N` with the decimal number, so an unnameable value is still exact and still obviously a signal; that case exists because
+`run-child-signaled` reports whatever a child was killed by, which is not confined to any subset agentctl chose. A raw start
+token renders as `{sec:SEC,usec:USEC}`. The `%q` rule governs diagnostic substitutions only. In the second line of
+`launch-complete-detached`, `launch-complete-tmux`, and in every line of `attach-no-presentation`, `SESSION` and `ROLE`
+render as the bare validated identifier so the printed text is a command the operator can copy. A command must select
+one typed row and its literal template. It may not
+paraphrase, append a generic category, or borrow another row's exit code. The attach surface of §15.11 overrides four clauses of this
+paragraph, in its own words and nowhere else. §15.11.9's composition rule emits more than one line for a superseded
+outcome. §15.11.7 permits a byte-exact prefix of a selected template in three cases: when the receiving terminal is saturated,
+when a caught signal terminates the process while a redirected fd-2 write is in progress, and when that write fails
+after partial progress — three distinct causes of one permitted shape, none distinguishable from the sink alone. And
+§15.11.7 never writes descriptor 2 itself: it writes a proved-identical private descriptor when, and only when, it has
+proved by `fstat` that fd 2 names the same terminal, and otherwise fd 2's destination through a duplicate floored above
+2 — the destination is `stderr`'s in both cases, the descriptor is not, and that is stated here rather than left as an
+implied equivalence. No other section overrides any of the four. Three rows are explicitly multi-line and
+their additional lines are part of the selected template rather than an append: `launch-complete-detached` and
+`launch-complete-tmux` each carry exactly one hint line, and `attach-no-presentation` carries one line per roster role.
+No other row may emit more than one line. `status` table and JSON documents are the
+sole successful status output and therefore add no diagnostic line.
+
+| Typed outcome | Exit | Exact factual message template |
+|---|---:|---|
+| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE` |
+| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION` |
+| `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
+| `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
+| `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
+| `delivery-submitted` | 0 | `agentctl: OP for role ROLE in session SESSION wrote BYTES bytes and observed submit` |
+| `stop-child-exited` | 0 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP and observed child PID CHILD exit; no PTY input was written` |
+| `unclassified` | 1 | `agentctl: OP failed for session SESSION: CAUSE (unclassified)` |
+| `run-child-failed` | 1 | `agentctl: foreground role ROLE in session SESSION exited with status STATUS (child-exit)` |
+| `run-child-signaled` | 1 | `agentctl: foreground role ROLE in session SESSION terminated by signal SIGNAL (child-signal)` |
+| `invalid-session` | 2 | `agentctl: invalid session SESSION: RULE; no role was mutated` |
+| `invalid-role` | 2 | `agentctl: invalid role ROLE: RULE; no role was mutated` |
+| `invalid-root` | 2 | `agentctl: invalid ROOT_KIND ROOT: RULE; no role was mutated` |
+| `invalid-flag` | 2 | `agentctl: invalid flag FLAG: RULE; no role was mutated` |
+| `invalid-request` | 2 | `agentctl: invalid shim request for session SESSION role ROLE: RULE; no role was mutated` |
+| `run-not-a-terminal` | 2 | `agentctl: refusing to run role ROLE in session SESSION; standard input and output must both be terminals (run-not-a-terminal)` |
+| `session-missing` | 3 | `agentctl: session SESSION was not found` |
+| `fleet-config-missing` | 3 | `agentctl: session SESSION has no durable fleet configuration` |
+| `fleet-config-exists` | 3 | `agentctl: refusing to launch session SESSION; durable fleet configuration already exists (fleet-config-exists)` |
+| `protocol-skew-shim-absent` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was absent; expected 1 (protocol-skew)` |
+| `protocol-skew-shim-observed` | 3 | `agentctl: refusing to OP role ROLE in session SESSION; connected shim hello protocol version was OBSERVED; expected 1 (protocol-skew)` |
+| `protocol-skew-client-absent` | 3 | `agentctl: refusing client request; client request protocol version was absent; expected 1 (protocol-skew)` |
+| `protocol-skew-client-observed` | 3 | `agentctl: refusing client request; client request protocol version was OBSERVED; expected 1 (protocol-skew)` |
+| `attach-no-presentation` | 3 | `agentctl: refusing to attach session SESSION; no tmux presentation was observed; attach a role directly:` then, in roster order, one line `  agentctl attach --session SESSION ROLE` per role |
+| `role-outside-roster` | 4 | `agentctl: role ROLE is not in the durable roster for session SESSION` |
+| `role-missing-when-required` | 4 | `agentctl: role ROLE in session SESSION has no live claim or durable role record (missing)` |
+| `role-stale-when-required` | 4 | `agentctl: role ROLE in session SESSION has stale child PID CHILD after kill(CHILD, 0) returned ESRCH (stale-record)` |
+| `observed-self-target` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
+| `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
+| `orphan` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and recorded child PID CHILD was present with a matching start token (orphan)` |
+| `indeterminate-child-starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and the durable record is child-starting; independently prove child absence, then remove RECORD_PATH (indeterminate-child-starting)` |
+| `starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM holds the claim and the durable record is STATE (starting)` |
+| `concurrent-contender` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; flock returned EWOULDBLOCK while lockfile shim PID SHIM holds the role claim (concurrent-contender)` |
+| `cleanup-failed` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable cleanup is incomplete after CAUSE and child observation is OBSERVATION (cleanup-failed)` |
+| `answerer-disagreement-pid` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; lockfile shim PID RECORDED differs from connected LOCAL_PEERPID ANSWERER (answerer-disagreement)` |
+| `answerer-disagreement-claim` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; LOCAL_PEERPID ANSWERER answered without the matching held role claim (answerer-disagreement)` |
+| `state-root-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; resolved state root LOCAL_ROOT differs from lockfile-recorded state root RECORDED_ROOT (state-root-disagreement)` |
+| `fleet-directory-disagreement` | 5 | `agentctl: refusing to run role ROLE in session SESSION; durable fleet directory STORED differs from current working directory CURRENT; no role was started or durable record mutated (fleet-directory-disagreement)` |
+| `present-token-disagreement` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; child PID CHILD start token OBSERVED_TOKEN differs from recorded token RECORDED_TOKEN (present-token-disagreement)` |
+| `present-not-ours` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; kill(CHILD, 0) returned EPERM (present-not-ours)` |
+| `shim-stopping` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM state is STATE for child PID CHILD; no PTY input was written (shim-stopping)` |
+| `stop-already-stopping` | 5 | `agentctl: stop for role ROLE in session SESSION found shim PID SHIM state STATE for child PID CHILD; no second signal was attempted and no PTY input was written (stop-already-stopping)` |
+| `delivery-cancelled-clean` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled before any payload byte was written (delivery-cancelled)` |
+| `delivery-cancelled-with-residue` | 5 | `agentctl: OP for role ROLE in session SESSION was cancelled after BYTES payload bytes were written but before submit; terminal input may contain residue (delivery-cancelled-with-residue)` |
+| `ancestry-undetermined` | 6 | `agentctl: refusing to OP role ROLE in session SESSION; could not determine whether caller PID CALLER descends from target shim PID SHIM: CAUSE (ancestry-undetermined)` |
+| `presence-observation-failed` | 6 | `agentctl: could not observe child PID CHILD for role ROLE in session SESSION: kill(CHILD, 0) returned CAUSE (could-not-observe)` |
+| `token-observation-failed` | 6 | `agentctl: could not observe the start token for child PID CHILD in session SESSION role ROLE: CAUSE (could-not-observe)` |
+| `run-terminal-observation-failed` | 6 | `agentctl: could not observe the foreground terminal for role ROLE in session SESSION: CAUSE; no role was started (run-terminal-observation-failed)` |
+| `protocol-read-from-shim-invalid` | 6 | `agentctl: could not read protocol frame from connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-read-invalid)` |
+| `protocol-read-from-client-invalid` | 6 | `agentctl: could not read protocol frame from connected client: CAUSE (protocol-frame-read-invalid)` |
+| `protocol-write-to-shim-failed` | 6 | `agentctl: could not write protocol request to connected shim for role ROLE in session SESSION: CAUSE (protocol-frame-write-failed)` |
+| `protocol-write-to-client-failed` | 6 | `agentctl: could not write protocol frame to connected client: CAUSE (protocol-frame-write-failed)` |
+| `protocol-schema-invalid` | 6 | `agentctl: could not interpret version-1 shim protocol for role ROLE in session SESSION: CAUSE (protocol-schema-invalid)` |
+| `required-executable-missing` | 7 | `agentctl: required executable EXECUTABLE was not found; no role was mutated` |
+| `readiness-timeout-cleaned` | 8 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; cleanup observed child absence and removed every artifact owned by this invocation (readiness-timeout)` |
+| `readiness-observation-failed-cleaned` | 8 | `agentctl: could not observe harness tty readiness for role ROLE in session SESSION: CAUSE; cleanup observed child absence and removed every artifact owned by this invocation (readiness-observation-failed)` |
+| `child-exited-before-ready` | 8 | `agentctl: child PID CHILD exited before harness tty readiness for role ROLE in session SESSION; cleanup observed absence and removed every artifact owned by this invocation (child-exited-before-ready)` |
+| `owned-rollback-complete` | 8 | `agentctl: OP failed for role ROLE in session SESSION: CAUSE; cleanup observed child absence and removed every artifact owned by this invocation (owned-rollback-complete)` |
+| `owned-rollback-incomplete` | 8 | `agentctl: OP failed for role ROLE in session SESSION: CAUSE; cleanup left REMAINING: CLEANUP_CAUSE (owned-rollback-incomplete)` |
+| `readiness-timeout-retained` | 9 | `agentctl: role ROLE in session SESSION was not ready after 5s; final tty flags were ICANON=ICANON_BOOL ECHO=ECHO_BOOL; child PID CHILD was not observed absent, so ownership and the durable record were retained (readiness-timeout)` |
+| `ownership-retained` | 9 | `agentctl: role ROLE in session SESSION failed after child PID CHILD started: CAUSE; cleanup observation was OBSERVATION, so ownership and the durable record were retained (ownership-retained)` |
+| `stop-child-retained` | 9 | `agentctl: stop for role ROLE in session SESSION attempted SIGHUP but did not observe child PID CHILD exit; child observation was OBSERVATION; ownership and the durable record were retained (stop-child-retained)` |
+| `post-exit-cleanup-retained` | 9 | `agentctl: stop for role ROLE in session SESSION observed child PID CHILD exit, but role cleanup was not observed complete; last outcome was OUTCOME: CAUSE; presentation and fleet record were retained (post-exit-cleanup-retained)` |
+| `record-commit-uncertain` | 9 | `agentctl: role ROLE in session SESSION has an uncertain durable PHASE record commit: CAUSE; the record was retained and the role was not reported absent (record-commit-uncertain)` |
+
+`invalid-root` is selected when declared-input syntax, fixed durable-path traversal/creation, or a volatile/final-state
+private-boundary failure is represented by `InvalidRootError`. Descriptor observation and substitution errors select
+`unclassified`; setup renders that row with `SESSION` exactly `""`. A durable ancestor mode selects neither row, and
+there is no alternate durable-ancestor-mode refusal literal.
+
+`protocol-skew-shim-observed` and `protocol-skew-client-observed` substitute `OBSERVED` with `duplicate`, the `%q`
+raw JSON token for a non-integer, or the decimal foreign integer according to §15.5. `RECORD_PATH` is always the
+lockfile body's recorded root joined with the fixed durable template, never a path recomputed from the reader's
+environment. `REMAINING` is a comma-separated list in the fixed order `child, socket, attach, record, lock`; omitted artifacts
+are not named. `OBSERVATION` is exactly one of `present-match`, `present-token-disagreement`, `present-not-ours`, or
+`could-not-observe`; it is never `missing` unless `kill(pid,0)` returned `ESRCH`, in which case the complete-cleanup
+row applies. Observed self-target and ancestry-undetermined deliberately remain different facts, codes, and literals.
+`PHASE` is exactly `child-starting`, `child-recorded`, or `fleet-config`. For `shim-stopping` and
+`stop-already-stopping`, `STATE` is exactly `stopping` or `stopped`; the former outcome applies only to payload
+operations `clear` and `compact`. `stop-already-stopping` carries `signal_attempted=false` and omits `signal` and
+`child_exit_observed` because the second request performs neither action. `stop-child-exited` and `stop-child-retained` always carry
+`signal_attempted=true`, `signal=SIGHUP`, and respectively `child_exit_observed=true` or `false`; those fields remain
+separate even when the selected outcome makes both facts readable.
+
+For `protocol-read-from-shim-invalid` and `protocol-read-from-client-invalid`, `CAUSE` is exactly one of
+`zero payload length`, `payload length N exceeds 4096`, `EOF after N of 4 header bytes`, `EOF after N of LENGTH payload
+bytes`, `frame read exceeded 2s during header after N of 4 bytes`, `frame read exceeded 2s during payload after N of
+LENGTH bytes`, `frame read failed during header after N of 4 bytes: ERROR`, `frame read failed during payload after N
+of LENGTH bytes: ERROR`, `payload is not valid UTF-8`, `payload has trailing bytes after its JSON value`, `payload top
+level is not an object`, or the `%q` JSON syntax error. For `protocol-write-to-shim-failed` and
+`protocol-write-to-client-failed`, `CAUSE` is exactly `frame write exceeded 2s after N of TOTAL bytes` or
+`frame write failed after N of TOTAL bytes: ERROR`, where `TOTAL` is the four-byte header plus payload length.
+For `protocol-schema-invalid`, `CAUSE` is exactly `duplicate field FIELD`, `unknown field FIELD`,
+`missing required field FIELD`, `field FIELD has JSON type TYPE; expected EXPECTED_TYPE`, `operation OPERATION is not
+registered`, or `response field FIELD is not valid for outcome OUTCOME`.
+For a post-start readiness failure, the final command always uses an exit-8 cleanup row or an exit-9 retained row,
+never exit 6. Its exit-8 `CAUSE` is exactly one of `harness tty was not ready after 5s; final flags
+ICANON=ICANON_BOOL ECHO=ECHO_BOOL`, `TIOCGETA failed while observing harness tty readiness: ERROR`,
+`TIOCGETA remained interrupted through the 5s readiness deadline`, or `child PID CHILD exited before harness tty
+readiness`. This makes cleanup outcome, rather than the initiating observation error, the final exit claim.
+
+### 15.9 External calls and dependency boundary
+
+Production invokes no shell beyond the one tmux window-command site. Shipped boundaries are optional
+tmux presentation/create/attach/kill argv through `internal/tmuxx.Runner`; one ancestry snapshot
+`ps -eo pid=,ppid=` through that Runner's `tmuxx.ParentPIDs` wrapper; PTY child start through a narrow interface receiving only harness/AMQ argv;
+and Darwin syscalls for `flock`, `LOCAL_PEERPID`, `kill(pid,0)`, and raw `kinfo_proc` tokens. Detached launch adds one
+typed parent-specified `os/exec` spawn of the hidden shim command (§15.11.6), with an asynchronous `Wait` owned by the
+launcher; it invokes no shell and composes no shell string.
+
+`golang.org/x/sys/unix` is restricted to the Darwin lock/socket/process syscalls above, plus the
+signal-disposition and signal-mask observations of §15.11.7 and the
+`SignalName` canonical mapping of §15.8 — added to this list explicitly rather than admitted
+silently, because that list is the whole of the sanction and a new use that is not in it is a new dependency
+decision. The staged admission is
+complete: source tests, pinned govulncheck, Dependabot, and archive-license checks cover v0.47.0, and the production
+binary imports the shim path. `go version -m` on the built Darwin binary must record
+`golang.org/x/sys v0.47.0`; release archives must include its upstream license. The PTY implementation remains
+standard-library-only.
+
+### 15.10 Evidence, tests, and numbered security trace
+
+The [SIGHUP evidence](../../security/2026-08-10-issue-182-shim-probe-evidence.md) records Claude Code 2.1.226 and
+codex-cli 0.147.0 as direct children of owned nested-PTY fixtures; each direct child's observed `comm` exactly matched
+the selected harness executable path, and both children terminated after SIGHUP targeted only their fixture parent.
+An automated PTY-bearing intermediate-child near miss refuses. Orphan handling remains mandatory. The complete
+[incident replay](../../security/2026-08-10-issue-182-replay-evidence.md), SHA-256
+`d9c14f10df03ec7e7de36adcdd9225b26946c64b9d7f26ec50777b41182f7a01`, was verified byte-for-byte against build2's
+full report. Fake tests own exact syscall/argv ordering and failures; live tests own PTY/kernel/socket/layout/harness
+behavior and use throwaway resources only.
+
+This section traces the implementation plan's ten-row security matrix: (1) §15.3 claim; (2) §15.5 answerer
+disagreement; (3) §15.2 roots/caps; (4) §§15.1/15.7 operation names; (5) §15.5 enforcement/retirement; (6)
+§§15.3–15.6 orphan/absence/manual remedy; (7) §§15.3/15.7 readiness; (8) §§15.3/15.8 ownership/exits; (9) §15.7
+factual delivery; (10) §§15.5/15.8 version-first refusal. Every implementation PR cites applicable rows; none may
+reopen semantics without an approved design delta.
+
+Structural drift guards pin the exact four-field `Request`, empty payloads on every `OperationControl` registry entry,
+zero production `internal/target` imports, zero `tmuxx.DeliverPayload` calls, zero production `send-keys`, and the
+single `shimWindowCommand` shell-composition site. Review evidence mutation-adds a fifth `Payload` field and a
+non-empty `observe` payload separately; each mutant fails its named invariant before source restoration.
+
+Gate S runs after PRs 2 and 3 and before PR 4. It records `PASS` only if the merged Darwin evidence satisfies the
+approved `flock`, `LOCAL_PEERPID`, raw `kinfo_proc` token, state-root disagreement, fully resolved socket-length,
+nested controlling-PTY, exact §15.3 readiness, and durable pre-fork reservation contracts without a new semantic or
+dependency surface. Any one unmet contract records `FAIL`, stops PR 4, and requires the planner to amend issue #182
+before selecting the named pane-scoped Option A in the options paper §3. No implementation may weaken the predicate,
+continue Option S after `FAIL`, or improvise a third design.
+
+Release verification owns the deterministic second-binary fixture at `hack/fixtures/shim-version/main.go`. It builds
+that source separately from the current binary and records both artifact versions and SHA-256 hashes. The mandatory
+matrix names each direction separately: current client reads a foreign-version shim hello; foreign-version client
+sends a request to the current shim; current client reads an absent-version shim hello; absent-version client sends a
+request to the current shim; and current client/current shim matching controls exercise both hello and request. Every
+foreign or absent leg must fail at the version pre-pass before schema/operation interpretation and record whether the
+observed value came from the `connected shim hello` or `client request`. Each matching control must pass framing and
+proceed to its next typed gate.
+
+### 15.11 Detached launch and the per-role attach stream
+
+Provenance: this contract answers issue #225. Its first draft was written against
+a stale base and was rebuilt on `6655ed9`; §16 is retained unchanged. The constants below are of
+**two kinds, and the difference is stated because a policy rationale is not an
+empirical derivation**:
+
+- **Measured.** `AttachLagBufferBytes` = `131072` is derived from recorded
+  artifacts named at its point of use — a 61,489-byte initial paint and a
+  45,777-byte resize repaint, both from codex-cli 0.147.0 at 200x60, with their
+  hashes.
+- **Policy.** `AttachTailFlushTimeout` = `10s` and `AttachReportTimeout` = `2s`
+  are chosen bounds. Each carries a rationale at its point of use, and each says
+  what it is trading, but neither is derived from a measurement and neither
+  claims to be. `AttachClientQueueBytes` = `131072` is a policy mirror of the
+  measured lag buffer: it serves the same instantaneous-lag purpose on the client
+  side, which is why it takes the same value, but no separate measurement
+  supports it.
+
+An earlier version of this sentence claimed every constant was measured and not
+chosen. That was false for three of the four, and a provenance claim that
+overstates its own basis is worse than one that admits which values are
+judgement.
+
+The reopening of the options paper's Option-C rejection is exactly and only
+per-role attach for detached roles. There is no virtual screen model, no fleet
+daemon, no viewer application, and **no fanout**: one PTY has one drain path in
+each mode.
+
+#### 15.11.1 Presentation selection and the drain path it chooses
+
+`--detached` and `--tmux` are mutually exclusive, and `--detached` is the
+explicit detached choice. **Passing neither means detached.**
+The template's optional top-level `"presentation": "detached" | "tmux"` means
+the same, absent means detached, any other value is a schema refusal, and an
+explicit flag overrides the file. The schema entry, its validation, the flags,
+and the documentation land together.
+
+Presentation is not inferable after the fact, so the fleet record persists it.
+The version-1 record gains a required `presentation` member with the same two
+values; a record without it is `invalid-record`. This is what lets `relaunch`
+distinguish a detached role from a tmux role whose presentation vanished — a
+distinction the record could not previously express.
+
+The chosen presentation fixes who drains the PTY, and the two are exclusive:
+
+| Presentation | PTY drain path | Direct `attach ROLE` |
+|---|---|---|
+| tmux | the pane relay, for the role's lifetime | **refused** — the pane is the viewer |
+| detached | the shim drains continuously, discarding with no viewer and buffering to one when attached | admitted, one viewer |
+
+A tmux pane is already a persistent reader and writer of that PTY. Admitting a
+second reader would split output rather than duplicate it, and duplicating it
+would require the screen model this design refuses. `attach ROLE` against a
+tmux-presented role therefore refuses and names the operator's actual route.
+
+Preflight requires `tmux` only when the resolved presentation is `tmux`; `amq`
+and the selected harnesses are required on both paths, and `run` never requires
+tmux.
+
+#### 15.11.2 One connection, framed end to end
+
+A viewer and its role share **one** connection. Every byte on it is inside a
+frame, in both directions and for the whole of its life: there is no handshake
+phase that hands off to a raw stream, and no second connection.
+
+That is a deliberate reversal of an earlier two-connection design. What one
+connection buys is precise, and smaller than an earlier draft of this paragraph
+claimed: a stream orders bytes **within each direction**, so client→shim input
+and resize frames are ordered with respect to each other, and shim→client output
+and final frames are ordered with respect to each other. It does **not** give a
+total order across the two directions — the shim can send `attach-final` before
+it has read a resize the client already wrote — and it does not by itself stop
+work decoded from a departed viewer from being applied afterwards. Those remain
+properties the shim must enforce, stated as observable facts in §15.11.3, not
+consequences of the transport.
+
+What the single connection does remove is the machinery that existed only to
+relate two streams to each other: the claim token, the data handshake, the viewer
+epoch, and the resize sequence number are gone, because admission **is** the
+connection and each direction is already ordered.
+
+Each frame is a four-byte unsigned big-endian payload length, then a one-byte
+`kind`, then exactly that many payload bytes. `kind` is `0` for a control frame,
+whose payload is UTF-8 JSON; `1` for viewer input; `2` for role output. Data
+frames carry raw bytes and are never re-encoded, so a terminal stream costs five
+bytes of framing per chunk and nothing else. Payload length is at most 65536 for
+data frames and 4096 for control frames; zero length, a value above the
+applicable cap, EOF after any header or payload byte, an unknown `kind`, invalid
+UTF-8 in a control payload, trailing bytes inside a single JSON value, and a
+non-object top level are all `protocol-frame-read-invalid`.
+
+`ShimProtocolIOTimeout` bounds the completion of a frame once its first byte has
+arrived, and nothing else. The wait **between** frames is unbounded: a quiet
+attachment must never time out, and zero resizes is a valid attachment.
+
+The control frames are exactly:
+
+```json
+← {"version":1,"kind":"attach-shim-hello"}
+→ {"version":1,"kind":"attach-hello","session":"SESSION","role":"ROLE","rows":ROWS,"cols":COLS}
+← {"version":1,"kind":"attach-admitted"}
+← {"version":1,"kind":"attach-refused","outcome":"viewer-present","viewer_pid":PID}
+← {"version":1,"kind":"attach-refused","outcome":"peer-unverified","peer_pid":PID,"peer_uid":UID,"shim_uid":UID}
+← {"version":1,"kind":"attach-refused","outcome":"peer-unobservable","cause":"CAUSE"}
+← {"version":1,"kind":"attach-refused","outcome":"initial-size-failed","rows":ROWS,"cols":COLS,"cause":"CAUSE"}
+→ {"version":1,"kind":"attach-resize","rows":ROWS,"cols":COLS}
+← {"version":1,"kind":"attach-final","disposition":"DISPOSITION","bytes":BYTES}
+← {"version":1,"kind":"attach-final","disposition":"resize-failed","bytes":BYTES,"rows":ROWS,"cols":COLS,"cause":"CAUSE"}
+← {"version":1,"kind":"attach-final","disposition":"tail-undelivered","bytes":BYTES,"undelivered":UNDELIVERED}
+← {"version":1,"kind":"attach-final","disposition":"tail-unconfirmed","bytes":BYTES,"known_undelivered":UNDELIVERED}
+```
+
+Frames are unions on their selector, not one shape with optional members: the
+decoder requires exactly the field set its `kind` — and for `attach-refused` its
+`outcome`, for `attach-final` its `disposition` — selects, and rejects anything
+else. `REFUSAL` is the closed set `viewer-present`, `peer-unverified`,
+`peer-unobservable`, `initial-size-failed`. `DISPOSITION` is the closed set
+`child-exited`, `viewer-evicted`, `cleanup-retained`, `server-closing`,
+`resize-failed`, `tail-undelivered`, `tail-unconfirmed`, `counter-exhausted`.
+
+**`attach-shim-hello` exists so that version skew is observable in both
+directions**, exactly as §15.5's control plane already requires. Without it the
+attach grammar had no server hello, so the existing skew rows — which name a
+`connected shim hello` version — described something the attach path never sent,
+and the directional pre-pass had nothing to read. The client reads and
+version-checks it before sending anything, and the shim version-checks
+`attach-hello` before interpreting its session, role, or size. §15.5's parsing
+order applies unchanged: a token pre-pass reads only `version`, and absent,
+duplicate, non-integer, or foreign values report skew before any other field is
+interpreted.
+
+`protocol-skew` is therefore **not** an `attach-refused` member, and does not
+need to be: skew is reported by §15.5's directional rows, which have the observed
+version in hand. A refusal frame could not carry it — a v1 frame is decoded only
+after its own version pre-pass succeeds — and a conforming v1 client cannot be
+told its own hello was skewed. `presented-by-tmux` and `listener-absent` are
+likewise absent, being client-side facts determined before connecting, since a
+tmux-presented role opens no listener at all. A protocol variant no live endpoint
+can emit is a defect, not a completeness.
+
+**A resize needs no sequence number and gets no acknowledgement.** One ordered
+stream delivers resizes in the order sent, so a stale resize is not expressible;
+the shim applies each and says nothing. A `TIOCSWINSZ` that **fails** is
+terminal: the shim sends `attach-final` with disposition `resize-failed`
+carrying the rejected size and cause, and releases. That keeps exactly one
+terminal frame and one selection rule.
+
+Order is fixed **per direction**. The shim sends `attach-shim-hello` first and
+exactly once. The client then sends `attach-hello` first and exactly once, after
+which it may send input and resize frames in any interleaving. The shim answers
+either `attach-refused` and closes, or `attach-admitted` followed by output
+frames, terminated by at most one `attach-final`.
+
+A second hello in either direction, any frame before the applicable hello, or a
+resize before admission is a protocol violation, and the response **splits at the
+admission boundary**, because a final frame is only reachable after admission:
+
+- **After admission**, the shim makes it a terminal decision with disposition
+  `server-closing` and closes, so the client is not left inferring a disposition
+  from a bare close.
+- **Before admission**, there is no attachment to report a disposition for and no
+  grammar path that would carry one, so the shim simply closes. The client
+  selects `attach-transport-failed` with `ATTACH_PHASE` of `hello` or
+  `admission`. That is not inferring a disposition from an EOF — it is the
+  absence of any attachment, named by the phase it failed in.
+
+No pre-admission refusal variant is added for this. Between two conforming
+endpoints it is unreachable, the operator has no remedy that differs from the
+transport row's, and a member whose only reader is a defective peer is the kind
+of vocabulary §15.11 has been removing rather than adding.
+
+`ROWS` and `COLS` are unsigned decimal, at least 1 and at most 65535; any other
+value is refused before the PTY is touched. `BYTES`, `UNDELIVERED`, and
+`known_undelivered` are unsigned integers in `[0, 2^53-1]`, the range every JSON
+decoder represents exactly, and none of them wraps: an implementation that would
+exceed the maximum ends the attachment with disposition `counter-exhausted` while
+every reported value is still exact. The limit is unreachable in practice and is
+stated so no implementation invents a wrap rule. `CAUSE` is the observed error as
+a plain string, encoded once by JSON; `%q` is a CLI rendering rule and is never
+applied to the wire value.
+
+#### 15.11.3 Admission, single viewer, and release
+
+A connection is admitted only when `LOCAL_PEERPID` resolves and the peer's
+effective uid, read from `kinfo_proc` for that PID, equals the shim's. The kernel
+accepts a second connection regardless of application state — verified: a second
+`net.Dial` to a socket with one accepted connection returns no error — so
+single-viewer enforcement happens after accept, never by expecting connect to
+fail. A second connection while a viewer is admitted is refused with
+`viewer-present` carrying the incumbent's PID.
+
+The initial size from `attach-hello` is applied **before** `attach-admitted`, so
+an admitted viewer is one whose terminal size the role already has. A failed
+initial `TIOCSWINSZ` refuses with `initial-size-failed` carrying the rejected
+size and cause.
+
+These are the observable properties of release, and they hold however an
+implementation achieves them:
+
+- **One terminal decision, and at most one final frame.** Many things can end an
+  **admitted** attachment — the viewer departing, the lag buffer overflowing, the
+  child exiting, cleanup, a failed resize, a protocol violation after admission,
+  a transport fault — and they can happen at once. A protocol violation *before*
+  admission is not among them: there is no attachment yet, so §15.11.2 has the
+  shim close without a final and the client report the transport row for the
+  phase. The shim reaches exactly **one** terminal decision
+  and attempts exactly one `attach-final` for it. On a healthy writable stream
+  the client therefore sees exactly one final frame, one disposition, and one
+  close. On a broken one it may see none: delivery is attempted, not promised,
+  and a peer that has already aborted, or a stream that failed mid-frame, cannot
+  receive one. No ordering among simultaneous causes is promised, because none is
+  observable.
+- **The disposition is a fact about the attachment, never inferred from a
+  close.** A client that does not receive a **complete** final frame selects
+  `attach-transport-failed` with its `ATTACH_PHASE`; it never reads a disposition
+  out of an EOF or out of a truncated frame.
+- **No input and no resize is applied after its connection loses admission.**
+  This is enforced by the shim at the point it commits to the PTY, not by the
+  transport: bytes and sizes already decoded from a departed viewer are discarded
+  there, so work from an old connection can never cross into a replacement. The
+  stream orders each direction; it does not know about admission.
+- **Input is never delivered while the role is `stopping`** (§15.11.5).
+- **A departed viewer's seat is released promptly, and never latched.** Admission
+  is revoked, and the seat becomes available to the next connection, on any of:
+  stream EOF in either direction; a read or write error on the connection; peer
+  death, which surfaces as one of those; or any of the terminal decisions above.
+  Release is not deferred until the role next produces output, so a role that has
+  gone quiet cannot strand its own seat — the shim does not need the harness to
+  say anything in order to notice that its viewer is gone.
+- **A half-open peer does not hold the seat.** A viewer that closes only its
+  write side produces EOF on the shim's read while remaining able to receive, and
+  that EOF revokes admission on its own: the seat is released and the connection
+  closed, rather than left readable so the departed viewer keeps receiving output
+  beside its replacement. A peer that is neither readable nor draining is bounded
+  instead by the lag buffer, which evicts it (§15.11.4), so no combination of
+  half-open and non-reading leaves a seat held indefinitely.
+- **Ending a viewer is never a role fact.** It changes no runtime state, writes
+  no durable record, and is not an input to absence, readiness, or ownership.
+
+Input frames and control deliveries share the role's single ordering, so a
+viewer's keystrokes can never interleave with the bytes of a `clear` or
+`compact` payload; whichever the shim began first completes first.
+
+#### 15.11.4 The agent is never throttled by a viewer
+
+The binding property is that **a viewer can never slow the agent down**. The shim
+reads the PTY at full speed with or without a viewer; with none it discards what
+it reads, and with one it copies into a bounded per-viewer lag buffer served by a
+separate writer. No PTY read ever waits on a socket write, and appending to that
+buffer never waits.
+
+`AttachLagBufferBytes` = `131072`. The derivation is from retained artifacts, both
+codex-cli 0.147.0 at 200x60: an initial paint of **61,489 bytes**
+(`sha256 75e0cce7…fd2d23`) and a resize repaint of **45,777 bytes**
+(`sha256 29784802…8db0a1`). The buffer holds **2.13** of the larger, so a single
+paint arriving while an earlier one is still draining cannot overflow it. It
+bounds a burst, not a rate.
+
+When the buffer would overflow, the viewer is **evicted** and the role continues
+untouched: the client reports `attach-evicted-slow`. Eviction is chosen over
+dropping bytes because a terminal stream cannot be sampled — dropping mid-sequence
+leaves a partial escape sequence and a corrupted screen, while a re-attach gets a
+clean repaint and a correct one.
+
+**Residual, stated rather than hidden:** a viewer that cannot keep up with the
+role's sustained output loses its seat. There is no supported minimum throughput,
+because the buffer bounds a burst rather than a rate, and a viewer on a link too
+slow for the harness's steady output will be evicted repeatedly. That is the
+accepted cost of never throttling the agent.
+
+**The tail after child exit.** Child exit is observed independently of the
+harness's last output, and it does **not** imply PTY EOF: a surviving grandchild
+that still holds the slave keeps the master open indefinitely, so no outcome may
+be conditioned on EOF. Before closing, the shim spends up to
+`AttachTailFlushTimeout` = `10s` delivering what it has already read. Ten seconds
+is a policy cutoff, not a derivation from any byte count: whether a flush
+completes depends on the volume of the tail, the rate a surviving producer keeps
+adding to it, and the rate the viewer takes it.
+
+The outcomes are distinguished because they are different facts, and each claims
+only what the shim can observe — bytes it actually read and counted, never
+"everything the harness ever wrote", which is not observable:
+
+- `child-exited` — every byte counted for the flush was written to the stream.
+- `tail-undelivered` — `UNDELIVERED` counted bytes were not, and the row says the
+  terminal is incomplete. The count is exact.
+- `tail-unconfirmed` — the flush ended without establishing its cutoff, so the
+  shim reports the loss it can count and claims no total. `known_undelivered` may
+  legitimately be 0, and that is the point of the member: zero *known* loss is not
+  zero loss. Reporting `child-exited` here would return exit 0 over a final
+  screen that may never have been read.
+
+`BYTES` counts bytes **written to the stream**, which is the only thing the shim
+can observe; whether the client received or displayed them is the client's own
+observation (§15.11.7).
+
+#### 15.11.5 Repaint and delivery ordering
+
+The shim applies the hello's `rows`/`cols` to the retained PTY master with
+`TIOCSWINSZ` **before** sending `attach-admitted`, so a failure costs no claim:
+it answers `attach-refused` with `initial-size-failed` and closes. Verified:
+setting the size on the master delivers `SIGWINCH` to the child's foreground
+process group, which is what makes the harness redraw. Nothing is replayed and no
+screen contents are stored — the repaint an operator sees on attach is the
+harness redrawing, not the shim replaying.
+
+**A control delivery is indivisible with respect to viewer input.** A registry
+delivery is not a single write: it is an input-clear, a payload, a fixed delay,
+and a submit. Viewer input never lands inside that sequence, and a delivery never
+lands inside a viewer's chunk; whichever began first completes first. This is a
+property of the role's single input ordering, and an earlier draft that shared
+only a per-write serialization was wrong, because that would have let viewer
+bytes land between clear and payload.
+
+**Input is only ever delivered on behalf of the currently admitted viewer, and
+only while the role is `active`.** Bytes read from a viewer that has since been
+released are discarded rather than written, including when a replacement viewer
+has been admitted; and while a role is `stopping`, typed bytes are not delivered
+at all. That last case is the single honest exception to "every byte you type
+reaches the harness", and the README states it as such.
+
+Normative test shape: block after each delivery write and prove no viewer byte
+appears anywhere inside the sequence; and prove that a chunk read from a released
+viewer, or read while the role is `stopping`, never reaches the PTY.
+
+#### 15.11.6 Detached start: spawn, reaping, readiness, rollback, relaunch
+
+A detached role is started by the launcher spawning the current executable's
+hidden shim command directly. No existing seam does this — foreground `run`
+invokes the lifecycle in-process — so the launcher gains one typed spawn
+boundary whose production implementation is `os/exec` and whose tests use a
+recording fake, in the pattern `internal/ptyx.ChildStarter` already
+establishes. The sole shell-composition site remains the tmux window command
+and is not reached on this path.
+
+The spawn is fully parent-specified; nothing is configured after exec:
+
+- **argv** is exactly §15.1's hidden shim argv, built from validated values;
+- **cwd** is the fleet's stored absolute directory;
+- **env** is the launcher's environment, **including `AGENTCTL_RUNTIME_ROOT`
+  and `AGENTCTL_STATE_ROOT` when they are set**, plus the §15.1 informational
+  `AGENTCTL_*` values. The root overrides must be inherited: they are already
+  validated by §15.2, and scrubbing them would make the shim resolve different
+  roots from its launcher, so the launcher could not find the listener it is
+  waiting on. The spawn adds no other override, and never passes a
+  presentation, token, or path not already in the launcher's environment;
+- **fds 0, 1, and 2** are each opened on `/dev/null` by the parent before exec,
+  so the harness can never inherit the launcher's terminal;
+- **`Setsid`** is specified as an exec attribute rather than called by the
+  child, so the shim leads its own session and has no controlling terminal from
+  its first instruction. `Setctty` is not set: the shim's own PTY is the
+  child's controlling terminal, not the shim's.
+
+The spawn returns the started PID, which is creation provenance.
+`Setsid` does not change it, so it is comparable with the `shim_pid` in the
+advisory lockfile exactly as the tmux path compares the pane PID; a mismatch is
+the existing `ready-owner-disagreement`.
+
+**The launcher owns an asynchronous `Wait` from the moment of spawn.** Without
+one an exited shim becomes a zombie, and the §15.4 oracle reports it present —
+verified: a direct child that called `setsid` and exited 0 still answered
+`kill(pid, 0)` with success until the parent waited. Therefore, for the launch
+and readiness window only, **child-exit facts come from the waiter, not from
+`kill(pid, 0)`**. The waiter's observation is authoritative for that window and
+the oracle is not consulted for this PID. After the launcher exits, the shim
+reparents and the standing §15.4 semantics apply unchanged, because no launcher
+remains to hold an unreaped exit.
+
+Start outcomes are three families, distinguished by what is known:
+
+| Family | Condition | Outcome |
+|---|---|---|
+| no child | spawn returned an error and no PID | `detached-start-failed`, rollback removes this invocation's artifacts |
+| child started, then failed | a PID was returned and the waiter observed exit, or readiness failed | `detached-start-rolled-back` when cleanup observed absence; `detached-start-retained` when it did not |
+| child started, disposition unknown | a PID was returned and neither readiness nor exit was observed before the deadline | `detached-start-uncertain`; nothing is removed and the record is retained |
+
+Rollback without a presentation ID removes only what this invocation created, in
+the §15.3 order: child, then runtime artifacts including `<role>.attach`, then
+the durable record, then the fleet record. The absence of a presentation is not
+a cleanup failure.
+
+If the launcher dies during the readiness sequence, the started shim is
+unaffected: it holds its own claim and owns its child. The role is then
+observable as any other running role if the fleet record exists, or as an orphan
+by §15.4 if it does not — reported, never adopted.
+
+Readiness requires the control listener, the relay, and the §15.3 PTY
+predicate. The **attach listener is required only for a detached role**; a
+tmux-presented role, whose direct attach is categorically refused, does not open
+one and is not held unready for its absence.
+
+`relaunch` reads the fleet record's `presentation` and recreates the role in
+that mode: a detached role is never given a presentation, and a tmux role whose
+presentation is gone is recreated with one.
+
+#### 15.11.7 The attach client's terminal
+
+`attach ROLE` needs a real terminal on standard input and standard output, and
+**the same** terminal on each — established by comparing their `fstat`
+`(st_dev, st_rdev, st_ino)` triples, never by path, which is a name rather than
+an identity. If either is not a terminal it refuses `attach-not-a-terminal`; if
+they are different terminals it refuses `attach-terminal-mismatch`. Both refuse
+before anything is mutated.
+
+**Startup is one total order, and every failing prefix leaves the terminal
+untouched.** No stage installs a signal handler or changes the terminal until
+every stage that can refuse on observable facts alone has passed:
+
+1. **Terminal checks** — the two rows above.
+2. **Target validation, then presentation and listener preflight.** The standing
+   fail-closed target and claim validation of §15 runs first, so a missing,
+   stale, or orphaned role takes its own existing path. Then: configured mode is
+   not observed presentation. A `tmux` role refuses `attach-presented-by-tmux`,
+   whose literal asserts a pane and names the fleet-level command, **only when
+   that presentation is exactly observed**; a `tmux` role whose presentation is
+   not observed refuses `attach-presentation-missing` and names
+   `agentctl relaunch ROLE`, because the fleet-level command would itself refuse
+   and a remedy that cannot work is worse than none. For a detached role, only an
+   observed `ENOENT` on the attach socket licenses `attach-listener-absent`; a
+   wrong type or a symlink is a runtime disagreement, and a permission or I/O
+   failure is an observation error selecting `attach-listener-unobservable`.
+3. **The client's own terminal handle.** The client never mutates the inherited
+   descriptor, because `F_SETFL` acts on an open-file description shared with the
+   parent shell and would be observable there. It opens its own handle on the
+   terminal it identified, confirms by `fstat` that the handle names that same
+   terminal, and only then makes it non-blocking. Failures select
+   `attach-terminal-observation-failed`, `attach-terminal-open-failed`,
+   `attach-terminal-verify-failed`, or `attach-terminal-reopen-mismatch`; each
+   attempts one close of any candidate handle, which establishes no release fact.
+4. **Signal observation.** The client observes the current disposition and mask
+   of `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`, and any observation error
+   refuses `attach-signal-observation-failed` naming `SIGNAL`,
+   `SIGNAL_OBSERVATION`, and `CAUSE`. Exclusion is safe only for an *observed*
+   fact; an error means the client cannot tell whether that signal is ordinary
+   and therefore needed for restoration.
+5. **Handler installation** for the eligible subset only.
+6. **Raw mode.**
+7. **Connection.**
+
+**Signals: what the operator observes.** A signal observed ignored or blocked is
+excluded and its inherited behaviour preserved — like `SIGKILL` and `SIGSTOP`, an
+excluded signal triggers no in-process restoration and makes no promise. For the
+signals actually handled:
+
+- The terminal is restored, and the process then dies of the signal it was sent,
+  so the shell reports what it always reports.
+- If restoration **fails**, that outranks reproducing the signal:
+  `attach-terminal-restore-failed` is selected and the process exits 6 without
+  re-raising. Neither the sink nor the wait status then evidences the signal — a
+  real loss of provenance, accepted because a terminal left in raw mode is the
+  fact the operator must act on first.
+- A signal arriving once part of a selected row has already reached the terminal
+  does not **truncate the emission attempt early**. On the client's own terminal
+  handle, which is non-blocking, the attempt runs to its own bound and the signal
+  follows it; the signal does not cut it short.
+
+  That bound is `AttachReportTimeout` = `2s`, and it terminates on exactly one of
+  three conditions: **complete**, every byte of the selected template written;
+  **error**, a write failure other than a would-block; or **deadline**, the bound
+  elapsing. "Runs to its bound" means *at most* that long — a row that completes
+  immediately does not wait. Two seconds is deliberately far shorter than
+  `AttachTailFlushTimeout`: the tail flush is bounding delivery of the session's
+  own output, which the operator wants, whereas this bounds a single small
+  diagnostic line, and an operator whose terminal has stopped accepting output
+  should get their exit code back promptly rather than waiting out a
+  session-sized budget to be told the terminal is not draining. What lands may still be a byte-exact prefix — a non-blocking write can
+  report partial progress and then `EAGAIN`, so a bounded attempt is not a
+  completed one, and saturation remains one of the three permitted prefix causes.
+  The promise is about ordering, not completeness: the operator does not get a
+  row interrupted by its own signal handler. On a redirected sink the attempt is
+  not bounded at all — that write may block indefinitely and cannot be
+  interrupted — so the owner acts immediately and the sink is left holding
+  whatever it holds. Promising a *finished* row on either path would be false on
+  the first and unbounded on the second.
+- Exactly **one** termios restoration is attempted per attachment, on every path.
+
+**The relay, and what it costs.** The client relays every byte in both
+directions; nothing is intercepted, so `Ctrl-C` reaches the harness as it would
+anywhere else. Three properties are guaranteed together, and a fourth is
+deliberately given up:
+
+- **Bounded memory.** The client holds at most `AttachClientQueueBytes` =
+  `131072` of relay payload, counted over queued **plus** in-flight bytes. This
+  is an accounting bound on payload, not a claim about resident memory.
+- **Bounded completion.** `attach` always terminates. It never waits without a
+  bound on a terminal that has stopped accepting output, and it never leaves a
+  worker parked in the kernel holding the process open.
+- **The role is never affected.** A client that cannot keep up loses its seat by
+  the ordinary eviction rule; the role continues.
+- **Given up: lossless relay to an arbitrarily slow terminal.** A terminal that
+  will not drain within `AttachTailFlushTimeout` after the role's output is
+  finished costs the remainder, and the shortfall is **reported** rather than
+  silent.
+
+**Three counts, kept distinct**, because they classify three different failures
+and are three observations by two processes: `BYTES` from the final frame (what
+the shim wrote to the stream), `RAW` (what the client read from it), and
+`WRITTEN` (what the terminal accepted). `RAW` short of `BYTES` with a healthy
+terminal is a transport failure; `RAW` above `BYTES` is a protocol disagreement
+and likewise transport failure, since one count is wrong and the client cannot
+tell which. `WRITTEN` short of `RAW` with an observed write error is
+`attach-stdout-failed`; with no error, because the terminal did not drain in
+time, it is `attach-terminal-stalled` — a stalled terminal returns neither
+success nor error and would otherwise fall through every branch.
+
+**Diagnostics keep `stderr`'s destination.** §15.8's channel rule stands: rows go
+where `stderr` goes, so `agentctl attach ROLE 2>file` puts every row in the file.
+The one amendment §15.8 records is that they are not necessarily written through
+descriptor 2 itself — writing a row to a broken pipe on fd 1 or 2 raises
+`SIGPIPE` and **kills the process**, erasing the exit code the attachment
+selected, so the row is written through a duplicate whose number is above 2 and
+`EPIPE` arrives as an ordinary error. The destination is unchanged; only the
+descriptor is.
+
+**Emission is bounded, and may be incomplete.** When the destination is the same
+saturated terminal the relay was using, emission is bounded and may produce a
+**byte-exact prefix** of the selected template — never a paraphrase, a truncation
+marker, or a summary — and when the terminal is already known not to drain it is
+skipped entirely rather than manufacturing a fragment about a terminal that
+cannot take messages. A signal or an I/O failure mid-write can leave a prefix
+too. In every such case the exit status carries the outcome, a reader of the sink
+alone cannot tell which cause produced a short row, and that ambiguity is
+intrinsic. Exactness concerns the bytes agentctl **submits**; the terminal's own
+`OPOST` processing may transform their display exactly as for any other write.
+
+If the terminal cannot take the row at all, the exit status is the only signal
+the operator gets, and that is stated rather than left as an implied guarantee
+that a message always appears.
+
+#### 15.11.8 Viewer behavior across stop, kill, and survivors
+
+The attach listener stops accepting new viewers when the role's phase leaves
+`active`; an admitted viewer is not evicted by the phase change.
+
+Viewer input is **read and discarded** once the phase is `stopping`. The shim
+keeps reading the viewer's socket — it must, or the bytes would queue in the
+kernel and be delivered after a survivor returns the role to `active`, which
+would be a delayed injection rather than a refusal — and writes none of them to
+the PTY. This is the single honest exception to "every byte reaches the
+harness", and it is stated as such in the README rather than left implicit. Output continues to flow to the
+viewer until the child exits, because watching a role stop is the observation an
+operator most needs.
+
+On observed child exit the client reports whichever of §15.11.4's child-exit
+dispositions the flush produced — `attach-viewer-ended`,
+`attach-tail-undelivered`, or either `tail-unconfirmed` row when the flush ended
+without establishing its cutoff. A stopping role reaches the same outcomes as any
+other child exit; nothing about the stop path narrows them.
+
+- **active → stopping → stopped.** Observed child exit requests release. If it
+  wins, the §15.11.4 tail flush runs before anything is closed, so the stream
+  closes only once every byte counted for that flush has been written to the
+  data stream or the flush ended; the client reports whichever child-exit
+  disposition that flush produced — `attach-viewer-ended` when it completed,
+  `attach-tail-undelivered` when a counted tail was dropped, or either
+  `tail-unconfirmed` row when the flush ended without establishing its cutoff.
+- **active → stopping → active** (a stop that did not end the child). The
+  listener resumes accepting, and the admitted viewer's input is admitted again.
+  No viewer is evicted by the round trip.
+- **kill with partial failure, or cleanup that retains ownership.** The stream
+  closes when the shim's own cleanup closes it. The client reports only that its
+  attachment ended; it never reports the role's disposition, which remains
+  whatever `status` and the killing command report.
+
+A viewer is never an input to whether a role stopped.
+
+#### 15.11.9 Attach and detached exit rows
+
+These extend §15.8 and give no existing name a second meaning. Reusing an
+existing placeholder with its **own** meaning is not borrowing and is the correct
+choice where the value is the same kind of thing — `SIGNAL` below is exactly
+that. Cases with existing rows are reused, not duplicated: a role with no live
+claim or durable record selects `missing`; a divergent state root or answerer
+disagreement selects its existing row, rendered with the attach connection as the
+peer; and version disagreement is reported by §15.5's directional pre-passes
+rather than by any attach-specific row.
+
+Placeholders added here: `ATTACH_PHASE` is the closed set `hello`, `admission`,
+`relay`, `final`, rendered unquoted — deliberately not `PHASE`, which §15.8 fixes
+to the record phases. `ROWS`, `COLS`, `BYTES`, `UNDELIVERED`, `RAW`, `WRITTEN`,
+and both uid values are unsigned decimal; `BYTES` is the shim's count of bytes
+written to the stream, `RAW` the client's count read from it, and `WRITTEN` the
+client's count written to its terminal, and they are never substituted for one
+another. `STAGE` is the closed set `terminal-check`, `identity-stat`,
+`nonblocking`. `SIGNAL_OBSERVATION` is the closed set `disposition`, `mask`;
+it is deliberately not `OBSERVATION`, which §15.8 already fixes to a different
+closed set. `PRIOR_OUTCOME` is enumerated with the composition rule below.
+`SIGNAL` is §15.8's existing placeholder with its existing meaning and rendering,
+drawn here from the four candidates the client observes. `PATH` is the exact byte
+string observed and then opened, rendered under the `%q` rule.
+
+| Typed outcome | Exit | Exact factual message template |
+|---|---:|---|
+| `attach-viewer-present` | 5 | `agentctl: refusing to attach role ROLE in session SESSION; a viewer is already attached at PID PID (attach-viewer-present)` |
+| `attach-presented-by-tmux` | 5 | `agentctl: refusing to attach role ROLE in session SESSION; the role is presented by tmux and its pane is its viewer; use agentctl attach --session SESSION (attach-presented-by-tmux)` |
+| `attach-peer-unverified` | 5 | `agentctl: refusing the attach connection for role ROLE in session SESSION; connected LOCAL_PEERPID PID has uid PEER_UID; expected SHIM_UID (attach-peer-unverified)` |
+| `attach-peer-unobservable` | 6 | `agentctl: could not observe the attach peer for role ROLE in session SESSION: CAUSE (attach-peer-unobservable)` |
+| `attach-presentation-missing` | 5 | `agentctl: refusing to attach role ROLE in session SESSION; it was launched in tmux mode but no presentation was observed, so it has no viewer to share; recreate it with: agentctl relaunch ROLE (attach-presentation-missing)` |
+| `attach-listener-unobservable` | 6 | `agentctl: could not observe the attach stream for role ROLE in session SESSION at PATH: CAUSE; no attachment was made (attach-listener-unobservable)` |
+| `attach-listener-absent` | 5 | `agentctl: refusing to attach role ROLE in session SESSION; the role holds its claim but has no attach stream at PATH (attach-listener-absent)` |
+| `attach-terminal-open-failed` | 6 | `agentctl: could not open this command's own handle on the attaching terminal for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-open-failed)` |
+| `attach-terminal-verify-failed` | 6 | `agentctl: opened a candidate terminal handle for role ROLE in session SESSION but could not complete STAGE: CAUSE; no attachment was made (attach-terminal-verify-failed)` |
+| `attach-terminal-reopen-mismatch` | 6 | `agentctl: opening observed terminal name PATH for role ROLE in session SESSION produced a candidate handle whose identity did not match the terminal this command is attached to; no attachment was made (attach-terminal-reopen-mismatch)` |
+| `attach-signal-observation-failed` | 6 | `agentctl: could not observe the current handling of SIGNAL for role ROLE in session SESSION: SIGNAL_OBSERVATION query failed: CAUSE; no attachment was made and this terminal was not modified (attach-signal-observation-failed)` |
+| `attach-terminal-mismatch` | 2 | With a selected session: `agentctl: refusing to attach role ROLE in session SESSION; standard input and standard output are different terminals (attach-terminal-mismatch)`. Without one: `agentctl: refusing to attach role ROLE; standard input and standard output are different terminals (attach-terminal-mismatch)` |
+| `attach-not-a-terminal` | 2 | With a selected session: `agentctl: refusing to attach role ROLE in session SESSION; standard input and output must both be terminals (attach-not-a-terminal)`. Without one: `agentctl: refusing to attach role ROLE; standard input and output must both be terminals (attach-not-a-terminal)` |
+| `attach-terminal-observation-failed` | 6 | With a selected session: `agentctl: could not observe the attaching terminal for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-observation-failed)`. Without one: `agentctl: could not observe the attaching terminal for role ROLE: CAUSE; no attachment was made (attach-terminal-observation-failed)` |
+| `attach-terminal-raw-failed` | 6 | `agentctl: could not place the attaching terminal in raw mode for role ROLE in session SESSION: CAUSE; no attachment was made (attach-terminal-raw-failed)` |
+| `attach-terminal-stalled` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but this terminal stopped accepting output; WRITTEN of RAW received bytes reached it before the wait expired and the rest was not displayed (attach-terminal-stalled)` |
+| `attach-stdout-failed` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but writing its output to this terminal failed: CAUSE; WRITTEN of RAW received bytes reached the terminal (attach-stdout-failed)` |
+| `attach-terminal-restore-failed` | 6 | `agentctl: attachment to role ROLE in session SESSION ended with PRIOR_OUTCOME, but restoring the attaching terminal failed: TERMIOS_CAUSE (attach-terminal-restore-failed)` |
+| `attach-transport-failed` | 6 | `agentctl: attach transport for role ROLE in session SESSION failed during ATTACH_PHASE: CAUSE (attach-transport-failed)` |
+| `attach-evicted-slow` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended because keeping it would have required buffering more than 131072 bytes of role output; ending it stopped nothing in the role (attach-evicted-slow)` |
+| `attach-ended-cleanup-retained` | 6 | `agentctl: attachment to role ROLE in session SESSION ended while the shim retained ownership during cleanup; the role's disposition is not established by this command (attach-ended-cleanup-retained)` |
+| `attach-ended-server-closing` | 6 | `agentctl: attachment to role ROLE in session SESSION ended because the shim closed the stream; the role's disposition is not established by this command (attach-ended-server-closing)` |
+| `attach-viewer-ended` | 0 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed (attach-viewer-ended)` |
+| `attach-tail-unconfirmed` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed and UNDELIVERED further bytes are known not to have been, but the output cutoff was never confirmed, so whether any more of its final output was missed is unknown (attach-tail-unconfirmed)` |
+| `attach-tail-unconfirmed-none-known` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed and no further bytes are known to have been missed, but the output cutoff was never confirmed, so whether any of its final output was missed is unknown (attach-tail-unconfirmed-none-known)` |
+| `attach-counter-exhausted` | 6 | `agentctl: attachment to role ROLE in session SESSION was ended after BYTES bytes because a byte counter reached the largest exactly representable value; ending it stopped nothing in the role (attach-counter-exhausted)` |
+| `attach-tail-undelivered` | 6 | `agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed, but UNDELIVERED bytes of its final output could not be delivered before the flush deadline and were dropped; the terminal above is incomplete (attach-tail-undelivered)` |
+| `attach-resize-failed` | 6 | `agentctl: could not apply window size ROWSxCOLS to role ROLE in session SESSION: CAUSE (attach-resize-failed)` |
+| `presentation-flag-conflict` | 2 | `agentctl: --detached and --tmux are mutually exclusive` |
+| `run-template-flag-conflict` | 2 | `agentctl: --from-template excludes --harness, --model, and --effort` |
+| `run-template-role-absent` | 2 | `agentctl: role ROLE is not in template FILE (run-template-role-absent)` |
+| `run-template-role-duplicate` | 2 | `agentctl: role ROLE appears more than once in template FILE (run-template-role-duplicate)` |
+| `detached-start-failed` | 8 | `agentctl: could not start a detached shim for role ROLE in session SESSION: CAUSE; no child was started and cleanup removed every artifact owned by this invocation (detached-start-failed)` |
+| `detached-start-rolled-back` | 8 | `agentctl: detached shim PID PID for role ROLE in session SESSION failed before readiness: CAUSE; cleanup observed child absence and removed every artifact owned by this invocation (detached-start-rolled-back)` |
+| `detached-start-retained` | 9 | `agentctl: detached shim PID PID for role ROLE in session SESSION failed before readiness: CAUSE; cleanup left REMAINING: CLEANUP_CAUSE (detached-start-retained)` |
+| `detached-start-uncertain` | 9 | `agentctl: detached shim PID PID for role ROLE in session SESSION neither became ready nor was observed to exit; nothing was removed and the durable record was retained (detached-start-uncertain)` |
+
+**Selection.** The client selects exactly one row. The attachment's own
+disposition — taken from the `attach-final` frame, never from an EOF — selects
+the base row: `child-exited` selects `attach-viewer-ended`, `viewer-evicted`
+selects `attach-evicted-slow`, `cleanup-retained` selects
+`attach-ended-cleanup-retained`, `server-closing` selects
+`attach-ended-server-closing`, `resize-failed` selects `attach-resize-failed`,
+`tail-undelivered` selects `attach-tail-undelivered`, `counter-exhausted` selects
+`attach-counter-exhausted`, and `tail-unconfirmed` selects
+`attach-tail-unconfirmed` when its `known_undelivered` is at least 1 and
+`attach-tail-unconfirmed-none-known` when it is 0 — two literals because one
+sentence cannot state both a known loss and no known loss without asserting
+something unobserved. A transport failure that prevents receiving the final frame
+selects `attach-transport-failed` with the exact `ATTACH_PHASE` instead,
+including when the frame the shim tried to send was the `resize-failed` one,
+because the client cannot report a fact it never received.
+
+Each refusal member selects the like-named `attach-` row, with one stated
+exception: `initial-size-failed` selects `attach-resize-failed`, whose template
+already renders exactly the size and cause it carries. Failure to observe
+`LOCAL_PEERPID` on the connected attach socket selects
+`attach-peer-unobservable` before the client hello or any operator input is
+sent.
+
+Terminal checks precede session resolution. For every terminal-first row that
+can be selected by `PrepareRoleTerminal` — `attach-not-a-terminal`,
+`attach-terminal-mismatch`, and `attach-terminal-observation-failed` — the
+session clause is present exactly when a session was selected from explicit
+`--session`, a valid `AGENTCTL_SESSION`, or a successful resolver observation
+made only to populate the already-selected terminal outcome. Resolver failure
+never displaces that outcome; when no session was established, the closed
+no-session template is selected.
+`attach-presented-by-tmux`, `attach-presentation-missing`,
+`attach-listener-absent`, and `attach-listener-unobservable` are selected
+client-side before connecting and have no wire member — a row without a frame is
+correct; a frame without a possible sender was not.
+
+**Composition.** Supersession has two levels. One **local relay** row may
+supersede the base — `attach-stdout-failed` when the terminal returned an error,
+`attach-terminal-stalled` when it returned no error and did not drain in time —
+and `attach-terminal-restore-failed` is **outermost**, because a terminal left in
+raw mode is the fact the operator must act on before anything else.
+`viewer-evicted` and `terminal-stalled` are deliberately not made to compete: one
+is the shim's fact and the other the client's fact that caused it, and forcing a
+choice would discard whichever side noticed second.
+
+A single supersession renders as one line using the scalar `PRIOR_OUTCOME`, the
+closed set of each `DISPOSITION` member, each `REFUSAL` member,
+`answerer-disagreement`, `transport-failed`, `locally-terminated` for a caught
+signal or panic **only when no base outcome had been observed**, and the local
+outcomes `terminal-raw-failed`, `stdout-failed`, and `terminal-stalled`.
+`terminal-observation-failed` and `terminal-mismatch` are deliberately **not**
+members: the startup order guarantees both occur before any terminal mutation, so
+no restore failure can compose over them and a member with no reachable
+composition is dead vocabulary. `terminal-raw-failed` is a member and its literal
+therefore makes no claim about restoration — an earlier draft asserted that the
+prior mode was restored, which would have said restoration both succeeded and
+failed in the one chain where it composes. `locally-terminated` is a fallback,
+never an eraser: where a base outcome was observed it composes beneath the
+restore failure rather than replacing it.
+
+A two-level chain renders as **ordered lines**, because a scalar cannot carry a
+chain and squeezing one into `PRIOR_OUTCOME` would discard the base disposition,
+its counts, and the intermediate cause:
+
+    agentctl: role ROLE in session SESSION ended while attached; BYTES bytes were relayed, but UNDELIVERED bytes of its final output could not be delivered before the flush deadline and were dropped; the terminal above is incomplete (attach-tail-undelivered)
+      writing its output to this terminal failed: STDOUT_CAUSE; WRITTEN of RAW received bytes reached the terminal (attach-stdout-failed)
+      restoring the attaching terminal failed: TERMIOS_CAUSE (attach-terminal-restore-failed)
+
+Lines render in occurrence order so the operator reads the attachment's history
+forwards; the selected name and exit code are the **outermost** failure's.
+Severity determines the verdict, chronology determines the layout, and neither
+reorders the other. These are the only compositions in the map.
+
+`attach-listener-absent` takes exit 5, not the role-absence family: a role can
+hold a live claim and a valid record while lacking its attach listener, which is
+a runtime disagreement rather than an absent role.
+
+#### 15.11.10 Required guards
+
+These prove the observable properties above. Where a property has more than one
+possible mechanism, the guard asserts the property, not the mechanism, so an
+implementation may satisfy it differently without a design delta. The mechanisms
+that are the only known Darwin-viable options, and the probe evidence that rules
+the alternatives out, are recorded in
+[the implementation notes](../plans/2026-08-14-attach-implementation-notes.md).
+
+- The longest production path is the attach stream. Tests pin `.attach == 100`
+  bytes at the §7 caps, accept 103, and refuse 104 or longer before any mutation,
+  using the longest artifact rather than `.sock`. Mutation-testing covers the
+  suffix, the root template, and the caps.
+- Preflight order is asserted exactly per mode before any launch call:
+  `[amq, harness...]` detached, `[tmux, amq, harness...]` tmux.
+- **One connection, one framing.** Frame boundaries are asserted for each `kind`,
+  including a data frame whose payload is byte-identical after a round trip, and
+  the decoder is asserted to reject an unknown `kind`, a zero length, a length
+  above each cap, invalid UTF-8 in a control payload, and a non-object top level.
+- **Per-direction ordering, and nothing wider.** Input and resize frames sent by
+  the client are asserted to arrive and apply in send order; output and final
+  frames sent by the shim are asserted to arrive in send order. No test asserts
+  an order **across** directions, because a full-duplex stream does not provide
+  one — a shim may send its final before reading a resize the client has already
+  written, and that is conformant.
+- **The seat is released, not latched.** Each of stream EOF, a half-close of the
+  viewer's write side, a read or write error, and peer death is asserted to
+  revoke admission and to make the seat immediately available: a second
+  connection attempted afterwards is **admitted**, not refused with
+  `viewer-present`. Asserted with the role quiet — producing no output — so a
+  shim that only notices a departed viewer on its next write fails the test.
+- **A half-open viewer stops receiving.** After the viewer half-closes its write
+  side, the shim is asserted to close the connection rather than continue sending
+  output to it, so a departed viewer cannot receive beside its replacement.
+- **Admission bounds application, not the transport.** Input and resize decoded
+  from a viewer that has since lost admission are asserted never to reach the
+  PTY, including when a replacement viewer has been admitted in between, and
+  including when the bytes were already decoded before release. The assertion is
+  on the rejection at the commit point, not on the absence of bytes afterwards,
+  which a never-scheduled write would satisfy vacuously.
+- **The agent is never throttled.** The PTY drain rate is asserted unchanged by
+  viewer presence, viewer speed, and viewer absence; a viewer that stops reading
+  is evicted at `AttachLagBufferBytes` and the role continues, with `status`
+  unaffected.
+- **One terminal decision, split by transport health.** On a healthy stream,
+  firing viewer departure, eviction, child exit, cleanup, and a failed
+  `TIOCSWINSZ` concurrently against one admitted viewer yields exactly one final
+  frame, one disposition, and one close. With an induced transport fault — peer
+  abort, or a stream broken mid-frame — the client is asserted to receive **no**
+  complete final, to infer no disposition, and to select `attach-transport-failed`
+  with its phase. A protocol violation **after** admission is asserted to yield a
+  `server-closing` final rather than a bare close; a protocol violation **before**
+  admission — a frame preceding the applicable hello, a second hello, or a resize
+  before admission — is asserted to close without a final and to select
+  `attach-transport-failed` with `ATTACH_PHASE` of `hello` or `admission`
+  respectively, with no disposition inferred.
+- **A departed viewer's input never reaches the harness.** Bytes read from a
+  viewer that has been released are asserted never to be written to the PTY,
+  including when a replacement viewer is admitted in between; and input is not
+  delivered while the role is `stopping`.
+- **The tail outcomes are exact.** A reading viewer receives every byte counted
+  for the flush and keeps `child-exited`; a viewer that stops reading yields
+  `tail-undelivered` whose `bytes` plus `undelivered` equals the total counted;
+  a flush that ends without establishing its cutoff yields `tail-unconfirmed`,
+  asserted in both the zero and non-zero `known_undelivered` shapes, and neither
+  may exit 0. Child exit with a grandchild still holding the slave completes
+  without waiting for an EOF that never arrives.
+- **Terminal identity and refusals.** `stdin` and `stdout` on different terminals
+  refuse `attach-terminal-mismatch` before either is touched. Identity is
+  asserted behaviourally: two descriptors on one terminal are treated as the same
+  terminal even when their paths or access modes differ, and two distinct
+  terminals are never treated as one.
+- **Peer-state isolation.** Asserted from a parent process, not from inside the
+  client: while the child relays, after `SIGSTOP`, after `SIGKILL`, and after
+  normal exit, the parent's descriptor flags are unchanged — run with the
+  original `O_NONBLOCK` clear **and** set.
+- **The preflight distinguishes configured from observed.** A tmux-mode record
+  whose presentation is not observed selects `attach-presentation-missing`, not
+  `attach-presented-by-tmux`; a detached record with an observed `ENOENT` selects
+  `attach-listener-absent`, while a permission failure selects
+  `attach-listener-unobservable`. Neither arrives as a frame, and the decoder
+  rejects both names if a peer ever sends them.
+- **Startup order by failing prefix.** A non-TTY invocation selects
+  `attach-not-a-terminal` and never reaches the signal stage; a private-handle
+  failure selects its own row with no handler installed; a signal-observation
+  failure refuses with no signal handling installed, the terminal mode unchanged,
+  no connection made, and no role state changed — asserted for each candidate, each
+  observation stage, and with all of them failing, with the row naming the first
+  in the fixed traversal.
+- **The empty eligible set changes nothing outside the candidates.** With all
+  four candidates observed ignored or blocked, the handling of every signal —
+  the four candidates and unrelated ones such as `SIGPIPE` — is asserted
+  unchanged from before the attach, and each retains its inherited behaviour.
+- **Signals produce the promised observation.** A handled signal restores the
+  terminal and yields a signal wait status; a signal inherited ignored is
+  excluded, yields the selected exit code, and makes no wait-status claim; a
+  restore failure exits 6 without re-raising. A second registration for the same
+  signal must not swallow the re-raise. Exactly one termios restoration is
+  asserted on every path.
+- **The client is bounded in payload and in time.** Against a terminal that never
+  drains — with the queue full, and with a chunk in flight — queued plus
+  in-flight stays within `AttachClientQueueBytes`, `attach` exits within its
+  stated bound, the terminal mode is restored, and the role survives untouched.
+- **The three counts classify separately.** `RAW` short of `BYTES` with a healthy
+  terminal selects `attach-transport-failed`; `RAW` above `BYTES` selects the
+  same; `WRITTEN` short of `RAW` with a write error selects
+  `attach-stdout-failed` and without one selects `attach-terminal-stalled`,
+  including when terminal progress was partial rather than zero.
+- **A broken redirected sink does not erase the outcome.** With fd 2 a pipe whose
+  reader has closed **and fd 1 closed**, the row is asserted to be written to the
+  same destination fd 2 names — the same open-file description, not merely a
+  similar one — the broken pipe is asserted to surface as an ordinary error
+  rather than as process death, and the process is asserted to exit with the
+  outcome's own code. No assertion claims the row *reached* a reader that has
+  closed.
+- **Diagnostic routing follows the destination.** `agentctl attach ROLE 2>file`
+  puts every row in the file, including when the relay terminal has stalled;
+  rows raised before any private handle exists route the same way.
+- **The signal/emission promise is asserted as ordering, not completeness.** A
+  signal arriving mid-row on the client's own terminal handle is asserted not to
+  cut the attempt short: the attempt runs to `AttachReportTimeout` and the signal
+  follows, with what landed asserted to be the whole row **or** a byte-exact
+  prefix — never a row interrupted mid-write by the handler, and never asserted
+  complete, since a saturated terminal can leave a prefix within the bound. The
+  bound is asserted as a maximum, not a wait: a row to a healthy terminal
+  completes without consuming `AttachReportTimeout`. On a
+  redirected sink that will not drain, the same signal is asserted to yield
+  immediate owner action and a sink holding nothing, a prefix, or the whole row,
+  with no bound and no full-row guarantee.
+- **Emission shapes.** Where the destination is the saturated relay terminal,
+  emitted bytes are asserted to be a byte-exact prefix of the selected template,
+  never a paraphrase or marker; emission is asserted skipped when
+  `attach-terminal-stalled` is already selected; and the exit status is asserted
+  in the complete, prefix, and nothing cases.
+- **Composition renders exactly.** The three-fact chain is asserted byte-for-byte
+  against the normative template — disposition with its counts, the stdout cause
+  with `WRITTEN` and `RAW`, the restore cause — exiting with the outermost row's
+  code.
+- **Byte counters are exact at the boundary.** With a counter near its maximum,
+  no reported value ever exceeds the representable range, no reported count is
+  ever an estimate, and the attachment ends with `counter-exhausted` reporting
+  exact values.
+
+#### 15.11.11 Release obligations
+
+Two statements are owed to this release's notes and no document in the
+repository carries them; promotion must not omit either.
+
+1. **Presentation defaults to detached.** `agentctl launch` with no flag starts
+   a fleet with no tmux presentation. Operators who want windows pass `--tmux`.
+2. **Fleets started by the older tmux-metadata lifecycle are not adopted.** They
+   leave no shim record, are neither recognized nor migrated, and should be
+   stopped with the binary that started them.
+
+
+## 16. Embedded skill installation
+
+`agentctl skill install` and `agentctl skill status` write and inspect the
+agent-facing skill that ships inside the binary. This section records
+long-shipped behavior; it introduces no new surface.
+
+### 16.1 Targets and modes
+
+Two fixed target directories are derived from the resolved home directory, with
+no caller-supplied path component:
+
+```text
+$HOME/.claude/skills/agentctl
+$HOME/.agents/skills/agentctl
+```
+
+Directories are created and normalized to mode `0755`; skill files and the
+manifest are written mode `0644`. A failed home resolution is a refusal, not a
+fallback.
+
+Every file is committed by writing a same-directory temporary file and renaming
+it over the target, never by writing in place. Rename replaces the directory
+entry, so another name for the previous file — a hard link, or a symlink reached
+by some other path — keeps its own content. This is what makes the fixed-target
+write boundary hold for alias cases that ownership validation does not
+enumerate.
+
+### 16.2 Ownership manifest
+
+Each target carries `.agentctl-skill.json`:
+
+```json
+{ "version": "<release>", "files": { "<relative path>": "<sha256 hex>" } }
+```
+
+The manifest records every installed file. It is how a later invocation proves
+the target is one agentctl wrote, rather than assuming it from the path.
+
+### 16.3 Refusal semantics
+
+An install proceeds only when the target is absent, or is a real directory
+whose contents agentctl can account for. The target is **unowned**, and the
+install refuses, when any of the following is observed:
+
+- the target path is a symlink;
+- the target path exists and is not a directory;
+- no manifest is present — the refusal names the first offending file found;
+- the manifest is unreadable or malformed;
+- any entry under the target is not a regular file — a symlink, for instance,
+  which would otherwise let a later write follow the link outside the target;
+- any file under the target hashes to neither its recorded entry in the
+  installed manifest nor its content in the embedded skill;
+- a manifest entry names a path that escapes the target directory, which is
+  refused before any mutation.
+
+The last rule is deliberately broader than "files match the manifest": a file
+the operator added by hand also makes the target unowned, because agentctl
+cannot prove it wrote it. A file already matching the embedded content is
+accepted, so an interrupted upgrade re-runs cleanly.
+
+### 16.4 `--force` and no-op
+
+`--force` overrides only the unowned refusal. It enumerates the target, removes
+the directory, reports every removed path, and reinstalls. It does not bypass
+inspection, hashing, or write failures, which remain refusals with or without
+it.
+
+When the existing manifest already matches the embedded skill, the install is a
+no-op reported as `current` and nothing is written. Files present in the
+previous manifest but absent from the new one are removed and reported.
+
+`agentctl skill status` performs no writes.
