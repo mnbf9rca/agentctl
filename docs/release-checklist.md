@@ -50,38 +50,58 @@ After the fleet promotes the release, open the `Release` workflow's
    `notarization still pending; re-check manually` also exits 0 and is not
    acceptance.
 
-## Verifier-recorded 0.5.0 pre-promotion evidence
+## 0.5.0 pre-promotion claim sources
 
-The verifier and its Task 8 automation record these observations against the
-rebuilt candidate. They record the command, candidate commit, terminal/host
-details, result, and committed evidence location in
-`docs/release-verification-notes.md` before the promotion PR. Do not repeat
-them manually during the three-confirmation live smoke.
+The three-confirmation live walkthrough is a smoke test. Its committed result
+block in `docs/release-verification-notes.md` records only the observations at
+checkpoints B.C1–B.C3 and the verifier's teardown result. Properties not
+observed there are proven by the named automated guards below. A checked
+promotion-form box claims that its listed sources passed; it does not turn an
+automated result into a live observation.
 
-1. **Detached launch in an ordinary terminal** — record that the default launch
-   completed without a tmux presentation and that its role remained running
-   after the terminal returned to the shell.
-2. **Per-role attach, repaint, verbatim input, and clean disconnect/re-attach**
-   — record the role, observed repaint, exact input observation, disconnect,
-   and successful replacement viewer. A clean viewer disconnect means closing
-   the viewer's terminal window or tab, or otherwise closing its PTY at the
-   terminal boundary; typed `Ctrl-C` reaches the harness and can interrupt it.
-   Record the one-viewer refusal separately.
-3. **SIGWINCH resize observation** — record the terminal dimensions before and
-   after resize and the role-side observation of the changed dimensions.
-4. **handled/ignored/blocked signal and terminal restoration** — separately
-   record handled `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` with their signal
-   exit observation and restored terminal. Separately record inherited ignored
-   or blocked behavior for each eligible signal; record that `SIGKILL` and
-   `SIGSTOP` remain excluded and make no restoration promise. Record the exact
-   terminal restoration observation for every completed attachment.
-5. **§15.9 built-artifact metadata** — record `go version -m` output for each
-   built Darwin binary and each extracted Darwin binary. Each record must show
-   `golang.org/x/sys v0.47.0` and identify the binary hash it describes.
-6. **Archive-license evidence** — record the archive hash and extracted-file
-   observation for every Darwin archive. Each extraction must contain
-   `LICENSES/golang.org/x/sys/LICENSE` alongside the release's required license
-   materials.
+1. **Detached launch in an ordinary terminal** — the live result block records
+   the detached fleet, both roles still running after the B.C3 viewer closure,
+   and teardown exit 3 with the detached durable fleet absent.
+2. **Per-role attach, verbatim input, and clean disconnect/re-attach**
+   — the live result block records the B.C1 role surfaces, B.C2 fresh replacement
+   and reattach, and B.C3 viewer closure with both roles still running. The
+   named automated guards are
+   `TestAttachServerAdmitsSameUIDAfterApplyingSizeAndRoutesFramesInOrder` for
+   initial-size-before-admission ordering,
+   `TestRoleTransportPreservesVerbatimOutputAndReturnsExactFinalCounters` for
+   verbatim transport,
+   `TestIntegrationDetachedRoleAttachReleasesOnSignalAndReadmits` for
+   single-viewer refusal and signal-driven readmission, and
+   `TestAttachServerReleasesQuietViewerOnEOFAndAdmitsReplacement` for clean-EOF
+   readmission. A clean viewer disconnect means closing the viewer's terminal
+   window or tab, or otherwise closing its PTY at the terminal boundary; typed
+   `Ctrl-C` reaches the harness and can interrupt it.
+3. **Exact SIGWINCH frame emission and TIOCSWINSZ application** — these are
+   automated properties, not live result-block observations. Their named
+   guards are
+   `TestViewerResizeEmitsObservedWindowSizeAsOneSerializedControlFrame` and
+   `TestTerminalConcurrentResizeUsesIndependentExactValues`.
+4. **handled/ignored/blocked signal and terminal restoration** — these are
+   automated properties, not live result-block observations. The named guards
+   are `TestIntegrationDetachedRoleAttachReleasesOnSignalAndReadmits` for
+   handled `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` plus restoration and
+   readmission; `TestSignalProviderSubscribesOnlyObservedOrdinaryUnblockedCandidates`
+   for inherited ignored and blocked signals;
+   `TestRoleClientStartupAndRestorationAreOneTotalOrder` for terminal-mode
+   ordering and exactly-once restoration; and
+   `TestIntegrationRoleAttachNeverMutatesParentDescriptorFlagsAcrossStopAndKill`
+   for the `SIGSTOP` and `SIGKILL` exclusions.
+5. **Built-artifact executable smoke** — `.github/workflows/release.yml` runs
+   the exact Darwin arm64 and amd64 binaries produced in `dist/` by the release
+   build, requires both to report the expected release version, and completes
+   that smoke before `Publish (undraft) release`. The §15.9 metadata obligation
+   is sourced by the `go.mod` pin of `golang.org/x/sys v0.47.0`; the
+   `hack/release-verify.sh` Task 8 assertion fails unless `go version -m` on the
+   candidate records that dependency and version.
+6. **Archive-license contents** — `.goreleaser.yaml` declares
+   `LICENSES/golang.org/x/sys/LICENSE` and the other required license materials
+   in `archives.files`, which includes them in every Darwin archive before the
+   draft release can be published.
 
 ## Evidence
 
