@@ -28,6 +28,10 @@ func shimSetupError(stderr io.Writer, operation string, err error) int {
 }
 
 func shimLaunchError(stderr io.Writer, sessionName, role string, err error) int {
+	var amqInit *fleet.AMQInitError
+	if errors.As(err, &amqInit) {
+		return exitUnclassified
+	}
 	if code, handled := shimDetachedStartError(stderr, err); handled {
 		return code
 	}

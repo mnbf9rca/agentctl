@@ -1323,6 +1323,7 @@ func (f *integrationFixture) shimStack(t *testing.T) (*shim.Namespace, *fleet.Sh
 
 func (f *integrationFixture) shimLaunchDependencies() fleet.ShimLaunchDependencies {
 	return fleet.ShimLaunchDependencies{
+		Runner:   f.runner,
 		LookPath: execLookPathIntegration,
 		Executable: func() (string, error) {
 			return f.agentctlPath, nil

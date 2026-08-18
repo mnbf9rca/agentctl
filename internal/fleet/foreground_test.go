@@ -14,6 +14,7 @@ import (
 	"github.com/mnbf9rca/agentctl/internal/config"
 	"github.com/mnbf9rca/agentctl/internal/preflight"
 	"github.com/mnbf9rca/agentctl/internal/shim"
+	"github.com/mnbf9rca/agentctl/internal/tmuxx"
 )
 
 func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t *testing.T) {
@@ -48,11 +49,13 @@ func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			events := &foregroundEvents{}
+			commandRunner := tmuxx.NewFakeRunner()
 			records := &fakeForegroundRecords{events: events, existing: test.existing}
 			server := &fakeForegroundServer{events: events, release: make(chan struct{})}
 			lifecycle := fakeForegroundLifecycle{events: events}
 			inspector := fakeForegroundInspector{events: events, observation: ShimRoleObservation{Outcome: shim.OutcomeMissing}}
 			runner := NewShimForegroundRunner(server, lifecycle, records, inspector, ShimLaunchDependencies{
+				Runner:     commandRunner,
 				LookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
 				Executable: func() (string, error) { return "/bin/agentctl", nil },
 				Now:        time.Now, Sleep: func(time.Duration) {},
@@ -83,6 +86,9 @@ func TestShimForegroundRunnerCreatesOrExtendsFleetOnlyAtOwnedReadinessBoundary(t
 			}
 			if got := records.current.Presentation; got != test.wantPresentation {
 				t.Fatalf("presentation = %q, want %q", got, test.wantPresentation)
+			}
+			if len(commandRunner.Calls) != 0 {
+				t.Fatalf("foreground external calls = %#v, want no launch-time AMQ init", commandRunner.Calls)
 			}
 		})
 	}

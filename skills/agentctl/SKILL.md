@@ -60,6 +60,8 @@ refusal creates the runtime root, state root, or `sessions/` entry. See
 remains attached through child exit. `launch --from-template FILE` supplies
 fleet shape from strict JSON. Passing neither `--detached` nor `--tmux` launches detached;
 a template may select `presentation`, and an explicit flag overrides it.
+Before starting roles, `launch` checks AMQ mailbox-directory presence for every declared role and
+runs `amq init` if any are missing; init failure refuses the launch with AMQ's own error text.
 
 ### 2.1 Author a launch template when the operator asks
 
@@ -110,9 +112,10 @@ status or control.
 record; every state that may retain a child refuses. `attach ROLE` streams a detached role directly, with one viewer and no output replay. Bare `attach` remains the fleet-level tmux presentation route; if no presentation is observed it lists the direct role commands and never creates a presentation.
 
 Only the explicit `attach ROLE` terminal stream carries operator keystrokes;
-control operations have no arbitrary free-text path. agentctl has no AMQ-state
-access, no agent-initiated per-role restart, and no machine-state inference. Report a
-missing sibling to the operator rather than trying to repair it.
+control operations have no arbitrary free-text path. Beyond that launch-time
+mailbox check/init, agentctl has no other AMQ-state access, no agent-initiated
+per-role restart, and no machine-state inference. Report a missing sibling to
+the operator rather than trying to repair it.
 
 ## 7. Branch on exit codes, not prose
 
