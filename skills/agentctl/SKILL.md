@@ -3,7 +3,7 @@ name: agentctl
 description: Use when operating an agentctl fleet — checking runtime status, clearing or compacting a role's context, or terminating a managed session. Read this before issuing any agentctl command.
 compatibility: Requires the agentctl binary on PATH. Runtime status, control, and detached-role attach work without tmux.
 metadata:
-  version: "0.5.1"
+  version: "0.5.2"
 ---
 
 # Driving agentctl
