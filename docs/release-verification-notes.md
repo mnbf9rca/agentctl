@@ -36,6 +36,28 @@ part of verification the suite is structurally unable to perform.
 
 ## Results history
 
+### 2026-08-18
+
+- agentctl: `agentctl cb561b2`
+- release source version: `0.5.1`
+- tmux: `tmux 3.7b`
+- Claude Code: `2.1.234 (Claude Code)`
+- codex-cli: `codex-cli 0.147.0`
+- Mode: `verify-live`; harness: `both`
+- Artifact: `/tmp/agentctl-release-verify.VHVuki/verify-live`
+- Part A: PASS — automated probes and isolation checks completed
+- Part B: PASS — operator confirmed live surfaces, fresh replacement, and viewer closure at checkpoints B.C1-B.C3; script observed runtime-record relaunch and both roles running after viewer close
+- Part B session: `relverify_vhvuki`
+- Part B AMQ mode: existing (pre-existing .amqrc; verifier removed no AMQ path)
+- Probes: 6 completed, no surviving throwaway server
+- Checkpoint B.C1 live Claude role a and Codex role b surfaces: operator confirmed: y
+- Checkpoint B.C2 fresh replacement Claude role a surface: PASS (old child absent; replacement runtime identities observed; Claude role a viewer reattached); operator confirmed: y
+- Checkpoint B.C3 role viewer terminals closed: operator confirmed: y; script observed both roles still running
+- Teardown status: exit 3 (detached durable fleet absent)
+- Teardown check: PASS
+- Issue #163 AMQ mailbox provisioning: agent live verification covered fresh three-role launch, crash/relaunch, read-only project, and foreground `run` scenarios with installed `amq 0.63.3`; evidence: AMQ thread `design/issue-163`, message `e6bd4ae3`
+- Release-relevant change: `launch` provisions declared AMQ mailboxes with `amq init` before role startup; nonzero init refuses launch with AMQ stderr; `run` is unchanged
+
 ### 2026-08-17
 
 - agentctl: `agentctl c853520`
