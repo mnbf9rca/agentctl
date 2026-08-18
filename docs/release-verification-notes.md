@@ -39,7 +39,7 @@ part of verification the suite is structurally unable to perform.
 ### 2026-08-18
 
 - agentctl: `agentctl cb561b2`
-- release source version: `0.5.1`
+- release source version: `0.5.2`
 - tmux: `tmux 3.7b`
 - Claude Code: `2.1.234 (Claude Code)`
 - codex-cli: `codex-cli 0.147.0`
