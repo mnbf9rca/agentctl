@@ -2271,7 +2271,7 @@ facts. It never reports harness execution from a PTY write. `attach` first prove
 durable fleet configuration, then requires an exactly observed tmux presentation by name and attaches only its typed
 session ID. It never treats a same-named presentation as fleet identity. Without a presentation:
 
-The exact literal is §15.8's `attach-no-presentation` row, which is one of the three multi-line templates: the refusal
+The exact literal is §15.8's `attach-no-presentation` row, one of that section's named multi-line templates: the refusal
 line followed by one `  agentctl attach --session SESSION ROLE` line per roster role. It is not paraphrased here.
 
 ### 15.8 Shim-plane exit map
@@ -2281,6 +2281,8 @@ uppercase words are typed substitutions, not discretionary prose. `SESSION`, `RO
 `CAUSE`, `CLEANUP_CAUSE`, `RULE`, `FIELD`, `OPERATION`, and `OUTCOME` use Go `%q`. PIDs, byte counts, status/version
 integers, and roster counts are unsigned decimal. `OP`, `ROOT_KIND`, `STATE`, `OBSERVATION`, `SIGNAL`, `TYPE`,
 `EXPECTED_TYPE`, `REMAINING`, `PHASE`, and boolean literals are closed canonical tokens rendered without quotes.
+`REOBSERVATION` is not a closed token: it is an exact structured substitution rendering either `observation-failed` or
+`present: [PRESENT]; absent: [ABSENT]`, whose bracketed handle lists §15.12.5 fixes in declaration order, empty rendering as `[]`.
 `SIGNAL` renders as the canonical name from `golang.org/x/sys/unix.SignalName` — `SIGINT`, `SIGTERM`, `SIGHUP`,
 `SIGQUIT`, `SIGKILL`, and so on — never a number, never a lowercase description like `interrupt` (which is what
 `Signal.String()` returns, and is why that function is not used), and never a `signal 2` form. The mapping source is
@@ -2301,16 +2303,22 @@ after partial progress — three distinct causes of one permitted shape, none di
 §15.11.7 never writes descriptor 2 itself: it writes a proved-identical private descriptor when, and only when, it has
 proved by `fstat` that fd 2 names the same terminal, and otherwise fd 2's destination through a duplicate floored above
 2 — the destination is `stderr`'s in both cases, the descriptor is not, and that is stated here rather than left as an
-implied equivalence. No other section overrides any of the four. Three rows are explicitly multi-line and
+implied equivalence. No other section overrides any of the four. Five rows are explicitly multi-line and
 their additional lines are part of the selected template rather than an append: `launch-complete-detached` and
-`launch-complete-tmux` each carry exactly one hint line, and `attach-no-presentation` carries one line per roster role.
+`launch-complete-tmux` each carry one hint line, `attach-no-presentation` carries one line per roster role, and
+`amq-session-unowned` and `amq-session-shape-conflict` each carry their facts line followed by one line per admissible
+remedy, whose set and exact text §15.12.5 fixes. §15.12's success claim is **not** a row
+of its own and is never emitted before an outcome is known: the closed sentence of §15.12.1 is a defined final line of
+`launch-complete-detached` and `launch-complete-tmux`, emitted only when that success row is
+selected. `run` makes no such claim, because §15.12 does not apply to it. That line is the single exception to the `agentctl: ` prefix rule — it is the operator-facing claim itself and
+is rendered verbatim, unprefixed — and it is stated here rather than left to inference.
 No other row may emit more than one line. `status` table and JSON documents are the
 sole successful status output and therefore add no diagnostic line.
 
 | Typed outcome | Exit | Exact factual message template |
 |---|---:|---|
-| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE` |
-| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION` |
+| `launch-complete-detached` | 0 | line 1 `agentctl: launched session SESSION detached; N roles are ready`; line 2 `agentctl: attach a role with: agentctl attach --session SESSION ROLE`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
+| `launch-complete-tmux` | 0 | line 1 `agentctl: launched session SESSION; N roles are ready`; line 2 `agentctl: attach the fleet with: agentctl attach --session SESSION`; line 3 the §15.12.1 closed sentence, verbatim and unprefixed |
 | `relaunch-complete` | 0 | `agentctl: relaunched role ROLE in session SESSION; the shim is ready` |
 | `kill-complete` | 0 | `agentctl: killed session SESSION; every recorded child was observed absent` |
 | `run-child-exited` | 0 | `agentctl: foreground role ROLE in session SESSION exited with status 0` |
@@ -2338,6 +2346,14 @@ sole successful status output and therefore add no diagnostic line.
 | `role-stale-when-required` | 4 | `agentctl: role ROLE in session SESSION has stale child PID CHILD after kill(CHILD, 0) returned ESRCH (stale-record)` |
 | `observed-self-target` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; target shim PID SHIM is an ancestor of caller PID CALLER (observed-self-target)` |
 | `invalid-record` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; durable record RECORD_PATH is invalid: CAUSE (invalid-record)` |
+| `amq-base-absent` | 5 | `agentctl: refusing to launch session SESSION; ROOT is not an AMQ delivery root; create it with: amq setup; no role was started (amq-base-absent)` |
+| `amq-session-recorded-absent` | 5 | `agentctl: refusing to launch session SESSION; a durable fleet record binds it but no AMQ session folder exists at PATH; no role was started (amq-session-recorded-absent)` |
+| `amq-session-unowned` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH is not provably this fleet's: CAUSE; no role was started (amq-session-unowned)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
+| `amq-session-shape-conflict` | 5 | line 1 `agentctl: refusing to launch session SESSION; the AMQ session folder at PATH has no mailbox directory for HANDLES; no role was started (amq-session-shape-conflict)`; then the admissible remedy lines of §15.12.5 verbatim, in the order given there |
+| `amq-root-unresolved` | 6 | `agentctl: could not resolve the AMQ base root for DIRECTORY: CAUSE; no role was started (amq-root-unresolved)` |
+| `amq-observation-failed` | 6 | `agentctl: could not observe the AMQ session list at ROOT: CAUSE; no role was started (amq-observation-failed)` |
+| `amq-session-create-failed` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited STATUS; post-state observed: REOBSERVATION; no role was started (amq-session-create-failed)` |
+| `amq-session-incomplete` | 6 | `agentctl: refusing to launch session SESSION; amq init for PATH exited 0 and discovery reports no mailbox directory for HANDLES; no role was started (amq-session-incomplete)` |
 | `orphan` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and recorded child PID CHILD was present with a matching start token (orphan)` |
 | `indeterminate-child-starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM was absent and the durable record is child-starting; independently prove child absence, then remove RECORD_PATH (indeterminate-child-starting)` |
 | `starting` | 5 | `agentctl: refusing to OP role ROLE in session SESSION; shim PID SHIM holds the claim and the durable record is STATE (starting)` |
@@ -3329,6 +3345,28 @@ repository carries them; promotion must not omit either.
    leave no shim record, are neither recognized nor migrated, and should be
    stopped with the binary that started them.
 
+
+### 15.12 AMQ mailboxes for a declared fleet
+
+Before `launch` writes the durable fleet record or starts any role, it checks
+for a mailbox directory at `<base>/.agent-mail/<session>/agents/<role>` for
+every declared role. If every directory is present, launch proceeds without an
+AMQ call.
+
+If any declared mailbox directory is absent, launch runs exactly one typed
+external command, without a shell:
+
+```
+amq init --root <base>/.agent-mail/<session> --agents <declared-role-list>
+```
+
+The role list preserves declaration order and is comma-separated. Exit status
+zero permits launch to proceed. A nonzero status refuses launch before the fleet
+record or any role is created; AMQ's stderr is passed through verbatim, with no
+agentctl interpretation, classification, appended diagnosis, or retry.
+
+This is launch-only setup. It adds no flag, schema member, exit code, success
+claim, or compatibility premise, and does not change foreground `run`.
 
 ## 16. Embedded skill installation
 

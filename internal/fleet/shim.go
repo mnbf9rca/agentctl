@@ -58,8 +58,9 @@ type ShimRoleArtifactInspector interface {
 	InspectArtifacts(context.Context, string, string) (shim.RoleArtifacts, error)
 }
 
-// ShimLaunchDependencies supplies only non-mutating system seams.
+// ShimLaunchDependencies supplies launcher system seams.
 type ShimLaunchDependencies struct {
+	Runner            tmuxx.Runner
 	LookPath          preflight.LookPathFunc
 	Executable        preflight.ExecutableFunc
 	Getwd             func() (string, error)
@@ -74,6 +75,7 @@ type ShimLaunchDependencies struct {
 
 // ShimLauncher is the runtime-backed fleet launcher used by the public CLI.
 type ShimLauncher struct {
+	runner            tmuxx.Runner
 	presentation      ShimPresentation
 	lifecycle         ShimLifecycle
 	records           ShimFleetRecords
@@ -218,6 +220,15 @@ func (e *ShimLaunchRollbackError) Error() string {
 
 func (e *ShimLaunchRollbackError) Unwrap() error { return e.Cause }
 
+// AMQInitError identifies a failed amq init whose stderr was already written
+// directly by the child process.
+type AMQInitError struct {
+	Cause error
+}
+
+func (e *AMQInitError) Error() string { return e.Cause.Error() }
+func (e *AMQInitError) Unwrap() error { return e.Cause }
+
 // NewShimLauncher constructs the runtime-backed fleet launcher.
 func NewShimLauncher(presentation ShimPresentation, lifecycle ShimLifecycle, records ShimFleetRecords, dependencies ShimLaunchDependencies) ShimLauncher {
 	if dependencies.LookPath == nil {
@@ -249,6 +260,7 @@ func NewShimLauncher(presentation ShimPresentation, lifecycle ShimLifecycle, rec
 	}
 	return ShimLauncher{
 		presentation: presentation, lifecycle: lifecycle, records: records,
+		runner:   dependencies.Runner,
 		lookPath: dependencies.LookPath, executable: dependencies.Executable,
 		getwd: dependencies.Getwd, stat: dependencies.Stat,
 		now: dependencies.Now, sleep: dependencies.Sleep,
@@ -276,6 +288,9 @@ func (l ShimLauncher) Launch(ctx context.Context, session string, fleetConfig co
 	}
 	directoryName, err := l.resolveDirectory(directory)
 	if err != nil {
+		return ShimLaunchResult{}, err
+	}
+	if err := l.ensureAMQMailboxes(ctx, session, directoryName, fleetConfig); err != nil {
 		return ShimLaunchResult{}, err
 	}
 	record, err := NewShimFleetRecord(session, directoryName, presentation, fleetConfig)
@@ -318,6 +333,32 @@ func (l ShimLauncher) Launch(ctx context.Context, session string, fleetConfig co
 	return ShimLaunchResult{
 		Session: tmuxx.Session{ID: created.SessionID, Name: session}, Directory: directoryName, TotalRoles: len(fleetConfig.Roles),
 	}, nil
+}
+
+func (l ShimLauncher) ensureAMQMailboxes(ctx context.Context, session, directory string, fleetConfig config.FleetConfig) error {
+	if l.runner == nil {
+		return nil
+	}
+	root := filepath.Join(directory, ".agent-mail", session)
+	for _, role := range fleetConfig.Roles {
+		info, err := l.stat(filepath.Join(root, "agents", role.Name))
+		if err == nil && info.IsDir() {
+			continue
+		}
+		roles := make([]string, len(fleetConfig.Roles))
+		for index, declared := range fleetConfig.Roles {
+			roles[index] = declared.Name
+		}
+		if err := l.runner.RunInteractive(ctx, "amq", "init", "--root", root, "--agents", strings.Join(roles, ",")); err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				return &AMQInitError{Cause: err}
+			}
+			return err
+		}
+		return nil
+	}
+	return nil
 }
 
 func (l ShimLauncher) launchDetached(ctx context.Context, executable string, record ShimFleetRecord) (ShimLaunchResult, error) {

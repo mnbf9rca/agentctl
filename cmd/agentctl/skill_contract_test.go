@@ -664,6 +664,26 @@ func TestSkillDescribesDetachedDefaultAndBothAttachForms(t *testing.T) {
 	}
 }
 
+func TestSkillDescribesLaunchAMQMailboxSetup(t *testing.T) {
+	raw, err := skills.Tree.ReadFile(skills.Root + "/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"`launch` checks AMQ mailbox-directory presence for every declared role",
+		"runs `amq init` if any are missing",
+		"init failure refuses the launch with AMQ's own error text",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SKILL.md is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "agentctl has no AMQ-state access") {
+		t.Fatal("SKILL.md still makes the obsolete absolute no-AMQ-state-access claim")
+	}
+}
+
 func TestMetadataVersionParsingRejectsInvalidFrontmatter(t *testing.T) {
 	valid := func(body string) []string { return strings.Split(body, "\n") }
 	for name, lines := range map[string][]string{

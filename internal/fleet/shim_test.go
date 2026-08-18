@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -613,6 +614,148 @@ func TestShimLauncherRecordsWholeFleetBeforeStartingShimWindows(t *testing.T) {
 	}
 	if got := events.snapshot(); !reflect.DeepEqual(got, wantEvents) {
 		t.Fatalf("launch events = %#v, want %#v", got, wantEvents)
+	}
+}
+
+func TestShimLauncherInitializesMissingAMQMailboxesBeforeFleetRecord(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{})
+	records := &fakeShimFleetRecords{events: events}
+	presentation := &fakeShimPresentation{
+		events:  events,
+		session: tmuxx.CreatedSession{SessionID: "$4", PanePID: 4321},
+		windows: []tmuxx.CreatedWindow{{PanePID: 5432}},
+	}
+	lifecycle := &fakeShimLifecycle{events: events, observe: []shim.Response{
+		runningShimResponse(4321, 7001),
+		runningShimResponse(5432, 7002),
+	}}
+	launcher := NewShimLauncher(presentation, lifecycle, records, ShimLaunchDependencies{
+		Runner:     &shimEventRunner{events: events, delegate: runner},
+		LookPath:   func(name string) (string, error) { return "/tools/" + name, nil },
+		Executable: func() (string, error) { return "/current-agentctl", nil },
+		Getwd:      func() (string, error) { return "/repo", nil },
+		Stat: func(path string) (os.FileInfo, error) {
+			if strings.Contains(path, "/.agent-mail/fleet/agents/") {
+				return nil, os.ErrNotExist
+			}
+			return testFileInfo{mode: os.ModeDir | 0o755}, nil
+		},
+	})
+
+	if _, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil); err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	wantCalls := []tmuxx.Call{{
+		Executable: "amq",
+		Args:       []string{"init", "--root", "/repo/.agent-mail/fleet", "--agents", "planner,coder"},
+	}}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("AMQ calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+	wantPrefix := []string{
+		"run:amq:init,--root,/repo/.agent-mail/fleet,--agents,planner,coder",
+		"record:fleet:planner,coder",
+	}
+	if got := events.snapshot(); len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("launch events = %#v, want prefix %#v", got, wantPrefix)
+	}
+}
+
+func TestShimLauncherSkipsAMQInitWhenEveryDeclaredMailboxExists(t *testing.T) {
+	t.Parallel()
+
+	events := &shimEventLog{}
+	runner := tmuxx.NewFakeRunner()
+	launcher := NewShimLauncher(
+		&fakeShimPresentation{
+			events:  events,
+			session: tmuxx.CreatedSession{SessionID: "$4", PanePID: 4321},
+			windows: []tmuxx.CreatedWindow{{PanePID: 5432}},
+		},
+		&fakeShimLifecycle{events: events, observe: []shim.Response{
+			runningShimResponse(4321, 7001),
+			runningShimResponse(5432, 7002),
+		}},
+		&fakeShimFleetRecords{events: events},
+		ShimLaunchDependencies{
+			Runner:     runner,
+			LookPath:   func(name string) (string, error) { return "/tools/" + name, nil },
+			Executable: func() (string, error) { return "/current-agentctl", nil },
+			Getwd:      func() (string, error) { return "/repo", nil },
+			Stat:       func(string) (os.FileInfo, error) { return testFileInfo{mode: os.ModeDir | 0o755}, nil },
+		},
+	)
+
+	if _, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil); err != nil {
+		t.Fatalf("Launch() error = %v", err)
+	}
+	if len(runner.Calls) != 0 {
+		t.Fatalf("AMQ calls = %#v, want none", runner.Calls)
+	}
+}
+
+func TestShimLauncherRefusesLaunchWhenAMQInitFails(t *testing.T) {
+	t.Parallel()
+
+	wantErr := &exec.ExitError{}
+	events := &shimEventLog{}
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: wantErr})
+	launcher := NewShimLauncher(
+		&fakeShimPresentation{events: events},
+		&fakeShimLifecycle{events: events},
+		&fakeShimFleetRecords{events: events},
+		ShimLaunchDependencies{
+			Runner:     runner,
+			LookPath:   func(name string) (string, error) { return "/tools/" + name, nil },
+			Executable: func() (string, error) { return "/current-agentctl", nil },
+			Getwd:      func() (string, error) { return "/repo", nil },
+			Stat: func(path string) (os.FileInfo, error) {
+				if path == "/repo" {
+					return testFileInfo{mode: os.ModeDir | 0o755}, nil
+				}
+				return nil, os.ErrNotExist
+			},
+		},
+	)
+
+	_, err := launcher.Launch(context.Background(), "fleet", shimTestFleet(), PresentationTmux, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Launch() error = %v, want %v", err, wantErr)
+	}
+	var initErr *AMQInitError
+	if !errors.As(err, &initErr) {
+		t.Fatalf("Launch() error = %T, want *AMQInitError", err)
+	}
+	if got := events.snapshot(); len(got) != 0 {
+		t.Fatalf("launch events = %#v, want no fleet mutation", got)
+	}
+	wantCalls := []tmuxx.Call{{
+		Executable: "amq",
+		Args:       []string{"init", "--root", "/repo/.agent-mail/fleet", "--agents", "planner,coder"},
+	}}
+	if !reflect.DeepEqual(runner.Calls, wantCalls) {
+		t.Fatalf("AMQ calls = %#v, want %#v", runner.Calls, wantCalls)
+	}
+}
+
+func TestEnsureAMQMailboxesDoesNotMarkNonExitRunnerFailuresAsReported(t *testing.T) {
+	t.Parallel()
+
+	runner := tmuxx.NewFakeRunner(tmuxx.Response{Err: context.Canceled})
+	launcher := ShimLauncher{
+		runner: runner,
+		stat:   func(string) (os.FileInfo, error) { return nil, os.ErrNotExist },
+	}
+	err := launcher.ensureAMQMailboxes(context.Background(), "fleet", "/repo", shimTestFleet())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ensureAMQMailboxes() error = %v, want context.Canceled", err)
+	}
+	var initErr *AMQInitError
+	if errors.As(err, &initErr) {
+		t.Fatalf("ensureAMQMailboxes() error = %T, must not claim unreported cancellation stderr", err)
 	}
 }
 
@@ -1653,6 +1796,21 @@ func shimLaunchTestDependencies(events *shimEventLog) ShimLaunchDependencies {
 type shimEventLog struct {
 	mu     sync.Mutex
 	events []string
+}
+
+type shimEventRunner struct {
+	events   *shimEventLog
+	delegate tmuxx.Runner
+}
+
+func (r *shimEventRunner) Output(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	r.events.add("output:" + executable + ":" + strings.Join(args, ","))
+	return r.delegate.Output(ctx, executable, args...)
+}
+
+func (r *shimEventRunner) RunInteractive(ctx context.Context, executable string, args ...string) error {
+	r.events.add("run:" + executable + ":" + strings.Join(args, ","))
+	return r.delegate.RunInteractive(ctx, executable, args...)
 }
 
 func (l *shimEventLog) add(event string) {

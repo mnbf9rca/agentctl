@@ -37,7 +37,7 @@ func buildShimDependencies(runner tmuxx.Runner, lookupEnv session.LookupEnv, pre
 	shimClient := shim.NewClient(namespace)
 	inspector := fleet.NewRuntimeShimRoleInspector(namespace, shimClient)
 	rootGuard := shim.NewStateRootGuard(namespace)
-	launchDependencies := fleet.ShimLaunchDependencies{ArtifactInspector: inspector}
+	launchDependencies := fleet.ShimLaunchDependencies{Runner: runner, ArtifactInspector: inspector}
 	server := shim.NewServer(namespace)
 	foreground := productionForegroundExecutor{
 		runner: fleet.NewShimForegroundRunner(server, shimClient, records, inspector, launchDependencies),
