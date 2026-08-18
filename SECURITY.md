@@ -41,10 +41,14 @@
 9. **Presentation cleanup can race tmux.** Only an exact observation that a presentation is gone permits removing the fleet record. "Gone" and "removed" remain different facts.
 10. **Fleets without a shim record are not adopted.** A fleet started by the older tmux-metadata lifecycle leaves nothing agentctl can read, so it is neither recognized nor migrated; stop it with the binary that started it. Compatibility is decided by the recorded schema and the wire protocol version, never by binary identity — a different build speaking the same versions operates the same fleet normally.
 11. **Direct viewing is bounded, not replayable or lossless at every viewer speed.** Detached shims discard output while no viewer is present; a viewer that cannot keep up is evicted rather than throttling the role, and output is not replayed on re-attach (spec §15.11).
+12. **AMQ mailbox-directory presence is compatibility evidence, not ownership.** Launch treats an existing directory for every declared role as sufficient setup and otherwise delegates creation to one `amq init` invocation. It does not authenticate a pre-existing AMQ session or inspect its configuration; same-user processes remain able to create or alter that state (spec §15.12).
 
 ## File and socket permissions
 
-agentctl creates two private trees and writes nothing inside application repositories.
+agentctl creates two private state trees. Launch may also ask AMQ, through a
+typed argv call, to initialize `<project>/.agent-mail/<session>` when any
+declared role mailbox is missing. AMQ owns the contents and permissions of that
+tree; agentctl does not create, repair, or remove its files directly.
 
 Volatile artifacts — the per-role lifetime lock, control socket, and direct-attach socket — are mode `0600` below a descriptor-verified mode `0700` runtime directory. The attach peer's uid is kernel-observed and must match the shim's; this is same-user accident prevention, not authentication. Durable records — the fleet roster and per-role child records — are mode `0600` below a descriptor-verified, owner-only mode `0700` state directory. Both roots are validated before use, whether they come from the defaults or from the declared overrides, and an unsafe owner, mode, type, symlink, or substituted descriptor is refused rather than repaired.
 

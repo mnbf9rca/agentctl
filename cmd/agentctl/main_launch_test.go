@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/exec"
 	"reflect"
 	"testing"
 
@@ -90,6 +91,36 @@ func TestRunLaunchMapsClosedPreownershipAndCommitOutcomes(t *testing.T) {
 				t.Fatalf("code=%d stderr=%q, want %d %q", code, stderr.String(), test.code, test.want)
 			}
 		})
+	}
+}
+
+func TestRunLaunchDoesNotAppendDiagnosisAfterAMQReportsNonzeroExit(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	exitErr := &exec.ExitError{}
+	code := runWithDependencies(
+		context.Background(),
+		[]string{"launch", "--session", "fleet", "--roles", "planner:claude"},
+		&bytes.Buffer{},
+		&stderr,
+		dependencies{launcher: &launcherStub{err: &fleet.AMQInitError{Cause: exitErr}}},
+	)
+	if code != exitUnclassified || stderr.String() != "" {
+		t.Fatalf("code=%d stderr=%q, want %d and verbatim AMQ-only stderr", code, stderr.String(), exitUnclassified)
+	}
+
+	stderr.Reset()
+	code = runWithDependencies(
+		context.Background(),
+		[]string{"launch", "--session", "fleet", "--roles", "planner:claude"},
+		&bytes.Buffer{},
+		&stderr,
+		dependencies{launcher: &launcherStub{err: exitErr}},
+	)
+	want := "agentctl: launch failed for session \"fleet\": \"<nil>\" (unclassified)\n"
+	if code != exitUnclassified || stderr.String() != want {
+		t.Fatalf("unrelated exit code=%d stderr=%q, want %d and %q", code, stderr.String(), exitUnclassified, want)
 	}
 }
 

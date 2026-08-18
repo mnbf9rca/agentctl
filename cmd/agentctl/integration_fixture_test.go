@@ -304,8 +304,23 @@ func integrationTMUXMain() {
 
 func integrationAMQMain() {
 	arguments := append([]string(nil), os.Args[1:]...)
+	if len(arguments) == 5 && arguments[0] == "init" && arguments[1] == "--root" && arguments[3] == "--agents" {
+		root := arguments[2]
+		roles := strings.Split(arguments[4], ",")
+		for _, role := range roles {
+			if role == "" {
+				fmt.Fprintln(os.Stderr, "integration amq stub: empty init role")
+				os.Exit(80)
+			}
+			if err := os.MkdirAll(filepath.Join(root, "agents", role), 0o700); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(80)
+			}
+		}
+		return
+	}
 	if len(arguments) < 2 || arguments[0] != "coop" || arguments[1] != "exec" {
-		fmt.Fprintln(os.Stderr, "integration amq stub: expected coop exec")
+		fmt.Fprintln(os.Stderr, "integration amq stub: expected init or coop exec")
 		os.Exit(81)
 	}
 	arguments = arguments[2:]
